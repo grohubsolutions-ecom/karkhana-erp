@@ -7,10 +7,12 @@ import "./hub-mobile.css";
 
 /* TWO SHAPES, ONE HUB.
  *
- * Desktop (768px and up): the page has the whole width. The menu is hidden
- * behind a small tab on the left edge and slides in over the page when that
- * tab is pressed; choosing a page, Esc, or a click outside puts it away again.
- * The page scrolls in its own panel, as before.
+ * Computer (1024px and up): exactly as before — the menu down the left and
+ * the page scrolling beside it.
+ *
+ * Tablet, or a phone turned sideways (768–1023px): the same layout, but the
+ * menu hides behind a small tab on the left edge and slides in over the page
+ * when the tab is pressed; choosing a page, Esc, or a tap outside puts it away.
  *
  * Phone: the page itself scrolls. The old phone layout was the desktop frame —
  * a box fixed to the screen height with its own scrolling panel inside. iOS
@@ -29,8 +31,9 @@ export default function OnlineLayout({ children }: { children: React.ReactNode }
     return () => html.classList.remove("hub");
   }, []);
 
-  /* The desktop menu: hidden until asked for, and hidden again as soon as a
-     page is chosen — the reason to open it is to go somewhere. */
+  /* The tablet menu: hidden until asked for, and hidden again as soon as a
+     page is chosen — the reason to open it is to go somewhere. (On a computer
+     the menu is always showing and this state is not used.) */
   const [menu, setMenu] = useState(false);
   const path = usePathname();
   useEffect(() => { setMenu(false); }, [path]);
@@ -47,8 +50,8 @@ export default function OnlineLayout({ children }: { children: React.ReactNode }
       <OnlineSidebar open={menu} onClose={() => setMenu(false)} />
       <div className="flex min-w-0 flex-1 flex-col">
         <HubTopBar />
-        {/* md:pl-6 keeps the page's own left edge clear of the menu tab. */}
-        <main className="hub-main min-w-0 flex-1 pb-[calc(76px+env(safe-area-inset-bottom))] md:overflow-y-auto md:overflow-x-hidden md:pb-0 md:pl-6">
+        {/* md:pl-6 keeps the page clear of the tablet's menu tab; a computer has no tab. */}
+        <main className="hub-main min-w-0 flex-1 pb-[calc(76px+env(safe-area-inset-bottom))] md:overflow-y-auto md:overflow-x-hidden md:pb-0 md:pl-6 lg:pl-0">
           <div className="hub-clip">{children}</div>
         </main>
       </div>

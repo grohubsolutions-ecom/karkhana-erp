@@ -20,6 +20,19 @@ export function useIsPhone() {
   return useSyncExternalStore(subscribe, () => window.matchMedia(PHONE).matches, () => false);
 }
 
+/* True for a tablet, or a phone turned sideways: wide enough for the desktop
+   layout, too narrow to give a permanent 248px to the menu. The Hub menu hides
+   behind a tab there; on a real computer (1024px and up) it stays put. */
+const HANDHELD_WIDE = "(min-width: 768px) and (max-width: 1023.98px)";
+function subscribeWide(cb: () => void) {
+  const m = window.matchMedia(HANDHELD_WIDE);
+  m.addEventListener("change", cb);
+  return () => m.removeEventListener("change", cb);
+}
+export function useIsHandheldWide() {
+  return useSyncExternalStore(subscribeWide, () => window.matchMedia(HANDHELD_WIDE).matches, () => false);
+}
+
 /* THE DATE RANGE.
    Desktop keeps the row of presets exactly as before. On a phone that row was
    770px wide inside a 390px screen and scrolled sideways under the thumb — a
