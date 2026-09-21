@@ -4,9 +4,8 @@ import { useLiveTables } from "@/lib/useLiveTables";
 import { ShoppingBag, Clock, Undo2, Wallet, TrendingUp, Truck, RefreshCw, MapPin } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import RangeBar from "@/components/RangeBar";
-import { rangeDates, num, rs } from "@/lib/dateRange";
+import { rangeDates, rs } from "@/lib/dateRange";
 
-type Row = Record<string, unknown>;
 const STORES = [
   { code: "ALL", label: "All stores", color: "#141414" },
   { code: "LM", label: "Little Minors", color: "#A6C0E6" },
@@ -14,7 +13,6 @@ const STORES = [
   { code: "TRZ", label: "Trenzee", color: "#D2B9EA" },
 ];
 const PIE = ["#A6C0E6", "#D2B9EA", "#EBA98F", "#EFD0A6", "#EDA6D0", "#B4ABA0"];
-const isCanc = (s: unknown) => /cancel|void/i.test(String(s || ""));
 
 function Pie({ data }: { data: { label: string; value: number }[] }) {
   const total = data.reduce((a, d) => a + d.value, 0);
@@ -57,9 +55,52 @@ type RateRow = { month_label: string; courier: string; returned: number;
                  return_pct: number | null; change_pts: number | null;
                  cod_returned: number | null; is_part_month: boolean };
 
+/* ONE ROW PER STORE, FROM hub_dashboard_breakdown().
+   Every order is in exactly one state — the courier's parcel decides, Shopify
+   only breaks ties — so the columns add up to the total and nothing is counted
+   twice. Money is the order amount throughout. */
+type StoreRow = {
+  store_code: string; is_total: boolean; orders: number;
+  sale_orders: number; sale_value: number;
+  pending_n: number; pending_v: number;
+  dispatched_n: number; dispatched_v: number;
+  transit_n: number; transit_v: number;
+  paid_n: number; paid_v: number;
+  unpaid_n: number; unpaid_v: number;
+  returned_n: number; returned_v: number;
+  cancelled_n: number; cancelled_v: number;
+  delivery_rate: number | null;
+};
+type CourierRow = { courier: string; dispatched: number; delivered: number; returned: number };
+type Breakdown = { stores: StoreRow[]; couriers: CourierRow[]; cities: { label: string; value: number }[] };
+
+/* The ladder, top to bottom. Indent shows what sits inside what:
+   Total sales = Not dispatched + Dispatched, and
+   Dispatched  = In transit + Delivered & paid + Delivered, payment due + Returned.
+   Cancelled sits below the line — it never left the building, and two voided
+   Trenzee test orders (Rs 32,950,200 and Rs 1,049,700) would otherwise make
+   Trenzee a Rs 34M store. */
+const LADDER: {
+  key: string; v: keyof StoreRow; n: keyof StoreRow; label: string; hint?: string;
+  indent: 0 | 1 | 2; strong?: boolean; tone?: "good" | "warn" | "bad" | "muted"; below?: boolean;
+}[] = [
+  { key: "sale",       v: "sale_value",   n: "sale_orders",  label: "Total sales",            hint: "every order except cancelled", indent: 0, strong: true },
+  { key: "pending",    v: "pending_v",    n: "pending_n",    label: "Not dispatched yet",     indent: 1 },
+  { key: "dispatched", v: "dispatched_v", n: "dispatched_n", label: "Dispatched",             hint: "handed to a courier", indent: 1, strong: true },
+  { key: "transit",    v: "transit_v",    n: "transit_n",    label: "In transit",             indent: 2 },
+  { key: "paid",       v: "paid_v",       n: "paid_n",       label: "Delivered & paid",       hint: "customer received it, courier has paid", indent: 2, tone: "good" },
+  { key: "unpaid",     v: "unpaid_v",     n: "unpaid_n",     label: "Delivered, payment due", hint: "customer received it, money not in yet", indent: 2, tone: "warn" },
+  { key: "returned",   v: "returned_v",   n: "returned_n",   label: "Returned",               hint: "parcel came back", indent: 2, tone: "bad" },
+  { key: "cancelled",  v: "cancelled_v",  n: "cancelled_n",  label: "Cancelled",              hint: "never dispatched — not in sales", indent: 0, tone: "muted", below: true },
+];
+const TONE_TXT = {
+  good: "text-success", warn: "text-amber-strong dark:text-amber",
+  bad: "text-red-700 dark:text-salmon", muted: "text-muted dark:text-[#a89f93]",
+} as const;
+const STORE_ORDER = ["LM", "TS", "TRZ"];
+
 export default function HubDashboard() {
-  const [orders, setOrders] = useState<Row[]>([]);
-  const [logi, setLogi] = useState<Row[]>([]);
+  const [breakdown, setBreakdown] = useState<Breakdown | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
   const [rates, setRates] = useState<RateRow[]>([]);
@@ -71,12 +112,14 @@ export default function HubDashboard() {
   const [cf, setCf] = useState(""); const [ct, setCt] = useState("");
   const [summary, setSummary] = useState<DashSummary | null>(null);
 
-  /* The headline numbers come from hub_dashboard_summary(), counted in the
-     database. Rows are still fetched, but ONLY for the pie chart and the
-     per-store bars — never for the totals.
-     PostgREST caps a response at 1,000 rows whatever .limit() asks, so counting
-     the array made "Total orders" read exactly 1,000 on every single range.
-     Third page with this fault: Logistics, Orders, and this one. */
+  /* EVERY FIGURE ON THIS PAGE IS COUNTED IN THE DATABASE.
+     This page used to fetch 1,000 orders and 1,000 parcels and add them up
+     here. PostgREST caps a response at 1,000 rows whatever .limit() asks, so on
+     30 days the by-store panel saw 1,000 of 1,570 orders — LM 609 + TopShop 391
+     made exactly 1,000 and Trenzee disappeared — and "COD receivable" read
+     Rs 16,091 while the database knew Rs 137,392. The parcels were not even
+     filtered by date. Now there are no raw rows at all: two calls, both
+     counted server-side, both limited to hub.dashboard.view. */
   const reqId = useRef(0);
 
   const load = useCallback(async (opts?: { silent?: boolean }) => {
@@ -85,27 +128,18 @@ export default function HubDashboard() {
     if (!opts?.silent) setLoading(true);
     setErr("");
     const [from, to] = rangeDates(preset, cf, ct);
+    const args = { p_from: from, p_to: to, p_store: store === "ALL" ? null : store };
 
-    let oq = supabase.from("online_orders").select("order_number,store_code,order_date,amount,status,city").limit(1000);
-    if (from) oq = oq.gte("order_date", from);
-    if (to) oq = oq.lte("order_date", to);
-    if (store !== "ALL") oq = oq.eq("store_code", store);
-
-    let lq = supabase.from("online_logistics").select("order_number,store_code,courier,delivery_status,cod_amount,cpr_net_amount,payment_status").limit(1000);
-    if (store !== "ALL") lq = lq.eq("store_code", store);
-
-    const [o, l, sum, rt] = await Promise.all([
-      oq, lq,
-      supabase.rpc("hub_dashboard_summary", {
-        p_from: from, p_to: to, p_store: store === "ALL" ? null : store,
-      }),
+    const [sum, br, rt] = await Promise.all([
+      supabase.rpc("hub_dashboard_summary", args),
+      supabase.rpc("hub_dashboard_breakdown", args),
       supabase.rpc("hub_return_rates", { p_months: 3 }),
     ]);
     if (my !== reqId.current) return;          // superseded by a newer request
-    if (o.error) setErr(o.error.message);
-    setOrders((o.data as Row[]) ?? []);
-    setLogi((l.data as Row[]) ?? []);
+    const firstErr = sum.error ?? br.error;
+    if (firstErr) setErr(firstErr.message);
     setSummary((sum.data as DashSummary[])?.[0] ?? null);
+    setBreakdown((br.data as Breakdown) ?? null);
     setRates((rt.data as RateRow[]) ?? []);
     setLoading(false);
   }, [preset, cf, ct, store]);
@@ -120,11 +154,6 @@ export default function HubDashboard() {
   );
 
   const M = useMemo(() => {
-    const logByOrder: Record<string, Row> = {};
-    logi.forEach((l) => { logByOrder[`${l.store_code}|${l.order_number}`] = l; });
-    const key = (o: Row) => `${o.store_code}|${o.order_number}`;
-
-    // counted in the database — never from `orders`, which is capped at 1,000
     const total = Number(summary?.total_orders ?? 0);
     const pending = Number(summary?.pending ?? 0);
     const retCanc = Number(summary?.returned_cancel ?? 0);
@@ -133,42 +162,29 @@ export default function HubDashboard() {
     const totalAmt = Number(summary?.order_value ?? 0);
     const avgAmt = Number(summary?.avg_order ?? 0);
     const deliveryRate = Number(summary?.delivery_rate ?? 0);
+    const received = Number(summary?.cod_received ?? 0);
+    const receivable = Number(summary?.cod_receivable ?? 0);
+    const receivableCount = Number(summary?.receivable_count ?? 0);
 
-    // COD receivables from logistics
-    const paid = logi.filter((l) => l.payment_status === "Paid" || l.payment_status === "Received");
-    const unpaid = logi.filter((l) => !(l.payment_status === "Paid" || l.payment_status === "Received"));
-    const received = paid.reduce((a, l) => a + (num(l.cpr_net_amount) || num(l.cod_amount)), 0);
-    const receivable = unpaid.filter((l) => String(l.delivery_status) === "Delivered").reduce((a, l) => a + num(l.cod_amount), 0);
-
-    // cities
-    const cityCount: Record<string, number> = {};
-    orders.forEach((o) => { const c = String(o.city || "Unknown").trim() || "Unknown"; cityCount[c] = (cityCount[c] || 0) + 1; });
-    const sorted = Object.entries(cityCount).sort((a, b) => b[1] - a[1]);
-    const cities = sorted.slice(0, 5).map(([label, value]) => ({ label, value }));
-    const others = sorted.slice(5).reduce((a, [, c]) => a + c, 0);
-    if (others > 0) cities.push({ label: "Others", value: others });
-
-    // per store
-    const byStore: Record<string, { orders: number; amt: number; delivered: number }> = {};
-    orders.forEach((o) => {
-      const k = String(o.store_code || "—");
-      (byStore[k] ||= { orders: 0, amt: 0, delivered: 0 });
-      byStore[k].orders += 1;
-      /* A cancelled or voided order is still an order, but it is not money.
-         Two orders voided in Shopify — one of them Rs 32,950,200 — were 89%
-         of the Order value card until H257, and this panel was adding them
-         too. The count and the value now answer different questions on
-         purpose, which is why only the value is filtered. */
-      if (!isCanc(o.status)) byStore[k].amt += num(o.amount);
-      if (String(logByOrder[key(o)]?.delivery_status) === "Delivered") byStore[k].delivered += 1;
+    /* Always the three stores in a fixed order, even one with no orders in the
+       dates — a store that silently drops out of the table reads as a store
+       that does not exist, which is exactly what happened to Trenzee. */
+    const got = breakdown?.stores ?? [];
+    const zero = (code: string): StoreRow => ({
+      store_code: code, is_total: code === "ALL", orders: 0, sale_orders: 0, sale_value: 0,
+      pending_n: 0, pending_v: 0, dispatched_n: 0, dispatched_v: 0, transit_n: 0, transit_v: 0,
+      paid_n: 0, paid_v: 0, unpaid_n: 0, unpaid_v: 0, returned_n: 0, returned_v: 0,
+      cancelled_n: 0, cancelled_v: 0, delivery_rate: null,
     });
+    const codes = store === "ALL" ? [...STORE_ORDER, "ALL"] : [store];
+    const storeCols = codes.map((c) => got.find((r) => r.store_code === c) ?? zero(c));
 
-    // courier split
-    const byCourier: Record<string, number> = {};
-    logi.forEach((l) => { const c = String(l.courier || "—"); byCourier[c] = (byCourier[c] || 0) + 1; });
-
-    return { total, pending, retCanc, delivered, transit, totalAmt, avgAmt, deliveryRate, received, receivable, cities, byStore, byCourier };
-  }, [orders, logi]);
+    return {
+      total, pending, retCanc, delivered, transit, totalAmt, avgAmt, deliveryRate,
+      received, receivable, receivableCount, storeCols,
+      cities: breakdown?.cities ?? [], couriers: breakdown?.couriers ?? [],
+    };
+  }, [summary, breakdown, store]);
 
   const pct = (n: number) => (M.total ? Math.round((n / M.total) * 100) : 0);
   /* Return rate per courier, this month against last. The dashboard already
@@ -187,8 +203,6 @@ export default function HubDashboard() {
     { label: "Average order", value: rs(M.avgAmt), sub: "per order", Icon: TrendingUp, bg: "bg-lavender-soft" },
     { label: "Delivery rate", value: `${M.deliveryRate.toFixed(1)}%`, sub: `${M.delivered.toLocaleString()} delivered`, Icon: Truck, bg: "bg-pink-soft" },
   ];
-  const storeKeys = Object.keys(M.byStore);
-  const maxStoreAmt = Math.max(...storeKeys.map((k) => M.byStore[k].amt), 1);
 
   return (
     <div className="px-4 py-6 sm:px-6 md:px-10 md:py-8">
@@ -321,10 +335,12 @@ export default function HubDashboard() {
         <div className="rounded-card border border-line bg-surface p-4 dark:border-white/[0.06] dark:bg-[#201c17]">
           <div className="text-[12px] font-medium text-muted dark:text-[#a89f93]">COD received</div>
           <div className="mt-1 text-[19px] font-extrabold tabular-nums text-success">{loading ? "—" : rs(M.received)}</div>
+          <div className="mt-0.5 text-[11px] text-hint dark:text-[#8a8175]">collected by the courier and paid to you</div>
         </div>
         <div className="rounded-card border border-line bg-surface p-4 dark:border-white/[0.06] dark:bg-[#201c17]">
           <div className="text-[12px] font-medium text-muted dark:text-[#a89f93]">COD receivable (delivered, unpaid)</div>
           <div className="mt-1 text-[19px] font-extrabold tabular-nums text-amber-strong dark:text-amber">{loading ? "—" : rs(M.receivable)}</div>
+          <div className="mt-0.5 text-[11px] text-hint dark:text-[#8a8175]">{loading ? "" : `${M.receivableCount.toLocaleString()} parcels the courier still owes for`}</div>
         </div>
         <div className="rounded-card border border-line bg-surface p-4 dark:border-white/[0.06] dark:bg-[#201c17]">
           <div className="text-[12px] font-medium text-muted dark:text-[#a89f93]">In transit</div>
@@ -332,42 +348,123 @@ export default function HubDashboard() {
         </div>
       </div>
 
-      <div className="mt-5 grid gap-4 lg:grid-cols-2">
+      {/* ── SALES BY STORE ─────────────────────────────────────────────────
+          Stores across, the life of an order down. Read a column top to bottom
+          and it adds up: Total sales splits into not-dispatched and dispatched,
+          and dispatched splits into in transit, delivered & paid, delivered but
+          unpaid, and returned. Cancelled sits under the line because it never
+          left the building.
+          THE COURIER DECIDES, NOT SHOPIFY. 145 of 227 parcels that came back in
+          30 days were then cancelled in Shopify; reading Shopify first would
+          call a return a cancellation. */}
+      <div className="mt-5 rounded-card border border-line bg-surface dark:border-white/[0.06] dark:bg-[#201c17]">
+        <div className="flex flex-wrap items-baseline justify-between gap-2 px-5 pb-2 pt-5">
+          <h3 className="text-[14px] font-bold text-ink dark:text-[#f4f1ea]">Sales by store</h3>
+          <span className="text-[11.5px] text-hint dark:text-[#8a8175]">order value · every column adds up</span>
+        </div>
+        {loading ? (
+          <div className="py-10 text-center text-[13px] text-muted dark:text-[#a89f93]">Loading…</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[640px] text-left text-[13px]">
+              <thead>
+                <tr className="border-b border-line text-[11.5px] uppercase tracking-wide text-muted dark:border-white/[0.06] dark:text-[#a89f93]">
+                  <th className="sticky left-0 z-10 bg-surface px-5 py-2.5 font-semibold dark:bg-[#201c17]" />
+                  {M.storeCols.map((s) => {
+                    const meta = STORES.find((x) => x.code === s.store_code);
+                    return (
+                      <th key={s.store_code} className={`px-4 py-2.5 text-right font-semibold ${s.is_total ? "bg-panel/60 text-ink dark:bg-white/[0.04] dark:text-[#f4f1ea]" : ""}`}>
+                        <span className="inline-flex items-center gap-1.5">
+                          {!s.is_total && <span className="h-2 w-2 rounded-full" style={{ background: meta?.color }} />}
+                          {meta?.label ?? s.store_code}
+                        </span>
+                      </th>
+                    );
+                  })}
+                </tr>
+              </thead>
+              <tbody>
+                {LADDER.map((row) => (
+                  <tr key={row.key}
+                    className={`${row.below ? "border-t-2 border-line dark:border-white/[0.10]" : "border-t border-line/60 dark:border-white/[0.04]"}`}>
+                    <td className="sticky left-0 z-10 bg-surface py-2.5 pr-3 dark:bg-[#201c17]"
+                      style={{ paddingLeft: `${20 + row.indent * 16}px` }}>
+                      <div className={`${row.strong ? "font-bold text-ink dark:text-[#f4f1ea]" : "font-medium text-ink dark:text-[#e7e2d8]"} ${row.tone ? TONE_TXT[row.tone] : ""}`}>
+                        {row.label}
+                      </div>
+                      {row.hint && <div className="text-[11px] text-hint dark:text-[#8a8175]">{row.hint}</div>}
+                    </td>
+                    {M.storeCols.map((s) => {
+                      const v = Number(s[row.v] ?? 0);
+                      const n = Number(s[row.n] ?? 0);
+                      /* Share of that store's sales — except for cancelled, which
+                         is not part of sales, so a percentage of them would be a
+                         percentage of the wrong thing. */
+                      const share = !row.below && row.key !== "sale" && s.sale_value > 0
+                        ? Math.round((v / s.sale_value) * 100) : null;
+                      return (
+                        <td key={s.store_code} className={`px-4 py-2.5 text-right tabular-nums ${s.is_total ? "bg-panel/60 dark:bg-white/[0.04]" : ""}`}>
+                          <div className={`${row.strong ? "text-[14px] font-extrabold" : "font-semibold"} ${row.tone ? TONE_TXT[row.tone] : "text-ink dark:text-[#f4f1ea]"}`}>
+                            {rs(v)}
+                          </div>
+                          <div className="text-[11px] text-hint dark:text-[#8a8175]">
+                            {n.toLocaleString()} {n === 1 ? "order" : "orders"}{share !== null && ` · ${share}%`}
+                          </div>
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+                <tr className="border-t border-line dark:border-white/[0.06]">
+                  <td className="sticky left-0 z-10 bg-surface px-5 py-2.5 dark:bg-[#201c17]">
+                    <div className="font-medium text-ink dark:text-[#e7e2d8]">Delivery rate</div>
+                    <div className="text-[11px] text-hint dark:text-[#8a8175]">delivered ÷ (delivered + returned)</div>
+                  </td>
+                  {M.storeCols.map((s) => (
+                    <td key={s.store_code} className={`px-4 py-2.5 text-right font-bold tabular-nums text-ink dark:text-[#f4f1ea] ${s.is_total ? "bg-panel/60 dark:bg-white/[0.04]" : ""}`}>
+                      {s.delivery_rate == null ? "—" : `${Number(s.delivery_rate).toFixed(1)}%`}
+                    </td>
+                  ))}
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <div className="mt-4 grid gap-4 lg:grid-cols-2">
         <div className="rounded-card border border-line bg-surface p-5 dark:border-white/[0.06] dark:bg-[#201c17]">
           <h3 className="mb-4 flex items-center gap-2 text-[14px] font-bold text-ink dark:text-[#f4f1ea]"><MapPin size={16} /> Top cities</h3>
           {loading ? <div className="py-10 text-center text-[13px] text-muted dark:text-[#a89f93]">Loading…</div> : <Pie data={M.cities} />}
         </div>
+
+        {/* Dispatched parcels per courier in the chosen dates. The old chips
+            counted the first 1,000 parcels of all time, whatever dates were set. */}
         <div className="rounded-card border border-line bg-surface p-5 dark:border-white/[0.06] dark:bg-[#201c17]">
-          <h3 className="mb-4 text-[14px] font-bold text-ink dark:text-[#f4f1ea]">By store</h3>
+          <h3 className="mb-4 flex items-center gap-2 text-[14px] font-bold text-ink dark:text-[#f4f1ea]"><Truck size={16} /> By courier</h3>
           {loading ? <div className="py-10 text-center text-[13px] text-muted dark:text-[#a89f93]">Loading…</div>
-          : storeKeys.length === 0 ? <div className="py-10 text-center text-[13px] text-muted dark:text-[#a89f93]">No orders in this period.</div>
+          : M.couriers.length === 0 ? <div className="py-10 text-center text-[13px] text-muted dark:text-[#a89f93]">Nothing dispatched in this period.</div>
           : (
-            <div className="space-y-3">
-              {storeKeys.sort((a, b) => M.byStore[b].amt - M.byStore[a].amt).map((k) => {
-                const s = M.byStore[k]; const meta = STORES.find((x) => x.code === k);
-                return (
-                  <div key={k}>
-                    <div className="flex items-center justify-between text-[13px]">
-                      <span className="font-semibold text-ink dark:text-[#f4f1ea]">{meta?.label ?? k}</span>
-                      <span className="tabular-nums text-muted dark:text-[#a89f93]">{s.orders.toLocaleString()} orders · <b className="text-ink dark:text-[#f4f1ea]">{rs(s.amt)}</b></span>
-                    </div>
-                    <div className="mt-1.5 h-2.5 overflow-hidden rounded-full bg-panel dark:bg-white/[0.06]">
-                      <div className="h-full rounded-full" style={{ width: `${Math.max((s.amt / maxStoreAmt) * 100, 2)}%`, background: meta?.color ?? "#EBA98F" }} />
-                    </div>
-                  </div>
-                );
-              })}
-              {Object.keys(M.byCourier).length > 0 && (
-                <div className="mt-4 border-t border-line pt-3 dark:border-white/[0.06]">
-                  <div className="mb-2 text-[12px] font-semibold text-muted dark:text-[#a89f93]">Shipments by courier</div>
-                  <div className="flex flex-wrap gap-2">
-                    {Object.entries(M.byCourier).sort((a, b) => b[1] - a[1]).map(([c, n]) => (
-                      <span key={c} className="rounded-full bg-panel px-3 py-1 text-[12px] font-semibold text-ink dark:bg-white/[0.06] dark:text-[#e7e2d8]">{c} · {n.toLocaleString()}</span>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
+            <table className="w-full text-[13px]">
+              <thead className="text-[11.5px] uppercase tracking-wide text-muted dark:text-[#a89f93]">
+                <tr>
+                  <th className="pb-2 text-left font-semibold">Courier</th>
+                  <th className="pb-2 text-right font-semibold">Dispatched</th>
+                  <th className="pb-2 text-right font-semibold">Delivered</th>
+                  <th className="pb-2 text-right font-semibold">Returned</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-line dark:divide-white/[0.06]">
+                {M.couriers.map((c) => (
+                  <tr key={c.courier} className="text-ink dark:text-[#e7e2d8]">
+                    <td className="py-2.5 font-semibold">{c.courier}</td>
+                    <td className="py-2.5 text-right tabular-nums">{c.dispatched.toLocaleString()}</td>
+                    <td className="py-2.5 text-right tabular-nums text-success">{c.delivered.toLocaleString()}</td>
+                    <td className="py-2.5 text-right tabular-nums text-red-700 dark:text-salmon">{c.returned.toLocaleString()}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           )}
         </div>
       </div>
