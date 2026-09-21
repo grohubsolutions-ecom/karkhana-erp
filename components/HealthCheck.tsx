@@ -74,31 +74,36 @@ export default function HealthCheck({ days = 7 }: { days?: number }) {
          An order still Pending after two days is either not shipped or not
          recorded, and both need a human to look. */
       const cutoff = new Date(Date.now() - 2 * 86400000).toISOString().slice(0, 10);
-      const { data: pending } = await supabase.from("online_orders")
-        .select("order_number,store_code,order_date,amount,customer_name")
+      /* Every check below asks the database for the TRUE count ({count:"exact"}
+         is not capped) and throws on any error — a failed query used to show a
+         green "0 ✓", which reads as all-clear. */
+      const { data: pending, count: pendingN, error: e1 } = await supabase.from("online_orders")
+        .select("order_number,store_code,order_date,amount,customer_name", { count: "exact" })
         .eq("status", "Pending").gte("order_date", since).lte("order_date", cutoff)
-        .order("order_date").limit(200);
+        .order("order_date").limit(1000);
+      if (e1) throw e1;
       out.push({
         key: "unfulfilled",
         title: "Orders not marked fulfilled",
         detail: "Placed more than 2 days ago and still Pending in Shopify. If one of these was actually booked with a courier, its tracking number never reached us.",
-        count: (pending ?? []).length,
+        count: pendingN ?? (pending ?? []).length,
         money: (pending ?? []).reduce((s, r) => s + Number(r.amount ?? 0), 0),
         rows: (pending ?? []).slice(0, 25).map((r) => ({
           label: `${r.order_number} · ${r.store_code}`,
           sub: `${r.customer_name ?? ""} · ${money(Number(r.amount ?? 0))} · ${r.order_date ?? ""}`,
         })),
-        severity: (pending ?? []).length ? "bad" : "ok",
+        severity: (pendingN ?? (pending ?? []).length) ? "bad" : "ok",
       });
 
       /* 2 — gaps in the OwnEx tracking sequence. OwnEx issues numbers in a run
          per pickup, so a hole in our range is a parcel we may not have. It is a
          CANDIDATE, not a certainty — other shippers share the number space — so
          each one links to the tracker to confirm. */
-      const { data: ox } = await supabase.from("online_logistics")
+      const { data: ox, error: e2 } = await supabase.from("online_logistics")
         .select("tracking_id,dispatch_date")
         .eq("courier", "OwnEx").gte("dispatch_date", since)
-        .not("tracking_id", "is", null).order("tracking_id").limit(3000);
+        .not("tracking_id", "is", null).order("tracking_id").limit(1000);
+      if (e2) throw e2;
 
       const byDay = new Map<string, number[]>();
       for (const r of ox ?? []) {
@@ -133,44 +138,51 @@ export default function HealthCheck({ days = 7 }: { days?: number }) {
       });
 
       /* 3 — parcels carrying money but not tied to an order */
-      const { data: orphan } = await supabase.from("online_logistics")
-        .select("tracking_id,courier,cod_amount,dispatch_date")
+      const { data: orphan, count: orphanN, error: e3 } = await supabase.from("online_logistics")
+        .select("tracking_id,courier,cod_amount,dispatch_date", { count: "exact" })
         .or("order_number.is.null,order_number.eq.#,order_number.eq.")
-        .limit(200);
+        .limit(1000);
+      if (e3) throw e3;
       out.push({
         key: "orphan",
         title: "Parcels with no order number",
         detail: "COD that cannot be traced back to a customer. Run Sync Shopify → Fetch tracking to recover them.",
-        count: (orphan ?? []).length,
+        count: orphanN ?? (orphan ?? []).length,
         money: (orphan ?? []).reduce((s, r) => s + Number(r.cod_amount ?? 0), 0),
         rows: (orphan ?? []).slice(0, 25).map((r) => ({
           label: String(r.tracking_id), sub: `${r.courier ?? "no courier"} · ${money(Number(r.cod_amount ?? 0))}`,
         })),
-        severity: (orphan ?? []).length ? "bad" : "ok",
+        severity: (orphanN ?? (orphan ?? []).length) ? "bad" : "ok",
       });
 
       /* 4 — parcels whose courier we could not name */
-      const { data: nocourier } = await supabase.from("online_logistics")
-        .select("tracking_id,order_number,cod_amount")
+      const { data: nocourier, count: nocourierN, error: e4 } = await supabase.from("online_logistics")
+        .select("tracking_id,order_number,cod_amount", { count: "exact" })
         .or("courier.is.null,courier.not.in.(PostEx,OwnEx)")
-        .limit(200);
+        .limit(1000);
+      if (e4) throw e4;
       out.push({
         key: "courier",
         title: "Parcels with no courier",
         detail: "The Shopify fulfilment did not name a carrier, so these are excluded from courier reconciliation.",
-        count: (nocourier ?? []).length,
+        count: nocourierN ?? (nocourier ?? []).length,
         money: (nocourier ?? []).reduce((s, r) => s + Number(r.cod_amount ?? 0), 0),
         rows: (nocourier ?? []).slice(0, 25).map((r) => ({
           label: String(r.tracking_id), sub: `${r.order_number ?? "—"} · ${money(Number(r.cod_amount ?? 0))}`,
         })),
-        severity: (nocourier ?? []).length ? "warn" : "ok",
+        severity: (nocourierN ?? (nocourier ?? []).length) ? "warn" : "ok",
       });
 
       /* 5 — delivered but the courier has not paid */
-      const { data: owed } = await supabase.from("online_logistics")
-        .select("courier,cod_amount,delivery_date")
-        .eq("delivery_status", "Delivered").neq("payment_status", "Paid")
-        .limit(5000);
+      /* Unpaid means not Paid AND not Received, including no status at all.
+         .neq("Paid") dropped rows with no status and counted "Received" —
+         which is paid — as money still owed. */
+      const { data: owed, count: owedN, error: e5 } = await supabase.from("online_logistics")
+        .select("courier,cod_amount,delivery_date", { count: "exact" })
+        .eq("delivery_status", "Delivered")
+        .or("payment_status.is.null,payment_status.not.in.(Paid,Received)")
+        .limit(1000);
+      if (e5) throw e5;
       const byCourier: Record<string, { n: number; sum: number }> = {};
       for (const r of owed ?? []) {
         const c = r.courier ?? "unknown";
@@ -181,27 +193,33 @@ export default function HealthCheck({ days = 7 }: { days?: number }) {
         key: "owed",
         title: "Delivered but not yet paid",
         detail: "COD the courier has collected and still owes you.",
-        count: (owed ?? []).length,
+        count: owedN ?? (owed ?? []).length,
         money: (owed ?? []).reduce((s, r) => s + Number(r.cod_amount ?? 0), 0),
         rows: Object.entries(byCourier).map(([c, v]) => ({ label: c, sub: `${v.n} parcels · ${money(v.sum)}` })),
-        severity: (owed ?? []).length ? "warn" : "ok",
+        severity: (owedN ?? (owed ?? []).length) ? "warn" : "ok",
       });
 
       /* 6 — delivery attempts that failed and are going nowhere */
-      const { data: stuck } = await supabase.from("online_logistics")
-        .select("tracking_id,order_number,cod_amount,dispatch_date,rts_reason")
-        .like("rts_reason", "OwnEx:%").order("dispatch_date").limit(200);
+      /* ONLY PARCELS STILL OUT. The failure note stays on a parcel after it is
+         finally delivered or comes back, so this listed 155 "need a phone call"
+         when 14 were still moving — the rest were finished. */
+      const { data: stuck, count: stuckN, error: e6 } = await supabase.from("online_logistics")
+        .select("tracking_id,order_number,cod_amount,dispatch_date,rts_reason", { count: "exact" })
+        .like("rts_reason", "OwnEx:%")
+        .not("delivery_status", "in", "(Delivered,Returned,Cancelled,RTS)")
+        .order("dispatch_date").limit(1000);
+      if (e6) throw e6;
       out.push({
         key: "stuck",
         title: "Failed delivery attempts",
         detail: "The customer refused or was unavailable. These need a phone call, not more waiting.",
-        count: (stuck ?? []).length,
+        count: stuckN ?? (stuck ?? []).length,
         money: (stuck ?? []).reduce((s, r) => s + Number(r.cod_amount ?? 0), 0),
         rows: (stuck ?? []).slice(0, 25).map((r) => ({
           label: `${r.order_number ?? r.tracking_id}`,
           sub: `${money(Number(r.cod_amount ?? 0))} · since ${r.dispatch_date ?? "?"}`,
         })),
-        severity: (stuck ?? []).length ? "warn" : "ok",
+        severity: (stuckN ?? (stuck ?? []).length) ? "warn" : "ok",
       });
 
       setChecks(out);

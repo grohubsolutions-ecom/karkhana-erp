@@ -1,7 +1,8 @@
 "use client";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { Plus, RefreshCw, Search, Loader2, PackagePlus, UserPlus, CheckCircle2, ChevronDown } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { Plus, RefreshCw, Search, Loader2, PackagePlus, UserPlus, CheckCircle2, ChevronDown, LayoutGrid, Rows3 } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { rs } from "@/lib/dateRange";
 
@@ -16,9 +17,10 @@ import { rs } from "@/lib/dateRange";
  * wants made. Sizes, colours, pictures, Shopify details are somebody else's
  * job by design — that is the whole point of the workflow.
  *
- * Every figure comes from hub_articles_list(), counted in the database.
- * PostgREST caps a response at 1,000 rows whatever the page asks for, so a
- * total added up in the browser is the size of the page, not the business.
+ * The list comes whole from hub_articles_list() and the four cards are counted
+ * over it here. That is safe only because articles are few — PostgREST caps a
+ * response at 1,000 rows, so past roughly 900 articles these cards must move
+ * into the database like every other Hub total.
  */
 
 type Row = {
@@ -74,8 +76,32 @@ function statusChip(s: string) {
   return "bg-amber-soft text-amber-strong dark:bg-white/[0.10] dark:text-amber";
 }
 
+/* CARDS OR TABLE — the same rows, two ways to read them.
+   Cards answer "where is each article" at a glance; the table lines the same
+   facts up in columns for scanning many at once. The choice is remembered per
+   browser, and never trusted to be there: private windows and blocked storage
+   throw, and the page must still open. */
+const VIEW_KEY = "hub.articles.view";
+function readView(): "cards" | "table" {
+  try { return localStorage.getItem(VIEW_KEY) === "table" ? "table" : "cards"; } catch { return "cards"; }
+}
+
 export default function ArticlesPage() {
-  const [rows, setRows] = useState<Row[]>([]);
+  const router = useRouter();
+  /* EVERY ARTICLE, loaded once. The tab filters it here, and the four cards
+     count it here — so "In progress" no longer reads 0 on the Completed tab,
+     and a search no longer shrinks "Ads approved, all time". */
+  const [all, setAll] = useState<Row[]>([]);
+  /* ids matching the current search, or null when not searching. Search goes
+     to the database because only it can look inside pack names. */
+  const [hits, setHits] = useState<Set<string> | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [view, setView] = useState<"cards" | "table">("cards");
+  useEffect(() => { setView(readView()); }, []);
+  function chooseView(v: "cards" | "table") {
+    setView(v);
+    try { localStorage.setItem(VIEW_KEY, v); } catch { /* the choice just won't be remembered */ }
+  }
   const [tab, setTab] = useState("all");
   const [q, setQ] = useState("");
   const [loading, setLoading] = useState(true);
@@ -103,21 +129,47 @@ export default function ArticlesPage() {
   const [undoTask, setUndoTask] = useState<string | null>(null);
   const [undoWhy, setUndoWhy] = useState("");
 
+  /* Loads everything once — not on every tab click or keystroke. It used to
+     send three requests per letter typed, and a slow early reply could land
+     after a fast later one and show the wrong results. */
   const load = useCallback(async () => {
     if (!isSupabaseConfigured || !supabase) { setLoading(false); return; }
     setLoading(true); setErr("");
     const [list, ppl, asg] = await Promise.all([
-      supabase.rpc("hub_articles_list", { p_status: tab === "all" ? null : tab, p_q: q.trim() || null }),
+      supabase.rpc("hub_articles_list", { p_status: null, p_q: null }),
       supabase.rpc("hub_people"),
       supabase.rpc("hub_assigned_tasks", { p_include_done: true }),
     ]);
-    if (list.error) setErr(list.error.message);
-    setRows((list.data as Row[]) ?? []);
+    const firstErr = list.error ?? ppl.error ?? asg.error;
+    if (firstErr) setErr(firstErr.message);
+    setAll((list.data as Row[]) ?? []);
     setPeople((ppl.data as Person[]) ?? []);
     setAssigned((asg.data as Assigned[]) ?? []);
     setLoading(false);
-  }, [tab, q]);
+  }, []);
   useEffect(() => { load(); }, [load]);
+
+  /* Search waits until typing pauses, and only the newest answer is used. */
+  const searchId = useRef(0);
+  useEffect(() => {
+    const term = q.trim();
+    if (!term) { setHits(null); setSearching(false); return; }
+    const my = ++searchId.current;
+    setSearching(true);
+    const t = setTimeout(async () => {
+      if (!supabase) return;
+      const { data, error } = await supabase.rpc("hub_articles_list", { p_status: null, p_q: term });
+      if (my !== searchId.current) return;
+      if (error) setErr(error.message);
+      setHits(new Set(((data as Row[]) ?? []).map((r) => r.id)));
+      setSearching(false);
+    }, 300);
+    return () => clearTimeout(t);
+  }, [q]);
+
+  const rows = useMemo(
+    () => all.filter((r) => (tab === "all" || r.status === tab) && (!hits || hits.has(r.id))),
+    [all, tab, hits]);
 
   async function assign() {
     if (!supabase) return;
@@ -187,13 +239,18 @@ export default function ArticlesPage() {
     load();
   }
 
+  /* Counted over EVERY article, whatever tab or search is showing. */
   const totals = useMemo(() => ({
-    live: rows.filter((r) => r.status === "in_progress").length,
-    waiting: rows.filter((r) => r.waiting_on).length,
-    budget: rows.reduce((a, r) => a + Number(r.ads_budget || 0), 0),
-    spent: rows.reduce((a, r) => a + Number(r.ads_spent || 0), 0),
-    pending: rows.reduce((a, r) => a + Number(r.ads_pending || 0), 0),
-  }), [rows]);
+    live: all.filter((r) => r.status === "in_progress").length,
+    waiting: all.filter((r) => r.waiting_on).length,
+    spent: all.reduce((a, r) => a + Number(r.ads_spent || 0), 0),
+    pending: all.reduce((a, r) => a + Number(r.ads_pending || 0), 0),
+  }), [all]);
+
+  const priceLine = (r: Row) =>
+    r.price_from != null && r.price_to != null && r.price_from !== r.price_to
+      ? `${rs(r.price_from)} – ${rs(r.price_to)}`
+      : r.retail_price ? rs(r.retail_price) : "no price";
 
   return (
     <div className="px-4 py-6 sm:px-6 md:px-10 md:py-8">
@@ -243,15 +300,29 @@ export default function ArticlesPage() {
         <div className="flex w-max gap-1 rounded-full bg-panel p-1 dark:bg-white/[0.05]">
           {TABS.map((t) => (
             <button key={t.key} onClick={() => setTab(t.key)}
-              className={`whitespace-nowrap rounded-full px-4 py-1.5 text-[12.5px] font-semibold transition ${tab === t.key ? "bg-ink text-white dark:bg-white dark:text-[#141414]" : "text-muted hover:text-ink dark:text-[#a89f93] dark:hover:text-white"}`}>
+              className={`whitespace-nowrap rounded-full px-3 py-1.5 text-[12.5px] font-semibold transition sm:px-4 ${tab === t.key ? "bg-ink text-white dark:bg-white dark:text-[#141414]" : "text-muted hover:text-ink dark:text-[#a89f93] dark:hover:text-white"}`}>
               {t.label}
             </button>
           ))}
         </div>
-        <div className="flex items-center gap-2 rounded-full border border-line bg-surface px-3.5 py-2 dark:border-white/10 dark:bg-white/[0.05]">
-          <Search size={15} className="text-hint dark:text-[#8a8175]" />
+        {/* Its own full-width line on a phone — squeezed beside the tabs it
+            was a sliver too narrow to type into. */}
+        <div className="order-last flex w-full min-w-0 items-center gap-2 rounded-full border border-line bg-surface px-3.5 py-2 sm:order-none sm:w-auto sm:flex-none dark:border-white/10 dark:bg-white/[0.05]">
+          {searching ? <Loader2 size={15} className="animate-spin text-hint" /> : <Search size={15} className="text-hint dark:text-[#8a8175]" />}
           <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search name, code or pack"
-            className="w-40 bg-transparent text-[13px] outline-none placeholder:text-hint sm:w-56 dark:text-[#f4f1ea]" />
+            className="w-full min-w-0 bg-transparent text-[13px] outline-none placeholder:text-hint sm:w-56 dark:text-[#f4f1ea]" />
+        </div>
+
+        {/* the switch — same rows, cards or table */}
+        <div role="group" aria-label="View" className="ml-auto flex gap-1 rounded-full bg-panel p-1 dark:bg-white/[0.05]">
+          {([["cards", "Cards", LayoutGrid], ["table", "Table", Rows3]] as const).map(([k, label, Icon]) => (
+            <button key={k} onClick={() => chooseView(k)} aria-pressed={view === k} aria-label={label} title={label}
+              className={`flex min-h-[32px] items-center gap-1.5 rounded-full px-3 py-1.5 text-[12.5px] font-semibold transition sm:px-3.5 ${
+                view === k ? "bg-ink text-white dark:bg-white dark:text-[#141414]"
+                           : "text-muted hover:text-ink dark:text-[#a89f93] dark:hover:text-white"}`}>
+              <Icon size={14} /> <span className="hidden sm:inline">{label}</span>
+            </button>
+          ))}
         </div>
       </div>
 
@@ -284,7 +355,7 @@ export default function ArticlesPage() {
                     </span>
                     {markTask !== t.task_id && (
                       <button onClick={() => { setMarkTask(t.task_id); setMarkT({ note: "", done_on: today() }); }}
-                        className="rounded-full border border-line px-3 py-1 text-[11.5px] font-semibold text-ink transition hover:bg-panel dark:border-white/15 dark:text-white dark:hover:bg-white/[0.06]">
+                        className="min-h-[32px] rounded-full border border-line px-3 py-1.5 text-[11.5px] font-semibold text-ink transition hover:bg-panel dark:border-white/15 dark:text-white dark:hover:bg-white/[0.06]">
                         Mark done
                       </button>
                     )}
@@ -298,7 +369,7 @@ export default function ArticlesPage() {
                         from this side. The way back sits next to the record. */}
                     {undoTask !== t.task_id && (
                       <button onClick={() => { setUndoTask(t.task_id); setUndoWhy(""); }}
-                        className="rounded-full border border-line px-3 py-1 text-[11.5px] font-semibold text-muted transition hover:border-danger/40 hover:text-danger dark:border-white/15 dark:text-[#a89f93]">
+                        className="min-h-[32px] rounded-full border border-line px-3 py-1.5 text-[11.5px] font-semibold text-muted transition hover:border-danger/40 hover:text-danger dark:border-white/15 dark:text-[#a89f93]">
                         Undo
                       </button>
                     )}
@@ -372,10 +443,92 @@ export default function ArticlesPage() {
         ) : rows.length === 0 ? (
           <div className="rounded-card border border-line bg-surface px-4 py-16 text-center dark:border-white/[0.06] dark:bg-[#201c17]">
             <PackagePlus size={22} className="mx-auto mb-2 text-muted" />
-            <p className="text-[14px] font-bold text-ink dark:text-[#f4f1ea]">No articles yet.</p>
-            <p className="mt-1 text-[12.5px] text-muted dark:text-[#a89f93]">
-              Press New article. Hamza Mukhtar and Hamza Khan are told the moment you do.
-            </p>
+            {/* "No articles yet" is only true when there are none at all. With
+                articles hidden by a tab or a search, say so — otherwise it reads
+                as if the articles were lost. */}
+            {all.length === 0 ? (
+              <>
+                <p className="text-[14px] font-bold text-ink dark:text-[#f4f1ea]">No articles yet.</p>
+                <p className="mt-1 text-[12.5px] text-muted dark:text-[#a89f93]">
+                  Press New article. Hamza Mukhtar and Hamza Khan are told the moment you do.
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="text-[14px] font-bold text-ink dark:text-[#f4f1ea]">Nothing matches.</p>
+                <p className="mt-1 text-[12.5px] text-muted dark:text-[#a89f93]">
+                  {all.length} article{all.length === 1 ? "" : "s"} in total — try All, or clear the search.
+                </p>
+              </>
+            )}
+          </div>
+        ) : view === "table" ? (
+          /* THE TABLE. Scrolls sideways on a phone rather than squeezing the
+             columns into unreadable slivers; the article column stays pinned so
+             you always know which row you are reading. */
+          <div className="overflow-x-auto rounded-card border border-line bg-surface dark:border-white/[0.06] dark:bg-[#201c17]">
+            <table className="w-full min-w-[860px] text-left text-[13px]">
+              <thead>
+                <tr className="border-b border-line text-[11.5px] uppercase tracking-wide text-muted dark:border-white/[0.06] dark:text-[#a89f93]">
+                  <th className="sticky left-0 z-10 bg-surface px-4 py-2.5 font-semibold dark:bg-[#201c17]">Article</th>
+                  <th className="px-3 py-2.5 font-semibold">Price</th>
+                  <th className="px-3 py-2.5 font-semibold">Stages</th>
+                  <th className="px-3 py-2.5 font-semibold">Waiting on</th>
+                  <th className="px-3 py-2.5 text-right font-semibold">Ads</th>
+                  <th className="px-3 py-2.5 font-semibold">Running</th>
+                  <th className="px-4 py-2.5 font-semibold">Status</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-line dark:divide-white/[0.06]">
+                {rows.map((r) => (
+                  <tr key={r.id} onClick={() => router.push(`/online/articles/${r.id}`)}
+                    className="group cursor-pointer transition hover:bg-panel/60 dark:hover:bg-white/[0.04]">
+                    <td className="sticky left-0 z-10 bg-surface px-4 py-3 transition group-hover:bg-panel/60 dark:bg-[#201c17] dark:group-hover:bg-[#262119]">
+                      {/* A real link inside the row, so it can be opened in a new tab. */}
+                      <Link href={`/online/articles/${r.id}`} onClick={(e) => e.stopPropagation()}
+                        className="font-bold text-ink hover:underline dark:text-[#f4f1ea]">{r.name}</Link>
+                      <div className="text-[11.5px] font-semibold text-muted dark:text-[#a89f93]">{r.code}</div>
+                    </td>
+                    <td className="px-3 py-3 tabular-nums text-ink dark:text-[#e7e2d8]">
+                      <div className="whitespace-nowrap">{priceLine(r)}</div>
+                      <div className="text-[11px] text-hint dark:text-[#8a8175]">
+                        {r.pack_count > 1 ? `${r.pack_count} packs` : r.margin != null ? `${r.margin}% margin` : ""}
+                      </div>
+                    </td>
+                    <td className="px-3 py-3">
+                      <div className="flex items-center gap-1">
+                        {Array.from({ length: r.stages_total }).map((_, i) => (
+                          <span key={i} className={`h-2 w-2 rounded-full ${i < r.stages_done ? "bg-success" : "bg-line dark:bg-white/20"}`} />
+                        ))}
+                        <span className="ml-1.5 text-[11.5px] font-semibold tabular-nums text-muted dark:text-[#a89f93]">{r.stages_done}/{r.stages_total}</span>
+                      </div>
+                    </td>
+                    <td className="px-3 py-3 text-[12.5px]">
+                      {r.waiting_on ? (
+                        <>
+                          <b className="text-ink dark:text-[#e7e2d8]">{r.waiting_on}</b>
+                          {r.waiting_days != null && r.waiting_days > 0 &&
+                            <span className="text-muted dark:text-[#a89f93]"> · {r.waiting_days}d</span>}
+                        </>
+                      ) : <span className="text-muted dark:text-[#a89f93]">—</span>}
+                    </td>
+                    <td className="px-3 py-3 text-right tabular-nums">
+                      <div className="font-semibold text-ink dark:text-[#f4f1ea]">{rs(Number(r.ads_spent_period))}</div>
+                      <div className="text-[11px] text-hint dark:text-[#8a8175]">of {rs(Number(r.ads_budget || 0))} {r.period_label}</div>
+                      {Number(r.ads_pending) > 0 && (
+                        <div className="text-[11px] font-semibold text-amber-strong dark:text-amber">{rs(Number(r.ads_pending))} to approve</div>
+                      )}
+                    </td>
+                    <td className="whitespace-nowrap px-3 py-3 text-[12.5px] text-muted dark:text-[#a89f93]">{r.age}</td>
+                    <td className="px-4 py-3">
+                      <span className={`whitespace-nowrap rounded-full px-2.5 py-1 text-[11.5px] font-semibold ${statusChip(r.status)}`}>
+                        {r.status.replace("_", " ")}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         ) : rows.map((r) => (
           <Link key={r.id} href={`/online/articles/${r.id}`}
@@ -450,7 +603,7 @@ export default function ArticlesPage() {
       {/* ── assign a task to one person ──────────────────────────────────── */}
       {assigning && (
         <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 p-0 sm:items-center sm:p-6" onClick={() => !busy && setAssigning(false)}>
-          <div className="w-full max-w-md rounded-t-card bg-surface p-5 shadow-card dark:bg-[#201c17] sm:rounded-card" onClick={(e) => e.stopPropagation()}>
+          <div className="max-h-[92dvh] w-full max-w-md overflow-y-auto rounded-t-card bg-surface p-5 shadow-card dark:bg-[#201c17] sm:rounded-card" onClick={(e) => e.stopPropagation()}>
             <h2 className="text-[16px] font-extrabold text-ink dark:text-[#f4f1ea]">Assign a task</h2>
             <p className="mt-1 text-[12.5px] text-muted dark:text-[#a89f93]">
               Work for one person that has nothing to do with an article. It lands on his portal
@@ -495,7 +648,7 @@ export default function ArticlesPage() {
       {/* ── new article ──────────────────────────────────────────────────── */}
       {adding && (
         <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 p-0 sm:items-center sm:p-6" onClick={() => !busy && setAdding(false)}>
-          <div className="w-full max-w-lg rounded-t-card bg-surface p-5 shadow-card dark:bg-[#201c17] sm:rounded-card" onClick={(e) => e.stopPropagation()}>
+          <div className="max-h-[92dvh] w-full max-w-lg overflow-y-auto rounded-t-card bg-surface p-5 shadow-card dark:bg-[#201c17] sm:rounded-card" onClick={(e) => e.stopPropagation()}>
             <h2 className="text-[16px] font-extrabold text-ink dark:text-[#f4f1ea]">New article</h2>
             <p className="mt-1 text-[12.5px] text-muted dark:text-[#a89f93]">
               Four numbers and what you want made. The names, sizes, pictures and Shopify details are Hamza Mukhtar&rsquo;s job.

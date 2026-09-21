@@ -125,6 +125,8 @@ export default function ArticleDetail() {
     return (
       <div className="px-6 py-16 text-center">
         <p className="text-[14px] font-bold text-ink dark:text-[#f4f1ea]">That article is not available to you.</p>
+        {/* A network or database failure is not the same as no access — say which. */}
+        {err && <p className="mx-auto mt-2 max-w-md text-[12.5px] text-danger">{err}</p>}
         <button onClick={() => router.push("/online/articles")} className="mt-3 text-[13px] font-semibold underline">Back to articles</button>
       </div>
     );
@@ -206,7 +208,7 @@ export default function ArticleDetail() {
       {/* ── edit ─────────────────────────────────────────────────────────── */}
       {editing && (
         <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 sm:items-center sm:p-6" onClick={() => !busy && setEditing(false)}>
-          <div className="w-full max-w-lg rounded-t-card bg-surface p-5 shadow-card dark:bg-[#201c17] sm:rounded-card" onClick={(e) => e.stopPropagation()}>
+          <div className="max-h-[92dvh] w-full max-w-lg overflow-y-auto rounded-t-card bg-surface p-5 shadow-card dark:bg-[#201c17] sm:rounded-card" onClick={(e) => e.stopPropagation()}>
             <h2 className="text-[16px] font-extrabold text-ink dark:text-[#f4f1ea]">Edit {a.code}</h2>
             <p className="mt-1 text-[12.5px] text-muted dark:text-[#a89f93]">
               Changing a figure here is written into the history with your name on it. It does not move the work.
@@ -255,6 +257,10 @@ export default function ArticleDetail() {
               Changing the brief does not change what is already on somebody&rsquo;s panel — tell him, or send the work back.
             </p>
 
+            {/* The error shows HERE. It used to appear on the page behind the
+                form, where nobody could see it. */}
+            {err && <p className="mt-3 rounded-xl2 bg-danger-soft px-3 py-2 text-[12.5px] font-medium text-danger">{err}</p>}
+
             <div className="mt-4 flex justify-end gap-2">
               <button onClick={() => setEditing(false)} disabled={busy}
                 className="rounded-full border border-line px-4 py-2 text-[13px] font-semibold text-ink dark:border-white/15 dark:text-white">Cancel</button>
@@ -268,7 +274,9 @@ export default function ArticleDetail() {
                   p_ads_budget: edit.ads_budget === "" ? null : Number(edit.ads_budget),
                   p_brief: edit.brief || null,
                   p_ads_basis: edit.ads_basis,
-                }).then(() => setEditing(false))}
+                /* Close only if it saved. A refusal used to close the form
+                   anyway and throw away everything that had been typed. */
+                }).then((ok) => { if (ok) setEditing(false); })}
                 className="flex items-center gap-2 rounded-full bg-ink px-5 py-2 text-[13px] font-semibold text-white disabled:opacity-40 dark:bg-white dark:text-[#141414]">
                 {busy && <Loader2 size={14} className="animate-spin" />} Save
               </button>
@@ -380,14 +388,16 @@ export default function ArticleDetail() {
           return (
             <div key={key} className="border-b border-line px-4 py-2.5 last:border-0 dark:border-white/[0.06]">
               {!editingThis ? (
-                <div className="grid gap-x-3 gap-y-1 text-[13px] sm:grid-cols-[1.4fr_0.7fr_0.9fr_0.9fr_1fr_auto] sm:items-center">
+                <div className="grid grid-cols-2 items-center gap-x-3 gap-y-1 text-[13px] sm:grid-cols-[1.4fr_0.7fr_0.9fr_0.9fr_1fr_auto]">
                   <span className="font-bold text-ink dark:text-[#f4f1ea]">
                     {p.label}
                     {p.is_single && <span className="ml-2 rounded-full bg-panel px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-hint dark:bg-white/[0.06] dark:text-[#8a8175]">base</span>}
                   </span>
-                  <span className="tabular-nums text-muted dark:text-[#a89f93] sm:text-right">{p.units}</span>
-                  <span className="tabular-nums text-muted dark:text-[#a89f93] sm:text-right">{p.exact_cost != null ? rs(Number(p.exact_cost)) : "—"}</span>
-                  <span className="font-semibold tabular-nums text-ink dark:text-[#f4f1ea] sm:text-right">{p.retail_price != null ? rs(Number(p.retail_price)) : "—"}</span>
+                  {/* The column headings are hidden on a phone, so each figure
+                      carries its own label there. */}
+                  <span className="tabular-nums text-muted dark:text-[#a89f93] sm:text-right"><span className="text-hint sm:hidden">Units </span>{p.units}</span>
+                  <span className="tabular-nums text-muted dark:text-[#a89f93] sm:text-right"><span className="text-hint sm:hidden">Cost </span>{p.exact_cost != null ? rs(Number(p.exact_cost)) : "—"}</span>
+                  <span className="font-semibold tabular-nums text-ink dark:text-[#f4f1ea] sm:text-right"><span className="font-normal text-hint sm:hidden">Retail </span>{p.retail_price != null ? rs(Number(p.retail_price)) : "—"}</span>
                   <span className="tabular-nums text-[12px] text-muted dark:text-[#a89f93] sm:text-right">
                     {p.per_unit != null ? `${rs(p.per_unit)} each` : "—"}
                     {p.margin != null && <span className="text-hint dark:text-[#8a8175]"> · {p.margin}%</span>}
@@ -401,7 +411,7 @@ export default function ArticleDetail() {
                                   exact_cost: p.exact_cost == null ? "" : String(p.exact_cost),
                                   retail_price: p.retail_price == null ? "" : String(p.retail_price) });
                       }}
-                      className="rounded-full p-1.5 text-muted transition hover:bg-panel hover:text-ink dark:text-[#a89f93] dark:hover:bg-white/[0.08] dark:hover:text-white">
+                      className="rounded-full p-2 text-muted transition hover:bg-panel hover:text-ink dark:text-[#a89f93] dark:hover:bg-white/[0.08] dark:hover:text-white">
                       <Pencil size={13} />
                     </button>
                     {/* The base has no delete: an article without a price is not
@@ -409,7 +419,7 @@ export default function ArticleDetail() {
                     {!p.is_single && p.pack_id && (
                       <button aria-label={`Remove ${p.label}`} disabled={busy}
                         onClick={() => call("hub_pack_delete", { p_pack_id: p.pack_id })}
-                        className="rounded-full p-1.5 text-muted transition hover:bg-danger-soft hover:text-danger disabled:opacity-40 dark:text-[#a89f93]">
+                        className="rounded-full p-2 text-muted transition hover:bg-danger-soft hover:text-danger disabled:opacity-40 dark:text-[#a89f93]">
                         <Trash2 size={13} />
                       </button>
                     )}
@@ -617,7 +627,7 @@ export default function ArticleDetail() {
               p_article_id: a.id, p_spent_on: spend.spent_on, p_amount: Number(spend.amount),
               p_platform: "Meta", p_campaign_name: spend.campaign_name || null,
               p_campaign_id: spend.campaign_id || null, p_proof_url: null, p_notes: spend.notes || null,
-            }).then(() => setSpend({ ...spend, amount: "", campaign_name: "", campaign_id: "", notes: "" }))}
+            }).then((ok) => { if (ok) setSpend({ ...spend, amount: "", campaign_name: "", campaign_id: "", notes: "" }); })}
             className="mt-2 rounded-full bg-ink px-4 py-2 text-[12.5px] font-semibold text-white disabled:opacity-40 dark:bg-white dark:text-[#141414]">
             Add — waits for approval
           </button>

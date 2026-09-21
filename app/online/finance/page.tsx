@@ -1,11 +1,11 @@
 "use client";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Wallet, FileText, Undo2, RefreshCw, CheckCircle2, Clock, Truck } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import ReturnsPanel from "@/components/ReturnsPanel";
 import RangeBar from "@/components/RangeBar";
-import { rangeDates, MONEY_PRESETS } from "@/lib/dateRange";
+import { rangeDates } from "@/lib/dateRange";
 import { AddFinanceRow, EditFinanceRow } from "@/components/FinanceEntry";
 import CprImport from "@/components/CprImport";
 import CprDetail from "@/components/CprDetail";
@@ -18,7 +18,6 @@ type Summary = {
   pending_value: number; pending_count: number; oldest_pending_days: number;
   received_gross: number; received_net: number; received_count: number;
   gross_cod: number; courier_fees: number; net_expected: number;
-  older_pending_value: number; older_pending_count: number;
 };
 /** PostEx and OwnEx kept apart deliberately: OwnEx has no payment API, so its
  *  share of the receivable can only move by import or by hand. A blended figure
@@ -66,26 +65,12 @@ export default function FinancePage() {
   /* Which card is driving the list. Clicking a figure should show you the rows
      behind it — a number you cannot open is a number you have to take on
      trust, and this page exists precisely because those were wrong. */
-  /* PENDING BY DEFAULT.
-     The list opened showing everything, so 61 unpaid rows sat on top of 2,571
-     settled ones and the money still owed was indistinguishable from money
-     already in the bank. Payments is opened to answer "what has not arrived" —
-     so that is what it opens on. Clicking Received or Charges switches, and
-     clicking the same card again clears back to everything. */
-  const [pick, setPick] = useState<"" | "pending" | "received" | "charges">("pending");
+  const [pick, setPick] = useState<"" | "pending" | "received" | "charges">("");
   const [byCourier, setByCourier] = useState<CourierRow[]>([]);
-  /* Search on both tabs. Debounced, because re-filtering a thousand rows on
-     every keystroke is what made the disputes page feel sticky. */
-  const [qLive, setQLive] = useState("");
-  const [q, setQ] = useState("");
-  useEffect(() => { const t = setTimeout(() => setQ(qLive), 180); return () => clearTimeout(t); }, [qLive]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
   const [editRow, setEditRow] = useState<Row | null>(null);
-  /* Must be one of MONEY_PRESETS. A default that is no longer offered leaves
-     every chip unselected while the page quietly filters to a range nobody
-     chose. */
-  const [preset, setPreset] = useState("60d");
+  const [preset, setPreset] = useState("30d");
   const [cf, setCf] = useState(""); const [ct, setCt] = useState("");
 
   /* THE CARDS COME FROM THE DATABASE, THE TABLE IS A PAGE OF ROWS.
@@ -100,73 +85,69 @@ export default function FinancePage() {
         the cap was even reached. v_finance_payments.finance_date dates a paid
         row by when the money arrived and an unpaid one by when it became owed,
         so a range filter can no longer hide a receivable. */
+  /* Only the newest request may paint. Switching range or tab quickly used to
+     let an older answer land last — CPR rows could appear under the Payments
+     columns. */
+  const reqId = useRef(0);
+  const [matchCount, setMatchCount] = useState<number | null>(null);
+
   const load = useCallback(async (which: Tab) => {
     if (!isSupabaseConfigured || !supabase) { setLoading(false); return; }
+    const my = ++reqId.current;
     setLoading(true); setErr("");
     const [from, to] = rangeDates(preset, cf, ct);
-
-    if (which === "payments") {
-      const { data: sm, error: se } = await supabase.rpc("hub_finance_summary", {
-        p_from: from, p_to: to, p_store: store,
-        p_courier: courier === "All couriers" ? null : courier,
-      });
-      if (se) setErr(se.message);
-      setSummary(((sm as Summary[]) ?? [])[0] ?? null);
-
-      const { data: bc } = await supabase.rpc("hub_finance_by_courier", {
-        p_from: from, p_to: to, p_store: store,
-      });
-      setByCourier((bc as CourierRow[]) ?? []);
-    } else {
-      setSummary(null); setByCourier([]);
-    }
 
     const dcol = which === "payments" ? "finance_date" : "cpr_date";
     let q =
       which === "payments"
         ? supabase.from("v_finance_payments")
-            .select("id,tracking_id,order_number,store_code,courier,cod_amount,cpr_net_amount,courier_fee,courier_tax,payment_status,payment_date,delivery_date,finance_date,is_paid,age_days,cpr_number,dispatch_date")
+            .select("id,tracking_id,order_number,store_code,courier,cod_amount,cpr_net_amount,courier_fee,courier_tax,payment_status,payment_date,delivery_date,finance_date,is_paid,age_days,cpr_number,dispatch_date", { count: "exact" })
             // Oldest first. A receivable list is worked from the top, and the
             // oldest debt is the one closest to being uncollectable.
-            /* Unpaid first — that is the money still to chase — then the
-               settled ones NEWEST first. Ascending put the oldest settlement at
-               the top of the paid block, so a two-month view opened on July and
-               the recent payments were a thousand rows down. */
             .order("is_paid", { ascending: true })
-            .order("finance_date", { ascending: false, nullsFirst: false })
+            .order("finance_date", { ascending: true, nullsFirst: false })
             .limit(1000)
         : supabase.from("online_cpr")
-            .select("id,cpr_number,courier,store_code,cpr_date,amount,orders_count,status,gross_total,shipping_charges,gst,wh_income_tax,wh_sales_tax,net_total,delivered_count,returned_count,returns_cost,matched_count,matched_total,unmatched,settlement_status")
+            .select("id,cpr_number,courier,store_code,cpr_date,amount,orders_count,status,gross_total,shipping_charges,gst,wh_income_tax,wh_sales_tax,net_total,delivered_count,returned_count,returns_cost,matched_count,matched_total,unmatched,settlement_status", { count: "exact" })
             .order("cpr_date", { ascending: false, nullsFirst: false }).limit(1000);
     if (from) q = q.gte(dcol, from);
     if (to) q = q.lte(dcol, to);
     if (courier !== "All couriers") q = q.eq("courier", courier);
-    const { data, error } = await q;
-    if (error) setErr(error.message);
-    setRows((data as Row[]) ?? []);
+    /* STORE AND THE CARD YOU PRESSED FILTER IN THE DATABASE.
+       Both filtered the 1,000 loaded rows. Unpaid rows sort first, so with more
+       than 1,000 of them "Received" — or a store — could show an empty list
+       while the card above it said thousands. */
+    if (store !== "ALL") q = q.eq("store_code", store);
+    if (which === "payments" && pick === "pending")  q = q.eq("is_paid", false);
+    if (which === "payments" && pick === "received") q = q.eq("is_paid", true);
+    if (which === "payments" && pick === "charges")  q = q.or("courier_fee.gt.0,courier_tax.gt.0");
+
+    /* The three requests go together instead of one after another. */
+    const [rowsRes, smRes, bcRes] = await Promise.all([
+      q,
+      which === "payments"
+        ? supabase.rpc("hub_finance_summary", {
+            p_from: from, p_to: to, p_store: store,
+            p_courier: courier === "All couriers" ? null : courier,
+          })
+        : Promise.resolve({ data: null, error: null }),
+      which === "payments"
+        ? supabase.rpc("hub_finance_by_courier", { p_from: from, p_to: to, p_store: store })
+        : Promise.resolve({ data: null, error: null }),
+    ]);
+    if (my !== reqId.current) return;
+    const firstErr = rowsRes.error ?? smRes.error ?? bcRes.error;
+    if (firstErr) setErr(firstErr.message);
+    setSummary(which === "payments" ? (((smRes.data as Summary[]) ?? [])[0] ?? null) : null);
+    setByCourier(which === "payments" ? ((bcRes.data as CourierRow[]) ?? []) : []);
+    setRows((rowsRes.data as Row[]) ?? []);
+    setMatchCount(typeof rowsRes.count === "number" ? rowsRes.count : null);
     setLoading(false);
-  }, [preset, cf, ct, store, courier]);
+  }, [preset, cf, ct, store, courier, pick]);
   useEffect(() => { load(tab); }, [tab, load]);
 
-  // The table is filtered in the browser only because it is explicitly a page
-  // of rows, never a total. Every total on this page comes from the RPC above.
-  const rowsF = useMemo(() => {
-    let out = store === "ALL" ? rows : rows.filter((r) => r.store_code === store);
-    // The card you pressed decides what the list shows. Pressing it again clears it.
-    if (tab === "payments" && pick === "pending")  out = out.filter((r) => !r.is_paid);
-    if (tab === "payments" && pick === "received") out = out.filter((r) => r.is_paid);
-    if (tab === "payments" && pick === "charges")
-      out = out.filter((r) => (Number(r.courier_fee) || 0) + (Number(r.courier_tax) || 0) > 0);
-
-    /* A leading # is stripped so "4715" and "#4715" find the same order, and a
-       CPR reference matches on either tab — the settlement number is how people
-       actually look these up. */
-    const n = q.trim().toLowerCase().replace("#", "");
-    if (n) out = out.filter((r) =>
-      [r.order_number, r.tracking_id, r.cpr_number, r.courier, r.store_code]
-        .some((v) => String(v ?? "").toLowerCase().replace("#", "").includes(n)));
-    return out;
-  }, [rows, store, tab, pick, q]);
+  /* The database applied store and the card you pressed; these are the rows. */
+  const rowsF = rows;
 
   const cards = useMemo(() => {
     if (tab === "payments") {
@@ -184,11 +165,7 @@ export default function FinancePage() {
         : 0;
       return [
         { label: "Pending payment", value: money(s?.pending_value), Icon: Clock, bg: "bg-amber-soft",
-          note: s
-            ? `${Number(s.pending_count).toLocaleString()} parcels · oldest ${Number(s.oldest_pending_days)} days`
-              + (Number(s.older_pending_value) > 0
-                 ? ` · + ${money(s.older_pending_value)} older than this range` : "")
-            : "",
+          note: s ? `${Number(s.pending_count).toLocaleString()} parcels · oldest ${Number(s.oldest_pending_days)} days` : "",
           key: "pending" as const },
         { label: "Received", value: money(s?.received_net), Icon: CheckCircle2, bg: "bg-success-soft",
           note: s ? `${Number(s.received_count).toLocaleString()} parcels settled` : "", key: "received" as const },
@@ -204,9 +181,9 @@ export default function FinancePage() {
     }
 
     if (tab === "cpr") {
-      // These stay browser-side on purpose: a CPR batch is one row per
-      // settlement file, so the set is small and cannot approach the 1,000 cap.
-      // If it ever can, it gets its own function like everything else.
+      // Browser-side on purpose: one row per settlement file, a few hundred at
+      // most, and now filtered by store in the database. Past ~900 settlements
+      // in one range this needs its own function like every other total.
       return [
         { label: "CPR batches", value: rowsF.length.toLocaleString(), Icon: FileText, bg: "bg-periwinkle-soft", note: "", key: "" as const },
         { label: "Total amount", value: money(sum(rowsF, "amount")), Icon: Wallet, bg: "bg-success-soft", note: "", key: "" as const },
@@ -258,22 +235,7 @@ export default function FinancePage() {
         </div>
       </div>
 
-      {/* Money ranges here only. A courier settles over days or weeks, so Today
-          and Yesterday answer nothing on a payments screen — but they are right
-          on Orders and in Retail, which keep them. */}
-      <RangeBar preset={preset} setPreset={setPreset} cf={cf} setCf={setCf} ct={ct} setCt={setCt}
-                presets={MONEY_PRESETS} />
-
-      <div className="mt-3">
-        <input value={qLive} onChange={(e) => setQLive(e.target.value)}
-               placeholder={tab === "cpr" ? "Search CPR / invoice number, courier" : "Search order, tracking, CPR"}
-               className="w-full max-w-sm rounded-full border border-line bg-surface px-3.5 py-2 text-[13px] outline-none focus:border-ink dark:border-white/10 dark:bg-white/[0.05] dark:text-white" />
-        {q.trim() && (
-          <span className="ml-2 text-[12px] text-muted dark:text-[#a89f93]">
-            {rowsF.length} match{rowsF.length === 1 ? "" : "es"}
-          </span>
-        )}
-      </div>
+      <RangeBar preset={preset} setPreset={setPreset} cf={cf} setCf={setCf} ct={ct} setCt={setCt} />
 
       <div className="mt-5 -mx-4 overflow-x-auto px-4 sm:mx-0 sm:px-0"><div className="flex w-max gap-1 rounded-full bg-panel p-1 dark:bg-white/[0.05]">
         {TABS.map((t) => (
@@ -367,7 +329,7 @@ export default function FinancePage() {
               ) : err ? (
                 <tr><td colSpan={11} className="px-4 py-12 text-center text-[13px] text-danger">Couldn&apos;t load: {err}</td></tr>
               ) : rowsF.length === 0 ? (
-                <tr><td colSpan={11} className="px-4 py-16 text-center text-[13px] text-muted dark:text-[#a89f93]">Nothing here yet — this fills once the sync is live.</td></tr>
+                <tr><td colSpan={11} className="px-4 py-16 text-center text-[13px] text-muted dark:text-[#a89f93]">{pick || store !== "ALL" || courier !== "All couriers" ? "Nothing matches these filters." : "Nothing in this period."}</td></tr>
               ) : (
                 /* SELECTING TEXT IS NOT CLICKING A ROW.
                    The whole row was a click target, so dragging across a
@@ -441,7 +403,14 @@ export default function FinancePage() {
       </div>
 
       {!loading && !err && rowsF.length > 0 && (
-        <p className="mt-3 text-center text-[12px] text-hint dark:text-[#8a8175]">Tip: click any row to {tab === "payments" ? "mark it paid" : tab === "cpr" ? "see how the courier calculated it" : "mark it received"}.</p>
+        <>
+        {/* How many there really are — the list stops at 1,000. */}
+        <p className="mt-3 text-center text-[12px] text-hint dark:text-[#8a8175]">
+          Showing {rowsF.length.toLocaleString()} of {(matchCount ?? rowsF.length).toLocaleString()}
+          {(matchCount ?? 0) > rowsF.length && " — narrow the dates to see the rest"}
+        </p>
+        <p className="mt-1 text-center text-[12px] text-hint dark:text-[#8a8175]">Tip: click any row to {tab === "payments" ? "mark it paid" : tab === "cpr" ? "see how the courier calculated it" : "mark it received"}.</p>
+        </>
       )}
 
       <EditFinanceRow tab={tab} row={editRow} onClose={() => setEditRow(null)} onDone={() => load(tab)} />

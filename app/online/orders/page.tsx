@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useLiveTables } from "@/lib/useLiveTables";
 import { ShoppingBag, Clock, Truck, XCircle, Wallet, TrendingUp, Search, RefreshCw } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
@@ -21,7 +21,11 @@ const STORES = [
   { code: "ALL", label: "All stores" }, { code: "LM", label: "Little Minors" },
   { code: "TS", label: "TopShop" }, { code: "TRZ", label: "Trenzee" },
 ];
-const STATUSES = ["All", "Pending", "Dispatched", "Delivered", "Cancelled", "Returned"];
+/* Only the statuses an ORDER actually carries. "Delivered" and "Returned" were
+   listed here, but they belong to the courier's parcel, not the Shopify order —
+   no order ever holds them, so choosing either always showed "Nothing matches".
+   Delivery and returns are on the Shipments and Returns pages. */
+const STATUSES = ["All", "Pending", "Dispatched", "Cancelled"];
 const VIEWS: { key: View; label: string }[] = [
   { key: "list", label: "Orders" }, { key: "cities", label: "By City" },
   { key: "status", label: "By Status" }, { key: "stores", label: "By Store" },
@@ -78,6 +82,10 @@ export default function OrdersPage() {
   const [view, setView] = useState<View>("list");
   const [preset, setPreset] = useState("30d");
   const [cf, setCf] = useState(""); const [ct, setCt] = useState("");
+  /* The true number of matching orders, counted by the database — the list
+     itself stops at 1,000, so its length is not the answer. */
+  const [matchCount, setMatchCount] = useState<number | null>(null);
+  const [grouped, setGrouped] = useState<{ name: string; count: number; amt: number }[]>([]);
 
   /* Rows are for the TABLE only. The cards come from hub_orders_summary(),
      because PostgREST caps a response at 1,000 rows whatever .limit() asks for
@@ -94,7 +102,7 @@ export default function OrdersPage() {
     const [from, to] = rangeDates(preset, cf, ct);
     const term = q.trim();
     let q2 = supabase.from("online_orders")
-      .select("id,order_number,store_code,order_date,customer_name,phone,city,amount,status,financial_status")
+      .select("id,order_number,store_code,order_date,customer_name,phone,city,amount,status,financial_status", { count: "exact" })
       // Newest first, and genuinely so. order_date alone is a DATE, so a day's
       // worth of orders all tie and come back in whatever order the planner
       // felt like — which is why the newest order was not reliably at the top.
@@ -110,27 +118,48 @@ export default function OrdersPage() {
       if (to) q2 = q2.lte("order_date", to);
     }
     if (store !== "ALL") q2 = q2.eq("store_code", store);
+    /* The status filter runs in the database. Filtering the loaded page only
+       ever searched the first 1,000 orders. */
+    if (status !== "All") q2 = q2.eq("status", status);
 
     if (term) {
       // Strip a leading # so "#4715" and "4715" both find the order, and match
       // the number anywhere so "TRZ1153" finds "#TRZ1153".
-      const bare = term.replace(/^#/, "");
-      q2 = q2.or(`order_number.ilike.%${bare}%,customer_name.ilike.%${bare}%,phone.ilike.%${bare}%,city.ilike.%${bare}%`);
+      /* Double-quoted, because a comma or bracket in the search ("Khan, Ali")
+         is part of the filter syntax and broke the whole query. */
+      const bare = term.replace(/^#/, "").replace(/["\\]/g, "");
+      const v = `"%${bare}%"`;
+      q2 = q2.or(`order_number.ilike.${v},customer_name.ilike.${v},phone.ilike.${v},city.ilike.${v}`);
     }
 
-    const [rowsRes, sumRes] = await Promise.all([
-      opts?.figuresOnly ? Promise.resolve({ data: null, error: null }) : q2,
+    const by = view === "cities" ? "city" : view === "status" ? "status" : view === "stores" ? "store" : null;
+    const [rowsRes, sumRes, grpRes] = await Promise.all([
+      opts?.figuresOnly ? Promise.resolve({ data: null, error: null, count: null }) : q2,
       supabase.rpc("hub_orders_summary", {
         p_from: from, p_to: to, p_store: store === "ALL" ? null : store,
       }),
+      /* BY CITY / STATUS / STORE are grouped in the database over every
+         matching order. They were grouped here from the first 1,000. */
+      by && !opts?.figuresOnly
+        ? supabase.rpc("hub_orders_breakdown", {
+            p_by: by, p_from: from, p_to: to, p_store: store === "ALL" ? null : store,
+            p_status: status, p_q: term || null,
+          })
+        : Promise.resolve({ data: null, error: null }),
     ]);
     if (my !== reqId.current) return;
-    if (rowsRes.error) setErr(rowsRes.error.message);
+    const firstErr = rowsRes.error ?? sumRes.error ?? grpRes.error;
+    if (firstErr) setErr(firstErr.message);
     // figuresOnly leaves the existing list in place rather than blanking it
-    if (!opts?.figuresOnly) setOrders((rowsRes.data as Order[]) ?? []);
+    if (!opts?.figuresOnly) {
+      setOrders((rowsRes.data as Order[]) ?? []);
+      setMatchCount(typeof rowsRes.count === "number" ? rowsRes.count : null);
+      setGrouped(((grpRes.data as { name: string; orders: number; value: number }[]) ?? [])
+        .map((g) => ({ name: g.name, count: Number(g.orders), amt: Number(g.value) })));
+    }
     setSummary((sumRes.data as OrdersSummary[])?.[0] ?? null);
     setLoading(false);
-  }, [preset, cf, ct, store, q]);
+  }, [preset, cf, ct, store, q, status, view]);
   useEffect(() => { load(); }, [load]);
 
   /* Shopify pushes order, payment and fulfilment changes to shopify-webhook,
@@ -154,13 +183,9 @@ export default function OrdersPage() {
      Now a search term goes to the server and the date window is dropped with
      it: somebody typing an order number is looking for that order, not for
      that order within the last 30 days. */
-  const filtered = useMemo(() => {
-    const n = q.trim().toLowerCase();
-    return orders.filter((o) =>
-      (status === "All" || o.status === status) &&
-      (!n || [o.order_number, o.customer_name, o.phone, o.city].some((v) => String(v ?? "").toLowerCase().includes(n)))
-    );
-  }, [orders, status, q]);
+  /* Everything is filtered by the database now — store, status, search and
+     dates — so the rows that came back ARE the matching orders. */
+  const filtered = orders;
 
   // every figure below is counted in the database, so it is the real total and
   // not however many rows happened to fit in one response
@@ -177,17 +202,6 @@ export default function OrdersPage() {
     { label: "Avg order", value: rs(Number(S?.avg_value ?? 0)), Icon: TrendingUp, bg: "bg-salmon-soft" },
   ];
 
-  const grouped = useMemo(() => {
-    const key = view === "cities" ? "city" : view === "status" ? "status" : view === "stores" ? "store_code" : null;
-    if (!key) return [];
-    const m: Record<string, { count: number; amt: number }> = {};
-    filtered.forEach((o) => {
-      const k = String(o[key] || "Unknown").trim() || "Unknown";
-      (m[k] ||= { count: 0, amt: 0 });
-      m[k].count += 1; m[k].amt += num(o.amount);
-    });
-    return Object.entries(m).map(([name, v]) => ({ name, ...v })).sort((a, b) => b.count - a.count).slice(0, 200);
-  }, [filtered, view]);
   const maxCount = Math.max(...grouped.map((g) => g.count), 1);
 
   return (
@@ -258,7 +272,7 @@ export default function OrdersPage() {
                 Array.from({ length: 8 }).map((_, i) => <tr key={i}><td colSpan={view === "list" ? 8 : 4} className="px-4 py-3"><div className="h-4 animate-pulse rounded bg-panel/70 dark:bg-white/[0.05]" /></td></tr>)
               ) : err ? (
                 <tr><td colSpan={view === "list" ? 8 : 4} className="px-4 py-12 text-center text-[13px] text-danger">Couldn&apos;t load orders: {err}</td></tr>
-              ) : filtered.length === 0 ? (
+              ) : (view === "list" ? filtered.length === 0 : grouped.length === 0) ? (
                 <tr><td colSpan={view === "list" ? 8 : 4} className="px-4 py-16 text-center text-[13px] text-muted dark:text-[#a89f93]">{orders.length === 0 ? "No orders in this period — fills once the Shopify sync is live." : "Nothing matches these filters."}</td></tr>
               ) : view === "list" ? (
                 filtered.slice(0, 500).map((o, i) => (
@@ -290,9 +304,13 @@ export default function OrdersPage() {
             </tbody>
           </table>
         </div>
-        {!loading && !err && filtered.length > 0 && (
+        {!loading && !err && (view === "list" ? filtered.length > 0 : grouped.length > 0) && (
           <div className="border-t border-line px-4 py-3 text-[12px] text-hint dark:border-white/[0.06] dark:text-[#8a8175]">
-            {view === "list" ? `${Math.min(filtered.length, 500).toLocaleString()} of ${filtered.length.toLocaleString()} orders` : `${grouped.length.toLocaleString()} rows`}
+            {/* Says how many there really are, so a list that stops at 500 is
+                never mistaken for all of them. */}
+            {view === "list"
+              ? `Showing ${Math.min(filtered.length, 500).toLocaleString()} of ${(matchCount ?? filtered.length).toLocaleString()} orders${(matchCount ?? 0) > 500 ? " — narrow the dates or search to see the rest" : ""}`
+              : `${grouped.reduce((a, g) => a + g.count, 0).toLocaleString()} orders in ${grouped.length.toLocaleString()} groups`}
           </div>
         )}
       </div>

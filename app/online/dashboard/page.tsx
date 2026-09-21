@@ -28,7 +28,12 @@ function Pie({ data }: { data: { label: string; value: number }[] }) {
   return (
     <div className="flex flex-wrap items-center gap-6">
       <svg width="200" height="200" viewBox="0 0 200 200" className="shrink-0">
-        {data.map((d, i) => <path key={d.label} d={arc(d.value)} fill={PIE[i % PIE.length]} stroke="var(--surface,#fff)" strokeWidth="1.5" />)}
+        {/* One slice is a whole circle, and an arc that starts and ends at the
+            same point draws nothing — a store selling into one city showed an
+            empty chart. A single value is drawn as a plain circle instead. */}
+        {data.filter((d) => d.value > 0).length === 1
+          ? <circle cx={cx} cy={cy} r={r} fill={PIE[data.findIndex((d) => d.value > 0) % PIE.length]} />
+          : data.map((d, i) => <path key={d.label} d={arc(d.value)} fill={PIE[i % PIE.length]} stroke="var(--surface,#fff)" strokeWidth="1.5" />)}
       </svg>
       <div className="flex min-w-[170px] flex-1 flex-col gap-2">
         {data.map((d, i) => (
@@ -373,7 +378,7 @@ export default function HubDashboard() {
                   {M.storeCols.map((s) => {
                     const meta = STORES.find((x) => x.code === s.store_code);
                     return (
-                      <th key={s.store_code} className={`px-4 py-2.5 text-right font-semibold ${s.is_total ? "bg-panel/60 text-ink dark:bg-white/[0.04] dark:text-[#f4f1ea]" : ""}`}>
+                      <th key={s.store_code} className={`whitespace-nowrap px-4 py-2.5 text-right font-semibold ${s.is_total ? "bg-panel/60 text-ink dark:bg-white/[0.04] dark:text-[#f4f1ea]" : ""}`}>
                         <span className="inline-flex items-center gap-1.5">
                           {!s.is_total && <span className="h-2 w-2 rounded-full" style={{ background: meta?.color }} />}
                           {meta?.label ?? s.store_code}
@@ -392,7 +397,7 @@ export default function HubDashboard() {
                       <div className={`${row.strong ? "font-bold text-ink dark:text-[#f4f1ea]" : "font-medium text-ink dark:text-[#e7e2d8]"} ${row.tone ? TONE_TXT[row.tone] : ""}`}>
                         {row.label}
                       </div>
-                      {row.hint && <div className="text-[11px] text-hint dark:text-[#8a8175]">{row.hint}</div>}
+                      {row.hint && <div className="hidden text-[11px] text-hint sm:block dark:text-[#8a8175]">{row.hint}</div>}
                     </td>
                     {M.storeCols.map((s) => {
                       const v = Number(s[row.v] ?? 0);
@@ -404,10 +409,10 @@ export default function HubDashboard() {
                         ? Math.round((v / s.sale_value) * 100) : null;
                       return (
                         <td key={s.store_code} className={`px-4 py-2.5 text-right tabular-nums ${s.is_total ? "bg-panel/60 dark:bg-white/[0.04]" : ""}`}>
-                          <div className={`${row.strong ? "text-[14px] font-extrabold" : "font-semibold"} ${row.tone ? TONE_TXT[row.tone] : "text-ink dark:text-[#f4f1ea]"}`}>
+                          <div className={`whitespace-nowrap ${row.strong ? "text-[14px] font-extrabold" : "font-semibold"} ${row.tone ? TONE_TXT[row.tone] : "text-ink dark:text-[#f4f1ea]"}`}>
                             {rs(v)}
                           </div>
-                          <div className="text-[11px] text-hint dark:text-[#8a8175]">
+                          <div className="whitespace-nowrap text-[11px] text-hint dark:text-[#8a8175]">
                             {n.toLocaleString()} {n === 1 ? "order" : "orders"}{share !== null && ` · ${share}%`}
                           </div>
                         </td>
@@ -418,7 +423,7 @@ export default function HubDashboard() {
                 <tr className="border-t border-line dark:border-white/[0.06]">
                   <td className="sticky left-0 z-10 bg-surface px-5 py-2.5 dark:bg-[#201c17]">
                     <div className="font-medium text-ink dark:text-[#e7e2d8]">Delivery rate</div>
-                    <div className="text-[11px] text-hint dark:text-[#8a8175]">delivered ÷ (delivered + returned)</div>
+                    <div className="hidden text-[11px] text-hint sm:block dark:text-[#8a8175]">delivered ÷ (delivered + returned)</div>
                   </td>
                   {M.storeCols.map((s) => (
                     <td key={s.store_code} className={`px-4 py-2.5 text-right font-bold tabular-nums text-ink dark:text-[#f4f1ea] ${s.is_total ? "bg-panel/60 dark:bg-white/[0.04]" : ""}`}>
@@ -445,7 +450,8 @@ export default function HubDashboard() {
           {loading ? <div className="py-10 text-center text-[13px] text-muted dark:text-[#a89f93]">Loading…</div>
           : M.couriers.length === 0 ? <div className="py-10 text-center text-[13px] text-muted dark:text-[#a89f93]">Nothing dispatched in this period.</div>
           : (
-            <table className="w-full text-[13px]">
+            <div className="-mx-1 overflow-x-auto px-1">
+            <table className="w-full min-w-[300px] text-[13px]">
               <thead className="text-[11.5px] uppercase tracking-wide text-muted dark:text-[#a89f93]">
                 <tr>
                   <th className="pb-2 text-left font-semibold">Courier</th>
@@ -465,6 +471,7 @@ export default function HubDashboard() {
                 ))}
               </tbody>
             </table>
+            </div>
           )}
         </div>
       </div>

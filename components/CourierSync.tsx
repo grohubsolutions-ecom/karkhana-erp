@@ -109,7 +109,11 @@ export default function CourierSync({ onDone }: { onDone: () => void }) {
     };
 
     const plan: { label: string; fn: string; body: Record<string, unknown>; read: (d: Record<string, unknown>) => string }[] = [
-      { label: "PostEx orders", fn: "postex-sync", body: { action: "postex_pull", days },
+      /* "All time" is days = 0, which run() handles by walking back window by
+         window. Run all sent the 0 straight through and fetched nothing. It uses
+         the nightly job's 45 days instead; a true all-time pull stays on the
+         single PostEx orders button, which knows how to walk back. */
+      { label: "PostEx orders", fn: "postex-sync", body: { action: "postex_pull", days: days === 0 ? 45 : days },
         read: (d) => `${Number(d.fetched ?? 0).toLocaleString()} fetched · ${Number(d.merged ?? 0).toLocaleString()} saved` },
       { label: "PostEx status", fn: "postex-sync", body: { action: "postex_track" },
         read: (d) => `${Number(d.updated ?? 0).toLocaleString()} updated of ${Number(d.checked ?? 0).toLocaleString()}` },

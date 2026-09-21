@@ -65,13 +65,19 @@ export default function HubBell({ dark = false, align = "right" }: { dark?: bool
     setItems((data as Note[]) ?? []);
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  /* ONE BELL ASKS, NOT TWO.
+     The Hub shows this bell twice — in the sidebar on a desktop, in the header
+     on a phone — and CSS hides whichever does not fit the screen. Both used to
+     poll every minute regardless. A hidden element has no offsetParent, so the
+     one you cannot see now stays quiet. */
+  const shown = () => !!box.current && box.current.offsetParent !== null;
+  useEffect(() => { if (shown()) load(); }, [load]);
 
   /* Checked every minute while somebody is looking at the tab, and not at all
      while they are not. A background tab polling all day costs a free-tier
      quota and tells nobody anything. */
   useEffect(() => {
-    const t = setInterval(() => { if (document.visibilityState === "visible") load(); }, 60000);
+    const t = setInterval(() => { if (document.visibilityState === "visible" && shown()) load(); }, 60000);
     return () => clearInterval(t);
   }, [load]);
 
@@ -89,8 +95,10 @@ export default function HubBell({ dark = false, align = "right" }: { dark?: bool
     const next = !open;
     setOpen(next);
     if (next && unread > 0 && supabase) {
-      await supabase.rpc("hub_notification_read", { p_id: null });
-      setItems((prev) => prev.map((n) => ({ ...n, read_at: n.read_at ?? new Date().toISOString() })));
+      const { error } = await supabase.rpc("hub_notification_read", { p_id: null });
+      /* Cleared on screen only if the database agreed — otherwise the badge
+         would vanish now and come back on the next check a minute later. */
+      if (!error) setItems((prev) => prev.map((n) => ({ ...n, read_at: n.read_at ?? new Date().toISOString() })));
     }
   }
 

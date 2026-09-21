@@ -3,7 +3,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLiveTables } from "@/lib/useLiveTables";
 import { Package, Truck, CheckCircle2, Undo2, Percent, Wallet, Search, RefreshCw, XCircle, Clock, TrendingUp } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
-import { useConfirm } from "@/components/ConfirmDialog";
 import RangeBar from "@/components/RangeBar";
 import { rangeDates, num, rs } from "@/lib/dateRange";
 import { AddShipment } from "@/components/LogisticsEntry";
@@ -51,7 +50,6 @@ type CourierRow = {
 
 type StatusRow = { raw_status: string; delivery_status: string; parcels: number };
 
-const isRts = (l: Logi) => l.delivery_status === "RTS" || l.delivery_status === "Returned" || (!!l.rts && l.rts !== "No" && l.rts !== "false");
 
 export default function LogisticsPage() {
   const [rows, setRows] = useState<Logi[]>([]);
@@ -61,10 +59,7 @@ export default function LogisticsPage() {
   const [statusCounts, setStatusCounts] = useState<StatusRow[]>([]);
   const [rawStatus, setRawStatus] = useState("All statuses");
   const [loading, setLoading] = useState(true);
-  const confirm = useConfirm();
   const [err, setErr] = useState("");
-  const [busy, setBusy] = useState("");
-  const [note, setNote] = useState("");
   const [store, setStore] = useState("ALL");
   const [courier, setCourier] = useState("All couriers");
   const [statusFilter, setStatusFilter] = useState("");
@@ -72,6 +67,12 @@ export default function LogisticsPage() {
   const [view, setView] = useState<View>("list");
   const [preset, setPreset] = useState("30d");
   const [cf, setCf] = useState(""); const [ct, setCt] = useState("");
+  /* The search box updates `q` on every key; the database is only asked once
+     typing pauses, so a tracking number is one request, not fifteen. */
+  const [term, setTerm] = useState("");
+  useEffect(() => { const t = setTimeout(() => setTerm(q.trim()), 300); return () => clearTimeout(t); }, [q]);
+  /* How many shipments really match — the list itself stops at 1,000. */
+  const [matchCount, setMatchCount] = useState<number | null>(null);
 
   /* Every fetch carries a sequence number and only the newest one may write to
      state.
@@ -93,32 +94,6 @@ export default function LogisticsPage() {
      moves a handful of statuses, not the list.
      So a realtime refresh brings the FIGURES up to date and leaves the list
      alone; Refresh, or any filter change, pulls the rows. Live numbers, cheap. */
-  /* The database refuses to remove a settled or delivered parcel, so the worst
-     this can do is delete a booking that was never real. The removed row is
-     copied to online_logistics_deleted with who removed it and why — "where did
-     that parcel go" has to stay answerable. */
-  async function removeParcel(tracking: string, order: string) {
-    if (!supabase || !tracking || tracking === "—") return;
-    const answer = await confirm({
-      title: `Remove ${order || tracking}?`,
-      body: "For a booking that should never have existed — a double booking, or one made by mistake. A settled or delivered parcel cannot be removed. The row is kept with your note in case anyone asks later.",
-      reasonLabel: "Why is it being removed?",
-      reasonDefault: "booked by mistake",
-      confirmLabel: "Remove shipment",
-    });
-    // An empty note still counts as confirmed, so test against false.
-    if (answer === false) return;
-    const reason = typeof answer === "string" ? answer : "";
-    setBusy(tracking); setErr(""); setNote("");
-    const { data, error } = await supabase.rpc("hub_delete_parcel", {
-      p_tracking: tracking, p_reason: reason || null,
-    });
-    setBusy("");
-    if (error) { setErr(error.message); return; }
-    setNote(String(data ?? "Removed."));
-    load();
-  }
-
   const load = useCallback(async (opts?: { silent?: boolean; figuresOnly?: boolean }) => {
     if (!isSupabaseConfigured || !supabase) { setLoading(false); return; }
     const myReq = ++reqId.current;
@@ -126,18 +101,31 @@ export default function LogisticsPage() {
     setErr("");
     const [from, to] = rangeDates(preset, cf, ct);
     let q2 = supabase.from("online_logistics")
-      .select("id,order_number,store_code,courier,tracking_id,dispatch_date,delivery_status,delivery_date,cod_amount,cpr_net_amount,courier_fee,payment_status,rts,rts_reason")
+      .select("id,order_number,store_code,courier,tracking_id,dispatch_date,delivery_status,delivery_date,cod_amount,cpr_net_amount,courier_fee,payment_status,rts,rts_reason", { count: "exact" })
       .order("dispatch_date", { ascending: false, nullsFirst: false })
       /* 1000, not 5000. PostgREST caps a response at 1000 rows however large
          the limit, so asking for 5000 fetched 1000 and quietly implied the page
          held five times more than it did. Every TOTAL on this page comes from
          hub_logistics_summary and is unaffected; this is the visible list. */
       .limit(1000);
-    if (from) q2 = q2.gte("dispatch_date", from);
-    if (to) q2 = q2.lte("dispatch_date", to);
+    /* A search ignores the dates — somebody pasting a tracking number wants
+       that parcel, whenever it was dispatched. */
+    if (!term) {
+      if (from) q2 = q2.gte("dispatch_date", from);
+      if (to) q2 = q2.lte("dispatch_date", to);
+    }
     if (store !== "ALL") q2 = q2.eq("store_code", store);
     if (courier !== "All couriers") q2 = q2.eq("courier", courier);
     if (rawStatus !== "All statuses") q2 = q2.eq("raw_status", rawStatus);
+    /* THE CARD FILTER AND THE SEARCH RUN IN THE DATABASE.
+       Both used to filter the 1,000 rows already loaded, so a parcel outside
+       them showed "Nothing matches these filters" — indistinguishable from
+       the parcel not existing. Every card filter value is a delivery_status. */
+    if (statusFilter) q2 = q2.eq("delivery_status", statusFilter);
+    if (term) {
+      const v = `"%${term.replace(/^#/, "").replace(/["\\]/g, "")}%"`;
+      q2 = q2.or(`order_number.ilike.${v},tracking_id.ilike.${v}`);
+    }
     // Rows are for the table only. The cards and the chart come from database
     // aggregates, because PostgREST caps a response at 1,000 rows and counting
     // a truncated page understated every total (see migration 0051).
@@ -147,7 +135,7 @@ export default function LogisticsPage() {
       p_courier: courier === "All couriers" ? null : courier,
     };
     const [rowsRes, sumRes, trendRes, courierRes, statusRes] = await Promise.all([
-      opts?.figuresOnly ? Promise.resolve({ data: null, error: null }) : q2,
+      opts?.figuresOnly ? Promise.resolve({ data: null, error: null, count: null }) : q2,
       supabase.rpc("hub_logistics_summary", args),
       supabase.rpc("hub_logistics_trend", { ...args, p_days: 14 }),
       supabase.rpc("hub_logistics_by_courier", { p_from: args.p_from, p_to: args.p_to, p_store: args.p_store }),
@@ -157,9 +145,15 @@ export default function LogisticsPage() {
     // rather than painting stale figures under a freshly pressed button
     if (myReq !== reqId.current) return;
 
-    if (rowsRes.error) setErr(rowsRes.error.message);
+    /* Any failure is SAID. A failed summary used to fall back quietly to
+       counting the 1,000 loaded rows, which looked like real figures. */
+    const firstErr = rowsRes.error ?? sumRes.error ?? trendRes.error ?? courierRes.error ?? statusRes.error;
+    if (firstErr) setErr(firstErr.message);
     // figuresOnly leaves the existing table in place rather than blanking it
-    if (!opts?.figuresOnly) setRows((rowsRes.data as Logi[]) ?? []);
+    if (!opts?.figuresOnly) {
+      setRows((rowsRes.data as Logi[]) ?? []);
+      setMatchCount(typeof rowsRes.count === "number" ? rowsRes.count : null);
+    }
     setSummary((sumRes.data as Summary[])?.[0] ?? null);
     setTrendRows((trendRes.data as { day: string; delivered: number }[]) ?? []);
     // when one courier is selected the comparison is meaningless — show that
@@ -169,7 +163,7 @@ export default function LogisticsPage() {
     setStatusCounts((statusRes.data as StatusRow[]) ?? []);
     setLoading(false);
     lastLoadAt.current = Date.now();
-  }, [preset, cf, ct, store, courier, rawStatus]);
+  }, [preset, cf, ct, store, courier, rawStatus, statusFilter, term]);
   useEffect(() => { load(); }, [load]);
 
   /* Live. The couriers push (PostEx webhook) or are polled (OwnEx), both of
@@ -216,71 +210,38 @@ export default function LogisticsPage() {
 
   useEffect(() => () => { if (clickTimer.current) clearTimeout(clickTimer.current); }, []);
 
-  const filtered = useMemo(() => {
-    const n = q.trim().toLowerCase();
-    return rows.filter((l) =>
-      (courier === "All couriers" || l.courier === courier) &&
-      (!statusFilter
-        || (statusFilter === "Out for return"
-              ? l.delivery_status === "RTS"
-              : statusFilter === "Returned"
-                ? l.delivery_status === "Returned"
-                : l.delivery_status === statusFilter)) &&
-      (!statusFilter
-        || (statusFilter === "RTS" ? isRts(l) : l.delivery_status === statusFilter)) &&
-      (!n || [l.order_number, l.tracking_id].some((v) => String(v ?? "").toLowerCase().includes(n)))
-    );
-  }, [rows, courier, q, statusFilter]);
+  /* The database filtered store, courier, status, card and search — the rows
+     that came back ARE the matches. */
+  const filtered = rows;
 
+  /* EVERY CARD FROM THE DATABASE, never from the loaded rows.
+     "Not collected" read 0 on every load: the summary function has no Unbooked
+     figure and only the fallback below it computed one — a fallback that could
+     only run when the summary had failed. It now comes from the status counts,
+     which are counted over every parcel in the period. */
   const M = useMemo(() => {
-    if (summary) {
-      const n = (v: unknown) => Number(v ?? 0);
-      return {
-        total: n(summary.total), active: n(summary.active), transit: n(summary.transit),
-        transitPortal: n(summary.transit_portal),
-        delivered: n(summary.delivered), rts: n(summary.rts),
-        returnedReceived: n(summary.returned_received), outForReturn: n(summary.out_for_return),
-        cancelled: n(summary.cancelled),
-        rate: n(summary.delivery_rate), cod: n(summary.cod),
-        receivable: n(summary.receivable), receivableCount: n(summary.receivable_count),
-        fees: n(summary.fees),
-      };
-    }
-    // fallback: only correct while the result set is under PostgREST's row cap
-    const delivered = filtered.filter((l) => l.delivery_status === "Delivered").length;
-    const rts = filtered.filter(isRts).length;
-    const cancelled = filtered.filter((l) => l.delivery_status === "Cancelled").length;
-    const settled = delivered + rts;
-    const isPaid = (l: Logi) => l.payment_status === "Paid" || l.payment_status === "Received";
+    const n = (v: unknown) => Number(v ?? 0);
+    const unbooked = statusCounts
+      .filter((r) => r.delivery_status === "Unbooked")
+      .reduce((a, r) => a + n(r.parcels), 0);
+    const S = summary;
     return {
-      total: filtered.length,
-      active: filtered.length - cancelled,
-      transit: filtered.filter((l) => l.delivery_status === "In Transit").length,
-      transitPortal: filtered.filter((l) => l.delivery_status === "In Transit").length,
-      unbooked: filtered.filter((l) => l.delivery_status === "Unbooked").length,
-      delivered, rts, returnedReceived: rts, outForReturn: 0, cancelled,
-      rate: settled ? (delivered / settled) * 100 : 0,
-      cod: filtered.filter((l) => l.delivery_status === "Delivered").reduce((a, l) => a + num(l.cod_amount), 0),
-      receivable: filtered.filter((l) => l.delivery_status === "Delivered" && !isPaid(l)).reduce((a, l) => a + num(l.cod_amount), 0),
-      receivableCount: filtered.filter((l) => l.delivery_status === "Delivered" && !isPaid(l)).length,
-      fees: filtered.reduce((a, l) => a + num(l.courier_fee), 0),
+      total: n(S?.total), active: n(S?.active), transit: n(S?.transit),
+      transitPortal: n(S?.transit_portal), unbooked,
+      delivered: n(S?.delivered), rts: n(S?.rts),
+      returnedReceived: n(S?.returned_received), outForReturn: n(S?.out_for_return),
+      cancelled: n(S?.cancelled),
+      rate: n(S?.delivery_rate), cod: n(S?.cod),
+      receivable: n(S?.receivable), receivableCount: n(S?.receivable_count),
+      fees: n(S?.fees),
     };
-  }, [filtered, summary]);
+  }, [summary, statusCounts]);
 
-  // 14-day delivered trend, drawn from the rows we already have
-  const trend = useMemo(() => {
-    if (trendRows.length)
-      return [...trendRows].sort((a, b) => a.day.localeCompare(b.day))
-        .map((r) => ({ date: r.day, count: Number(r.delivered ?? 0) }));
-    const byDay: Record<string, number> = {};
-    filtered.forEach((l) => {
-      if (l.delivery_status !== "Delivered") return;
-      const d = String(l.delivery_date ?? "").slice(0, 10);
-      if (d) byDay[d] = (byDay[d] || 0) + 1;
-    });
-    return Object.entries(byDay).sort((a, b) => a[0].localeCompare(b[0])).slice(-14)
-      .map(([date, count]) => ({ date, count }));
-  }, [filtered, trendRows]);
+  // 14-day delivered trend, counted in the database
+  const trend = useMemo(() =>
+    [...trendRows].sort((a, b) => a.day.localeCompare(b.day))
+      .map((r) => ({ date: r.day, count: Number(r.delivered ?? 0) })),
+  [trendRows]);
 
   const cards = [
     { label: "Active shipments", value: M.active.toLocaleString(), sub: M.cancelled ? `${M.total.toLocaleString()} incl. cancelled` : undefined, Icon: Package, bg: "bg-periwinkle-soft" },
@@ -306,34 +267,22 @@ export default function LogisticsPage() {
   // Counted in the database (0052). The previous version tallied the rows the
   // browser happened to receive, which PostgREST caps at 1,000 — so on wide
   // ranges this table under-reported exactly like the cards did.
-  const byCourier = useMemo(() => {
-    if (courierSplit.length)
-      return courierSplit.filter((c) => c.courier !== "TOTAL").map((c) => ({
-        name: c.courier, total: Number(c.total), delivered: Number(c.delivered),
-        rts: Number(c.returned_received ?? c.rts), outForReturn: Number(c.out_for_return ?? 0),
-        transit: Number(c.transit_portal ?? c.transit), cancelled: Number(c.cancelled),
-        cod: Number(c.cod), receivable: Number(c.receivable), fees: Number(c.fees),
-        rate: Number(c.delivery_rate),
-      }));
-    const m: Record<string, { total: number; delivered: number; rts: number; transit: number; cancelled: number; cod: number; receivable: number; fees: number }> = {};
-    filtered.forEach((l) => {
-      const k = String(l.courier || "—");
-      (m[k] ||= { total: 0, delivered: 0, rts: 0, transit: 0, cancelled: 0, cod: 0, receivable: 0, fees: 0 });
-      m[k].total += 1;
-      if (l.delivery_status === "Delivered") { m[k].delivered += 1; m[k].cod += num(l.cod_amount); }
-      if (isRts(l)) m[k].rts += 1;
-      if (l.delivery_status === "In Transit") m[k].transit += 1;
-      if (l.delivery_status === "Cancelled") m[k].cancelled += 1;
-      m[k].fees += num(l.courier_fee);
-    });
-    return Object.entries(m).map(([name, v]) => ({ name, ...v, rate: v.delivered + v.rts ? (v.delivered / (v.delivered + v.rts)) * 100 : 0 })).sort((a, b) => b.total - a.total);
-  }, [filtered, courierSplit]);
+  const byCourier = useMemo(() =>
+    courierSplit.filter((c) => c.courier !== "TOTAL").map((c) => ({
+      name: c.courier, total: Number(c.total), delivered: Number(c.delivered),
+      rts: Number(c.returned_received ?? c.rts), outForReturn: Number(c.out_for_return ?? 0),
+      transit: Number(c.transit_portal ?? c.transit), cancelled: Number(c.cancelled),
+      cod: Number(c.cod), receivable: Number(c.receivable), fees: Number(c.fees),
+      rate: Number(c.delivery_rate),
+    })), [courierSplit]);
 
+  /* BY STATUS counts every parcel in the period — it tallied the 1,000 loaded
+     rows before, although the full counts were already on hand. */
   const byStatus = useMemo(() => {
     const m: Record<string, number> = {};
-    filtered.forEach((l) => { const k = String(l.delivery_status || "—"); m[k] = (m[k] || 0) + 1; });
+    statusCounts.forEach((r) => { const k = String(r.delivery_status || "—"); m[k] = (m[k] || 0) + Number(r.parcels ?? 0); });
     return Object.entries(m).map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count);
-  }, [filtered]);
+  }, [statusCounts]);
   const maxStatus = Math.max(...byStatus.map((s) => s.count), 1);
 
   return (
@@ -393,13 +342,6 @@ export default function LogisticsPage() {
             </div>
           </>
         } />
-
-      {statusFilter && (
-        <div className="mt-4 flex items-center gap-2 rounded-full bg-ink px-4 py-2 text-[12.5px] font-semibold text-white dark:bg-white dark:text-[#141414]">
-          Showing {statusFilter.toLowerCase()} only
-          <button onClick={() => setStatusFilter("")} className="underline">clear</button>
-        </div>
-      )}
 
       <div className="mt-5 grid grid-cols-2 gap-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-9">
         {cards.map(({ label, value, sub, Icon, bg, warn, filter }) => {
@@ -499,18 +441,12 @@ export default function LogisticsPage() {
         </div>
       </div>
 
-      {note && (
-        <div className="mt-3 rounded-card border border-emerald-300 bg-success-soft p-2.5 text-[12.5px] font-medium text-emerald-900">
-          {note}
-        </div>
-      )}
-
       <div className="mt-4 overflow-hidden rounded-card border border-line bg-surface dark:border-white/[0.06] dark:bg-[#201c17]">
         <div className="overflow-x-auto">
           <table className="w-full min-w-[680px] text-left text-[13px]">
             <thead>
               <tr className="border-b border-line text-[11.5px] uppercase tracking-wide text-hint dark:border-white/[0.06] dark:text-[#8a8175]">
-                {view === "list" && <><th className="px-4 py-3 font-semibold">Order #</th><th className="px-4 py-3 font-semibold">Store</th><th className="px-4 py-3 font-semibold">Courier</th><th className="px-4 py-3 font-semibold">Tracking</th><th className="px-4 py-3 font-semibold">Dispatched</th><th className="px-4 py-3 text-right font-semibold">COD</th><th className="px-4 py-3 font-semibold">Delivery</th><th className="px-4 py-3" /></>}
+                {view === "list" && <><th className="px-4 py-3 font-semibold">Order #</th><th className="px-4 py-3 font-semibold">Store</th><th className="px-4 py-3 font-semibold">Courier</th><th className="px-4 py-3 font-semibold">Tracking</th><th className="px-4 py-3 font-semibold">Dispatched</th><th className="px-4 py-3 text-right font-semibold">COD</th><th className="px-4 py-3 font-semibold">Delivery</th></>}
                 {view === "couriers" && <><th className="px-4 py-3 font-semibold">Courier</th><th className="px-4 py-3 text-right font-semibold">Shipments</th><th className="px-4 py-3 text-right font-semibold">Delivered</th><th className="px-4 py-3 text-right font-semibold">RTS</th><th className="px-4 py-3 text-right font-semibold">Rate</th><th className="px-4 py-3 text-right font-semibold">COD</th><th className="px-4 py-3 text-right font-semibold">Fees</th></>}
                 {view === "status" && <><th className="px-4 py-3 font-semibold">Status</th><th className="px-4 py-3 text-right font-semibold">Shipments</th><th className="hidden px-4 py-3 font-semibold sm:table-cell">Share</th></>}
               </tr>
@@ -520,8 +456,8 @@ export default function LogisticsPage() {
                 Array.from({ length: 8 }).map((_, i) => <tr key={i}><td colSpan={7} className="px-4 py-3"><div className="h-4 animate-pulse rounded bg-panel/70 dark:bg-white/[0.05]" /></td></tr>)
               ) : err ? (
                 <tr><td colSpan={7} className="px-4 py-12 text-center text-[13px] text-danger">Couldn&apos;t load logistics: {err}</td></tr>
-              ) : filtered.length === 0 ? (
-                <tr><td colSpan={7} className="px-4 py-16 text-center text-[13px] text-muted dark:text-[#a89f93]">{rows.length === 0 ? "No shipments in this period — fills once the courier sync is live." : "Nothing matches these filters."}</td></tr>
+              ) : (view === "list" ? filtered.length === 0 : view === "couriers" ? byCourier.length === 0 : byStatus.length === 0) ? (
+                <tr><td colSpan={7} className="px-4 py-16 text-center text-[13px] text-muted dark:text-[#a89f93]">{statusFilter || term || rawStatus !== "All statuses" ? "Nothing matches these filters." : "No shipments in this period."}</td></tr>
               ) : view === "list" ? (
                 filtered.slice(0, 500).map((l, i) => (
                   <tr key={i} className="text-ink transition hover:bg-panel/50 dark:text-[#e7e2d8] dark:hover:bg-white/[0.03]">
@@ -532,19 +468,6 @@ export default function LogisticsPage() {
                     <td className="px-4 py-3 text-muted dark:text-[#a89f93]">{String(l.dispatch_date ?? "—")}</td>
                     <td className="px-4 py-3 text-right font-semibold tabular-nums">{l.cod_amount == null ? "—" : rs(num(l.cod_amount))}</td>
                     <td className="px-4 py-3"><span className={`inline-block rounded-full px-2.5 py-1 text-[11.5px] font-semibold ${deliveryClass(String(l.delivery_status))}`}>{String(l.delivery_status ?? "—")}</span></td>
-                    {/* REMOVE A BOOKING THAT SHOULD NOT EXIST.
-                        An agent booked #LM15503 twice, six minutes apart. Both
-                        counted as real shipments and one of them was never
-                        going to arrive. A settled or delivered parcel is
-                        refused by the database, so this can only ever remove a
-                        mistake, never money. */}
-                    <td className="px-4 py-3 text-right">
-                      <button onClick={() => removeParcel(String(l.tracking_id), String(l.order_number ?? ""))}
-                              disabled={busy === String(l.tracking_id)}
-                              className="rounded-full border border-line px-2.5 py-1 text-[11.5px] font-semibold text-muted transition hover:border-red-300 hover:bg-red-50 hover:text-red-700 disabled:opacity-40 dark:border-white/10 dark:text-[#a89f93]">
-                        {busy === String(l.tracking_id) ? "…" : "Remove"}
-                      </button>
-                    </td>
                   </tr>
                 ))
               ) : view === "couriers" ? (
@@ -577,7 +500,8 @@ export default function LogisticsPage() {
         </div>
         {!loading && !err && filtered.length > 0 && view === "list" && (
           <div className="border-t border-line px-4 py-3 text-[12px] text-hint dark:border-white/[0.06] dark:text-[#8a8175]">
-            {Math.min(filtered.length, 500).toLocaleString()} of {filtered.length.toLocaleString()} shipments
+            Showing {Math.min(filtered.length, 500).toLocaleString()} of {(matchCount ?? filtered.length).toLocaleString()} shipments
+            {(matchCount ?? 0) > 500 && " — narrow the dates or search to see the rest"}
           </div>
         )}
       </div>

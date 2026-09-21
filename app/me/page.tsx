@@ -72,7 +72,10 @@ export default function MyPortal() {
       supabase.rpc("my_advances", { p_year: year, p_month: month }),
       supabase.from("online_att_holidays").select("hdate,name"),
     ]);
-    if (m.error) setErr(m.error.message);
+    /* Any failure is said. Only the first one was checked, so a failed pay
+       figure showed Rs 0 — as if nothing had been earned this month. */
+    const firstErr = m.error ?? p.error ?? d.error ?? a.error ?? h.error;
+    if (firstErr) setErr(firstErr.message);
     setMe(((m.data as Me[]) ?? [])[0] ?? null);
     setPay(((p.data as Pay[]) ?? [])[0] ?? null);
     setDays((d.data as Day[]) ?? []);
@@ -186,7 +189,9 @@ export default function MyPortal() {
               <label className="sr-only" htmlFor="y">Year</label>
               <select id="y" value={year} onChange={(e) => setYear(Number(e.target.value))}
                       className="rounded-full border border-white/20 bg-white/10 px-3 py-1.5 text-[12.5px] font-semibold text-white outline-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white">
-                {[year - 1, year].map((y) => <option key={y} value={y} className="text-ink">{y}</option>)}
+                {/* Built from TODAY's year, not the chosen one. Choosing last year
+                    used to drop this year from the list, with no way back but a reload. */}
+                {[today.getFullYear() - 1, today.getFullYear()].map((y) => <option key={y} value={y} className="text-ink">{y}</option>)}
               </select>
             </div>
           </div>

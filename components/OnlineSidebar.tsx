@@ -6,7 +6,11 @@ import { LayoutDashboard, ClipboardList, Truck, Wallet, CalendarCheck, Users, Ar
 import HubBell from "@/components/HubBell";
 import { supabase } from "@/lib/supabase";
 import { usePermissions } from "@/lib/usePermissions";
-import { ROUTE_PERMS } from "@/lib/access";
+/* requiredFor, not ROUTE_PERMS[href]: the prefix-aware lookup the page lock
+   in AppFrame uses. Disputes has no entry of its own, so ROUTE_PERMS[...] read
+   "no permission needed" — everybody saw a Finance menu whose Disputes link
+   then refused them. */
+import { requiredFor } from "@/lib/access";
 import ThemeToggle from "@/components/ThemeToggle";
 
 type NavItem = {
@@ -66,10 +70,10 @@ export default function OnlineSidebar({ open, onClose }: { open?: boolean; onClo
      nothing under it is a heading pointing at nothing. */
   const visible = NAV.map((n) => {
     if (n.children) {
-      const kids = n.children.filter((c) => can(ROUTE_PERMS[c.href] ?? null));
+      const kids = n.children.filter((c) => can(requiredFor(c.href)));
       return kids.length ? { ...n, children: kids } : null;
     }
-    return can(ROUTE_PERMS[n.href] ?? null) ? n : null;
+    return can(requiredFor(n.href)) ? n : null;
   }).filter((n): n is (typeof NAV)[number] => n !== null);
   const pathname = usePathname();
   const router = useRouter();
@@ -94,7 +98,10 @@ export default function OnlineSidebar({ open, onClose }: { open?: boolean; onClo
           </div>
           {/* Opens rightward, into the page. The sidebar is only 248px wide,
               so a panel anchored the other way lands off the screen. */}
-          <HubBell align="left" />
+          {/* Desktop only. On a phone the header carries the bell; inside this
+              sliding drawer the panel was measured from the drawer, not the
+              screen, and opened squeezed to a sliver. */}
+          <span className="hidden md:block"><HubBell align="left" /></span>
         </div>
         <nav className="flex-1 space-y-1 overflow-y-auto px-3" onClick={(e) => { if ((e.target as HTMLElement).closest("a")) onClose?.(); }}>
           {ready && visible.map(({ label, href, Icon, soon, children }) => {

@@ -72,27 +72,6 @@ export default function DisputesPage() {
   const [cf, setCf] = useState("");
   const [ct, setCt] = useState("");
 
-  const load = useCallback(async () => {
-    if (!isSupabaseConfigured || !supabase) { setLoading(false); return; }
-    setLoading(true); setErr("");
-    const { data, error } = await supabase
-      .from("v_return_disputes")
-      .select("*")
-      .order("settled_on", { ascending: false, nullsFirst: false })
-      .limit(1000);
-    setLoading(false);
-    if (error) { setErr(error.message); return; }
-    setRows((data as Dispute[]) ?? []);
-    setPicked([]);
-  }, []);
-
-  useEffect(() => { load(); }, [load]);
-
-  const cprs = useMemo(
-    () => [...new Set(rows.map((r) => r.cpr_number).filter(Boolean))] as string[],
-    [rows],
-  );
-
   const range = useMemo(() => {
     const d = (n: number) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
     switch (preset) {
@@ -106,11 +85,43 @@ export default function DisputesPage() {
     }
   }, [preset, cf, ct]);
 
+  /* THE DATES ARE APPLIED BY THE DATABASE.
+     The page used to load the first 1,000 disputes of all time and filter the
+     dates here — fine at today's ~230, silently short past 1,000, and the
+     totals are added from this list. A dispute with no return date recorded
+     is kept in every range rather than hidden from all of them. */
+  const [matchCount, setMatchCount] = useState<number | null>(null);
+  const load = useCallback(async () => {
+    if (!isSupabaseConfigured || !supabase) { setLoading(false); return; }
+    setLoading(true); setErr("");
+    let qq = supabase
+      .from("v_return_disputes")
+      .select("*", { count: "exact" })
+      .order("settled_on", { ascending: false, nullsFirst: false })
+      .limit(1000);
+    /* One logic tree, never two .or() calls on the same request. */
+    if (range.from && range.to)
+      qq = qq.or(`and(return_date.gte.${range.from},return_date.lte.${range.to}),return_date.is.null`);
+    else if (range.from) qq = qq.or(`return_date.gte.${range.from},return_date.is.null`);
+    else if (range.to)   qq = qq.or(`return_date.lte.${range.to},return_date.is.null`);
+    const { data, error, count } = await qq;
+    setLoading(false);
+    if (error) { setErr(error.message); return; }
+    setRows((data as Dispute[]) ?? []);
+    setMatchCount(typeof count === "number" ? count : null);
+    setPicked([]);
+  }, [range]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const cprs = useMemo(
+    () => [...new Set(rows.map((r) => r.cpr_number).filter(Boolean))] as string[],
+    [rows],
+  );
+
   const shown = useMemo(() => {
     const n = q.trim().toLowerCase().replace("#", "");
     return rows.filter((r) =>
-      (!range.from || (r.return_date ?? "") >= range.from) &&
-      (!range.to   || (r.return_date ?? "") <= range.to) &&
       (courier === "All" || r.courier === courier) &&
       (cpr === "All" || r.cpr_number === cpr) &&
       (!n || [r.order_number, r.tracking_id, r.customer_name, r.city]
@@ -120,7 +131,7 @@ export default function DisputesPage() {
      React never recomputes when a date chip is clicked — the dates were being
      applied to a list that never refreshed, and every preset showed the same
      count. */
-  }, [rows, q, courier, cpr, range]);
+  }, [rows, q, courier, cpr]);
 
   const totals = useMemo(() => ({
     n: shown.length,
@@ -195,6 +206,13 @@ export default function DisputesPage() {
         </button>
       </div>
 
+      {/* The totals below are added from the loaded list, which stops at 1,000.
+          If the range ever holds more, say so instead of showing a short total. */}
+      {!loading && matchCount != null && matchCount > rows.length && (
+        <p className="mt-4 rounded-card border border-amber-300 bg-amber-soft px-4 py-2.5 text-[12.5px] font-semibold text-amber-900">
+          {matchCount.toLocaleString()} disputes in this range — only the newest {rows.length.toLocaleString()} are counted below. Narrow the dates.
+        </p>
+      )}
       <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
         <div className="rounded-card border border-line bg-surface p-4 dark:border-white/10 dark:bg-[#201c17]">
           <div className="text-[22px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">
@@ -255,7 +273,7 @@ export default function DisputesPage() {
           {cprs.map((c) => <option key={c}>{c}</option>)}
         </select>
 
-        <div className="ml-auto flex items-center gap-2">
+        <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
           {picked.length > 0 && (
             <button onClick={() => setPicked([])}
                     className="text-[12.5px] font-semibold text-muted underline underline-offset-2 dark:text-[#a89f93]">
@@ -263,16 +281,16 @@ export default function DisputesPage() {
             </button>
           )}
           <button onClick={allShown} disabled={!shown.length}
-                  className="rounded-full border border-line px-3 py-1.5 text-[12.5px] font-semibold disabled:opacity-40 dark:border-white/10">
+                  className="min-h-[36px] rounded-full border border-line px-3 py-1.5 text-[12.5px] font-semibold disabled:opacity-40 dark:border-white/10">
             Select all {shown.length}
           </button>
           <button onClick={() => push("close")} disabled={!picked.length || !!busy}
-                  className="rounded-full bg-ink px-3.5 py-1.5 text-[12.5px] font-semibold text-white disabled:opacity-40 dark:bg-white dark:text-[#141414]">
+                  className="min-h-[36px] rounded-full bg-ink px-3.5 py-1.5 text-[12.5px] font-semibold text-white disabled:opacity-40 dark:bg-white dark:text-[#141414]">
             {busy === "close" && <Loader2 size={12} className="mr-1 inline animate-spin" />}
             Close {picked.length || ""} in Shopify
           </button>
           <button onClick={() => push("cancel")} disabled={!picked.length || !!busy}
-                  className="rounded-full border border-red-300 px-3.5 py-1.5 text-[12.5px] font-semibold text-red-700 hover:bg-red-50 disabled:opacity-40">
+                  className="min-h-[36px] rounded-full border border-red-300 px-3.5 py-1.5 text-[12.5px] font-semibold text-red-700 hover:bg-red-50 disabled:opacity-40">
             {busy === "cancel" && <Loader2 size={12} className="mr-1 inline animate-spin" />}
             Cancel {picked.length || ""}
           </button>
