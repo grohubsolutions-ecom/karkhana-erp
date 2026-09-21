@@ -601,8 +601,12 @@ function WarehouseInner({ section }: { section: Tab }) {
 
   const table = (): ExportTable => tab === "materials" || tab === "stock"
     ? { title: "Warehouse Inventory",
+        /* Cost, GST, cost total and last moved are left off the printout on
+           purpose — they are for the screen, not for the sheet that goes round
+           the warehouse. Every row below is built to these seven columns;
+           the headings and the rows must stay the same width. */
         headers: ["Item code", "Barcode", "Item description", "Catgry", "Qty",
-                  "Cost", "Retail", "GST%", "Cost total", "Retail total", "Last moved"],
+                  "Retail", "Retail total"],
         /* Grouped by section, highest quantity first inside each, with a
            subtotal under every group. A flat list mixes Kids and Men on the
            same page, which is not how anyone counts stock. */
@@ -622,20 +626,17 @@ function WarehouseInner({ section }: { section: Tab }) {
             const list = (groups.get(sec) ?? [])
               .sort((a, b) => Number(b.quantity) - Number(a.quantity) || a.name.localeCompare(b.name));
             const label = SECTION_NAME[sec] ?? "Other";
-            if (gi > 0) out.push(["", "", "", "", "", "", "", "", "", "", ""]);
-            out.push([`${sec} ${label}`.trim(), "", `${list.length} item(s)`, "", "", "", "", "", "", "", ""]);
-            let q = 0, ct = 0, rt = 0;
+            if (gi > 0) out.push(["", "", "", "", "", "", ""]);
+            out.push([`${sec} ${label}`.trim(), "", `${list.length} item(s)`, "", "", "", ""]);
+            let q = 0, rt = 0;
             list.forEach((i) => {
               const m = money[i.barcode];
-              const c = m?.cost == null ? null : i.quantity * m.cost;
               const r = m?.retail == null ? null : i.quantity * m.retail;
-              q += Number(i.quantity || 0); ct += c ?? 0; rt += r ?? 0;
+              q += Number(i.quantity || 0); rt += r ?? 0;
               out.push([i.barcode, m?.manual ?? "", i.name, i.category ?? "",
-                blank(i.quantity), blank(m?.cost), blank(m?.retail),
-                m?.gst ? `${m.gst}%` : "", blank(c), blank(r),
-                i.last_updated ? when(i.last_updated) : ""]);
+                blank(i.quantity), blank(m?.retail), blank(r)]);
             });
-            out.push(["", "", `Subtotal ${label}`, "", blank(q), "", "", "", blank(ct), blank(rt), ""]);
+            out.push(["", "", `Subtotal ${label}`, "", blank(q), "", blank(rt)]);
           });
           return out;
         })() }

@@ -36,6 +36,14 @@ function codeColumns(headers: string[], rows: ExportTable["rows"]): boolean[] {
   return headers.map((h, ci) => CODE_HEADING.test(String(h))
     || rows.some((r) => r[ci] != null && typeof r[ci] !== "number" && isCode(String(r[ci]).trim())));
 }
+/* How a value reads on paper. A raw number gets its thousands commas —
+   2797746 is hard to read, 2,797,746 is not — unless it sits in a code
+   column, where 12620 is an invoice number and must stay 12620. Used by PDF
+   and print; Excel formats numbers itself and CSV stays raw for software. */
+const display = (v: unknown, code: boolean) =>
+  typeof v === "number" && Number.isFinite(v) && !code
+    ? v.toLocaleString("en-US", { maximumFractionDigits: 2 })
+    : cell(v);
 function numericColumns(headers: string[], rows: ExportTable["rows"]): boolean[] {
   const codes = codeColumns(headers, rows);
   return headers.map((_, ci) => {
@@ -305,7 +313,8 @@ export function exportPDF({ title, headers, rows }: ExportTable) {
      spare room is shared out. If not, only the wide text columns give way —
      a quantity or a price is never the thing that gets cut short. */
   const hdr = headers.map((h) => ascii(h).toUpperCase());
-  const body = rows.map((r) => headers.map((_, ci) => ascii(r[ci])));
+  const codes = codeColumns(headers, rows);
+  const body = rows.map((r) => headers.map((_, ci) => ascii(display(r[ci], codes[ci]))));
   const natural = headers.map((_, ci) => Math.max(34,
     textW(hdr[ci], "F2", FS) + PAD * 2,
     ...body.map((r) => textW(r[ci], "F1", FS) + PAD * 2)));
@@ -407,6 +416,7 @@ export function printTable({ title, headers, rows }: ExportTable) {
   const w = window.open("", "_blank", "width=1000,height=760");
   if (!w) return;   /* pop-up blocked — nothing else to do about it here */
   const right = numericColumns(headers, rows);
+  const codes = codeColumns(headers, rows);
   const cls = (ci: number) => (right[ci] ? ` class="n"` : "");
   w.document.write(
     `<html><head><title>${escapeHtml(title)}</title><style>
@@ -427,7 +437,7 @@ export function printTable({ title, headers, rows }: ExportTable) {
       <p class="meta">${new Date().toLocaleString()} &middot; ${rows.length} row(s)</p>
       <table>
         <thead><tr>${headers.map((h, ci) => `<th${cls(ci)}>${escapeHtml(h)}</th>`).join("")}</tr></thead>
-        <tbody>${rows.map((r) => `<tr>${r.map((v, ci) => `<td${cls(ci)}>${escapeHtml(cell(v))}</td>`).join("")}</tr>`).join("")}</tbody>
+        <tbody>${rows.map((r) => `<tr>${r.map((v, ci) => `<td${cls(ci)}>${escapeHtml(display(v, codes[ci]))}</td>`).join("")}</tr>`).join("")}</tbody>
         <tfoot><tr><td colspan="${headers.length}">${escapeHtml(title)} &middot; printed ${new Date().toLocaleDateString()}</td></tr></tfoot>
       </table>
       <script>window.onload=()=>{window.print()}</script>
