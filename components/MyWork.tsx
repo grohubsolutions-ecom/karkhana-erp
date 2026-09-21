@@ -29,6 +29,10 @@ type Task = {
      work that was arranged and finished by talking. The man sees it on his own
      panel, so nothing is closed in his name without him knowing. */
   recorded_by: string | null;
+  /* Set on a quality check whose product is not in yet — the name of the man
+     it is waiting for. The check is visible from the day the article is
+     created, but there is nothing to check until the product is uploaded. */
+  waiting_for: string | null;
 };
 
 export default function MyWork() {
@@ -66,6 +70,8 @@ export default function MyWork() {
   }
 
   const open = rows.filter((r) => r.status === "open");
+  /* "To do" counts what he can act on now, not what he is waiting for. */
+  const actionable = open.filter((r) => !r.waiting_for);
   const done = rows.filter((r) => r.status !== "open").slice(0, 6);
 
   if (loading) {
@@ -80,9 +86,14 @@ export default function MyWork() {
     <section className="overflow-hidden rounded-card border border-line bg-surface shadow-card dark:border-white/10 dark:bg-[#201c17]">
       <h2 className="flex items-center gap-2 border-b border-line px-4 py-3 text-[13px] font-bold text-ink dark:border-white/10 dark:text-[#f4f1ea] sm:px-5">
         <ClipboardList size={15} /> Your work
-        {open.length > 0 && (
+        {actionable.length > 0 && (
           <span className="rounded-full bg-periwinkle-soft px-2 py-0.5 text-[11px] font-bold text-periwinkle-strong dark:bg-white/[0.10] dark:text-periwinkle">
-            {open.length} to do
+            {actionable.length} to do
+          </span>
+        )}
+        {open.length > actionable.length && (
+          <span className="rounded-full bg-panel px-2 py-0.5 text-[11px] font-bold text-muted dark:bg-white/[0.06] dark:text-[#a89f93]">
+            {open.length - actionable.length} coming
           </span>
         )}
       </h2>
@@ -104,8 +115,12 @@ export default function MyWork() {
                 </span>
               )}
             </div>
-            <span className="shrink-0 rounded-full bg-panel px-2.5 py-1 text-[11.5px] font-semibold text-muted dark:bg-white/[0.06] dark:text-[#a89f93]">
-              with you {t.held}
+            {/* While he is waiting, no clock is shown — the days belong to the
+                man making the product, not to him. */}
+            <span className={`shrink-0 rounded-full px-2.5 py-1 text-[11.5px] font-semibold ${t.waiting_for
+                ? "bg-amber-soft text-amber-strong dark:bg-white/[0.08] dark:text-amber"
+                : "bg-panel text-muted dark:bg-white/[0.06] dark:text-[#a89f93]"}`}>
+              {t.waiting_for ? `waiting for ${t.waiting_for}` : `with you ${t.held}`}
             </span>
           </div>
 
@@ -123,6 +138,15 @@ export default function MyWork() {
             <p className="mt-2 text-[12.5px] leading-relaxed text-muted dark:text-[#a89f93]">{t.detail}</p>
           ) : null}
 
+          {t.waiting_for ? (
+            /* THE CHECK IS VISIBLE, NOT YET ACTIONABLE.
+               The buttons would only be refused — there is no product to check
+               until it is uploaded. He is told the moment it is. */
+            <p className="mt-3 rounded-xl2 bg-panel px-3 py-2.5 text-[12.5px] leading-relaxed text-muted dark:bg-white/[0.04] dark:text-[#a89f93]">
+              Coming to you. {t.waiting_for} is still uploading the product — you will get a
+              notification the moment it is ready to check, and your time starts then.
+            </p>
+          ) : (<>
           <textarea
             value={note[t.task_id] ?? ""}
             onChange={(e) => setNote((n) => ({ ...n, [t.task_id]: e.target.value }))}
@@ -152,6 +176,7 @@ export default function MyWork() {
                 : "Write what you did — it goes to the administration with your name on it."}
             </span>
           </div>
+          </>)}
         </div>
       ))}
 

@@ -30,6 +30,8 @@ type Stage = {
   /* Set when the administration recorded the work rather than the man doing
      it himself. The difference matters six months later, so it is shown. */
   submitted_by_name: string | null; on_behalf: boolean;
+  /* An open quality check whose product is not in yet: who it waits for. */
+  waiting_for?: string | null;
 };
 type Ads = {
   id: number; spent_on: string; amount: number; platform: string | null;
@@ -461,7 +463,8 @@ export default function ArticleDetail() {
       <h2 className="mt-6 text-[14px] font-bold text-ink dark:text-[#f4f1ea]">Who has it been with</h2>
       <div className="mt-2 space-y-2">
         {d.stages.map((s) => {
-          const open = s.status === "open";
+          const waiting = s.status === "open" && !!s.waiting_for;
+          const open = s.status === "open" && !waiting;
           const doneOk = s.status === "submitted";
           const back = s.status === "returned";
           return (
@@ -478,7 +481,7 @@ export default function ArticleDetail() {
                   )}
                 </div>
                 <div className="flex items-center gap-2 text-[12px]">
-                  {s.held && (
+                  {s.held && !waiting && (
                     <span className="flex items-center gap-1 text-muted dark:text-[#a89f93]"><Clock3 size={12} /> {s.held}</span>
                   )}
                   <span className={`rounded-full px-2.5 py-1 text-[11.5px] font-semibold ${
@@ -486,7 +489,8 @@ export default function ArticleDetail() {
                     : back ? "bg-salmon-soft text-red-800 dark:bg-white/[0.10] dark:text-salmon"
                     : open ? "bg-amber-soft text-amber-strong dark:bg-white/[0.10] dark:text-amber"
                     : "bg-panel text-hint dark:bg-white/[0.06]"}`}>
-                    {doneOk ? "submitted" : back ? "sent back" : open ? "with him now" : "not started"}
+                    {doneOk ? "submitted" : back ? "sent back" : open ? "with him now"
+                      : waiting ? `waiting for ${s.waiting_for}` : "not started"}
                   </span>
                 </div>
               </div>
