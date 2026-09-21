@@ -37,7 +37,7 @@ const NAV: NavItem[] = [
   { label: "Factory", Icon: Factory, children: [
     { label: "New GRN", href: "/grn" },
     { label: "GR out", href: "/grn/out" },
-    { label: "Articles", href: "/articles" },
+    /* Articles moved: the list now sits beside the form on Add New Article. */
     { label: "Machine Process", href: "/machine-process" },
     { label: "Staff management", sub: [
       { label: "New staff induction", href: "/staff/induction" },

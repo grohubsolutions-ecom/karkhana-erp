@@ -22,27 +22,32 @@ type Staff = { id: string; code: string; name: string; phone: string | null;
                join_date: string | null; dept_code: string; department: string;
                earned: number; pending: number; entry_count: number };
 
-/* Every code here is checked against the departments table, which refuses one
-   it does not know. Four of these were invented and failed on save: OVL, FLT
-   and SGL are really OVERLOCK, FLATLOCK and SINGLELOCK, and there is no PACK
-   at all — packing sits inside QAQC. Only Cutting and Stitching unit ever
-   worked, which is why a man could not be put on any machine floor.
+/* Departments come from the database now, not from a list typed in here —
+   that list is what made a new floor a code change, and it is how three
+   codes that never existed (OVL, FLT, SGL) sat here unnoticed.
 
-   Unlike Machine Process, this list keeps the finishing departments: a man is
-   inducted here whatever work he does, and pressing and clipping are jobs
-   people hold even though they are not machine-floor processes. */
-const DEPTS = [["CUT", "Cutting"], ["MFSU", "Stitching unit"],
-               ["SINGLELOCK", "Singlelock"], ["OVERLOCK", "Overlock"],
-               ["FLATLOCK", "Flatlock"], ["CLIP", "Clipping / Trimming"],
-               ["IRON", "Iron / Pressing"], ["QAQC", "Checking & Packing"],
-               ["INV", "Inventory"]];
+   Only factory floors are read: rows of kind 'section'. The same table holds
+   the businesses themselves — Karkhana, Hub, Inventory, FS Traders — and a
+   man is not inducted into a business. Adding and removing goes through
+   add_factory_department / remove_factory_department (K176), which enforce
+   that same fence on their own side, whatever this screen sends. */
+type Dept = { id: string; code: string; name: string; parent_id: string | null; sort_order: number | null };
+
+/* Machine Process runs on exactly these four, so they cannot be removed.
+   The database refuses them too; this only saves offering a button that
+   would be refused. */
+const FLOORS = ["CUT", "SINGLELOCK", "OVERLOCK", "FLATLOCK"];
 const inp = "mt-1 w-full rounded-xl2 border border-line bg-surface px-3 py-2 text-[13px] outline-none focus:border-ink/30";
+/* Same look as inp, without its top margin and full width — for controls that
+   sit side by side in one row. */
+const inpRow = "rounded-xl2 border border-line bg-surface px-3 py-2 text-[13px] outline-none focus:border-ink/30";
 const n = (v: number) => Number(v || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
 const rs = (v: number) => "Rs " + Math.round(Number(v) || 0).toLocaleString();
 
 export function InductionScreen({ side }: { side: "factory" | "warehouse" }) {
   const { can } = usePermissions();
   const canDo = can(["process.manage", "production.entry"]);
+  const canDepts = can(["departments.manage"]);
 
   const [rows, setRows] = useState<Staff[]>([]);
   const [loading, setLoading] = useState(true);
@@ -64,15 +69,89 @@ export function InductionScreen({ side }: { side: "factory" | "warehouse" }) {
   const [fErr, setFErr] = useState("");
   const [killing, setKilling] = useState(false);
 
+  /* Department manager — opened from the Department field of the form. */
+  const [depts, setDepts] = useState<Dept[]>([]);
+  const [mOpen, setMOpen] = useState(false);
+  const [newDept, setNewDept] = useState("");
+  const [newParent, setNewParent] = useState("");
+  const [dBusy, setDBusy] = useState(false);
+  const [dErr, setDErr] = useState("");
+  const [dMsg, setDMsg] = useState("");
+  const [confirmId, setConfirmId] = useState<string | null>(null);
+
+  const loadDepts = useCallback(async () => {
+    if (!supabase) return;
+    const { data, error } = await supabase.from("departments")
+      .select("id,code,name,parent_id,sort_order")
+      .eq("kind", "section").eq("is_active", true)
+      .order("sort_order").order("name");
+    if (error) { setErr(error.message); return; }
+    setDepts((data as Dept[]) ?? []);
+  }, []);
+
   const load = useCallback(async () => {
     if (!isSupabaseConfigured || !supabase) { setLoading(false); return; }
     setLoading(true);
-    const { data, error } = await supabase.from("v_factory_staff").select("*").order("code");
+    const [{ data, error }] = await Promise.all([
+      supabase.from("v_factory_staff").select("*").order("code"),
+      loadDepts(),
+    ]);
     if (error) setErr(error.message);
     setRows((data as Staff[]) ?? []);
     setLoading(false);
-  }, []);
+  }, [loadDepts]);
   useEffect(() => { load(); }, [load]);
+
+  /* Each floor followed by the floors under it, indented — so Cutting,
+     Overlock, Flatlock and Singlelock read as part of the Stitching Unit, the
+     way the factory is actually laid out. Sorting by number alone would put a
+     floor added under Clipping somewhere after Stitching. */
+  const tree = useMemo(() => {
+    const ids = new Set(depts.map((d) => d.id));
+    const out: (Dept & { depth: number })[] = [];
+    const walk = (d: Dept, depth: number) => {
+      out.push({ ...d, depth });
+      if (depth < 4) depts.filter((c) => c.parent_id === d.id).forEach((c) => walk(c, depth + 1));
+    };
+    depts.filter((d) => !d.parent_id || !ids.has(d.parent_id)).forEach((d) => walk(d, 0));
+    return out;
+  }, [depts]);
+  const label = (d: { name: string; depth: number }) => " ".repeat(d.depth) + (d.depth ? "· " : "") + d.name;
+
+  /* Who is in each department right now — shown beside Remove, since a
+     department with people in it cannot go. */
+  const staffIn = useMemo(() => {
+    const m: Record<string, number> = {};
+    rows.forEach((r) => { if (r.is_active && r.dept_code) m[r.dept_code] = (m[r.dept_code] ?? 0) + 1; });
+    return m;
+  }, [rows]);
+
+  async function addDept() {
+    if (!supabase || !newDept.trim()) return;
+    setDBusy(true); setDErr(""); setDMsg("");
+    const { data, error } = await supabase.rpc("add_factory_department", {
+      p_name: newDept.trim(), p_parent_code: newParent || null,
+    });
+    setDBusy(false);
+    /* The database's own words, always — it knows why it refused. */
+    if (error) { setDErr(error.message); return; }
+    const made = data as { code: string; name: string; revived: boolean };
+    await loadDepts();
+    setDCode(made.code);
+    setNewDept(""); setNewParent("");
+    setDMsg(made.revived ? `${made.name} is back, and selected.` : `${made.name} added, and selected.`);
+  }
+
+  async function removeDept(d: Dept) {
+    if (!supabase) return;
+    setDBusy(true); setDErr(""); setDMsg("");
+    const { error } = await supabase.rpc("remove_factory_department", { p_id: d.id });
+    setDBusy(false); setConfirmId(null);
+    if (error) { setDErr(error.message); return; }
+    await loadDepts();
+    if (dCode === d.code) setDCode("CUT");
+    setDMsg(`${d.name} removed. Old records that mention it are untouched.`);
+  }
 
   const view = useMemo(() => rows.filter((r) => {
     /* The screen decides the side, so a WR code can never be issued from the
@@ -91,12 +170,14 @@ export function InductionScreen({ side }: { side: "factory" | "warehouse" }) {
   function openAdd() {
     setOpen(true); setEdit(null); setKilling(false); setName(""); setJoined(new Date().toISOString().slice(0, 10)); setPhone("");
     setCnic(""); setDCode("CUT"); setEmp("casual"); setActive(true); setFErr("");
+    setMOpen(false); setDErr(""); setDMsg(""); setConfirmId(null); setNewDept(""); setNewParent("");
   }
   function openEdit(r: Staff) {
     setOpen(true); setEdit(r); setKilling(false); setName(r.name);
     setJoined(r.join_date ?? "");
     setPhone(r.phone ?? ""); setCnic(""); setDCode(r.dept_code);
     setEmp(r.employment_type ?? "casual"); setActive(r.is_active); setFErr("");
+    setMOpen(false); setDErr(""); setDMsg(""); setConfirmId(null); setNewDept(""); setNewParent("");
   }
 
   async function remove() {
@@ -169,7 +250,7 @@ export function InductionScreen({ side }: { side: "factory" | "warehouse" }) {
           <select value={dept} onChange={(e) => setDept(e.target.value)}
             className="rounded-full border border-line bg-surface px-3 py-2 text-[12px] outline-none">
             <option value="all">All departments</option>
-            {DEPTS.map(([c, l]) => <option key={c} value={c}>{l}</option>)}
+            {tree.map((d) => <option key={d.id} value={d.code}>{label(d)}</option>)}
           </select>
           <button onClick={() => setShow(show === "active" ? "all" : "active")}
             className={`rounded-full px-3 py-2 text-[12px] font-semibold transition ${show === "all" ? "bg-ink text-white" : "border border-line text-ink/65 hover:bg-panel"}`}>
@@ -243,11 +324,32 @@ export function InductionScreen({ side }: { side: "factory" | "warehouse" }) {
             placeholder="e.g. Aslam" className={inp} />
         </Field>
         <div className="mt-3 grid grid-cols-2 gap-3">
-          <Field label="Department">
-            <select value={dCode} onChange={(e) => setDCode(e.target.value)} className={inp}>
-              {DEPTS.map(([c, l]) => <option key={c} value={c}>{l}</option>)}
-            </select>
-          </Field>
+          {/* Not wrapped in Field: Field is a <label>, and the Add / remove
+              button needs to sit beside the heading without being part of it. */}
+          <div>
+            {/* Fixed to the height of a plain label, so the pill beside it does
+                not push this select below the Phone box next to it. */}
+            <div className="flex h-[19px] items-center justify-between gap-2">
+              <span className="text-[12.5px] font-semibold text-ink dark:text-[#e7e2d8]">Department</span>
+              {canDepts && (
+                <button type="button" onClick={() => { setMOpen((v) => !v); setDErr(""); setDMsg(""); setConfirmId(null); }}
+                  className="rounded-full border border-line px-2 py-[3px] text-[11px] font-semibold leading-none text-ink/65 hover:bg-panel">
+                  {mOpen ? "Done" : "+ Add / remove"}
+                </button>
+              )}
+            </div>
+            <div className="mt-1.5">
+              <select value={dCode} onChange={(e) => setDCode(e.target.value)} className={inp}>
+                {tree.map((d) => <option key={d.id} value={d.code}>{label(d)}</option>)}
+                {/* A man already in a department that has since been removed
+                    keeps it until someone moves him — shown, not silently
+                    swapped for the first option in the list. */}
+                {tree.length > 0 && dCode && !tree.some((d) => d.code === dCode) && (
+                  <option value={dCode}>{edit?.department ?? dCode} (removed)</option>
+                )}
+              </select>
+            </div>
+          </div>
           <Field label="Phone">
             <input value={phone} onChange={(e) => setPhone(e.target.value)} className={inp} />
           </Field>
@@ -260,6 +362,69 @@ export function InductionScreen({ side }: { side: "factory" | "warehouse" }) {
             </Field>
           )}
         </div>
+
+        {mOpen && canDepts && (
+          <div className="mt-3 rounded-xl2 border border-line bg-panel/40 p-3">
+            <p className="text-[12.5px] font-semibold text-ink">Factory departments</p>
+
+            <div className="mt-2 flex flex-wrap items-end gap-2">
+              <input value={newDept} onChange={(e) => setNewDept(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addDept(); } }}
+                placeholder="New department, e.g. Button attach" className={`${inpRow} min-w-[180px] flex-1`} />
+              <select value={newParent} onChange={(e) => setNewParent(e.target.value)} className={inpRow}
+                title="Put it under another department, the way Cutting sits under the Stitching Unit">
+                <option value="">On its own</option>
+                {tree.filter((d) => d.depth === 0).map((d) => <option key={d.id} value={d.code}>Under {d.name}</option>)}
+              </select>
+              <button type="button" onClick={addDept} disabled={dBusy || !newDept.trim()}
+                className="flex items-center gap-1 rounded-xl2 bg-ink px-3.5 py-2 text-[12.5px] font-semibold text-white disabled:opacity-40">
+                {dBusy ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />} Add
+              </button>
+            </div>
+
+            {dErr && <p className="mt-2 text-[12px] font-medium text-danger">{dErr}</p>}
+            {dMsg && <p className="mt-2 text-[12px] font-medium text-[#166534]">{dMsg}</p>}
+
+            {/* No height cap: a capped list scrolls inside a modal that already
+                scrolls, and hides its own scrollbar while doing it — a department
+                just added would land out of sight. The whole list shows; if the
+                form gets taller than the screen, the form scrolls as one. */}
+            <div className="mt-2.5 divide-y divide-line/60 rounded-xl2 border border-line bg-surface">
+              {tree.map((d) => {
+                const people = staffIn[d.code] ?? 0;
+                const hasKids = tree.some((c) => c.parent_id === d.id);
+                /* Say why a department cannot go, rather than showing a
+                   button that will only be refused. */
+                const why = FLOORS.includes(d.code) ? "Machine Process floor"
+                  : people > 0 ? `${people} ${people === 1 ? "person" : "people"} in it`
+                  : hasKids ? "has departments under it" : "";
+                return (
+                  <div key={d.id} className="flex items-center justify-between gap-2 px-3 py-1.5">
+                    <span className="text-[12.5px] text-ink" style={{ paddingLeft: d.depth * 14 }}>
+                      {d.depth ? "· " : ""}{d.name}
+                      {people > 0 && <span className="ml-1.5 text-[11px] text-hint">{people} staff</span>}
+                    </span>
+                    {why ? (
+                      <span className="shrink-0 text-[11px] text-hint">{why}</span>
+                    ) : confirmId === d.id ? (
+                      <span className="flex shrink-0 items-center gap-2">
+                        <button type="button" onClick={() => removeDept(d)} disabled={dBusy}
+                          className="rounded-full bg-danger px-2.5 py-1 text-[11px] font-semibold text-white disabled:opacity-50">Yes, remove</button>
+                        <button type="button" onClick={() => setConfirmId(null)} className="text-[11px] text-ink/60">no</button>
+                      </span>
+                    ) : (
+                      <button type="button" onClick={() => { setConfirmId(d.id); setDErr(""); setDMsg(""); }}
+                        className="shrink-0 rounded-full border border-line px-2.5 py-1 text-[11px] font-semibold text-danger/80 hover:bg-danger-soft">Remove</button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            <p className="mt-2 text-[11px] text-hint">
+              Removing switches a department off — it leaves every form, but old work and payroll that mention it stay as they were.
+            </p>
+          </div>
+        )}
 
         {edit && (
           <div className="mt-4 flex items-center justify-between rounded-xl2 border border-line p-3">

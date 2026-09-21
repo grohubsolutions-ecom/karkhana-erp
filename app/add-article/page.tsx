@@ -1,18 +1,19 @@
 "use client";
-/* ADD NEW ARTICLE — a form, not a list.
+/* ADD NEW ARTICLE — the form, and every article saved so far beside it.
  *
- * Deliberately separate from the Articles list in Karkhana. This page has
- * one job: define a new garment and get its barcode. The saved articles,
- * their history and their recipes live in Karkhana → Articles, which is
- * where you go to look something up.
+ * The Articles list used to be a separate page under Factory. It lives here
+ * now: the form on the left, the list on the right, so an article can be
+ * made and checked in one place instead of two.
  *
- * One screen doing both would mean scrolling past two hundred rows to reach
- * the button you came for.
+ * The form stays pinned while the list scrolls — on a wide screen the button
+ * you came for never scrolls away behind two hundred rows. On a narrow one
+ * they stack, form first.
  */
 import { useState } from "react";
 import Link from "next/link";
-import { Shirt, Loader2, ArrowRight, Pencil } from "lucide-react";
+import { Shirt, Loader2, BookOpen, Pencil } from "lucide-react";
 import Topbar from "@/components/Topbar";
+import ArticlesList from "@/components/ArticlesList";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { usePermissions } from "@/lib/usePermissions";
 
@@ -44,6 +45,9 @@ export default function AddArticlePage() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [made, setMade] = useState<Made | null>(null);
+  /* Tells the list beside the form to reload, and which recipe to open. */
+  const [reloadKey, setReloadKey] = useState(0);
+  const [recipeBc, setRecipeBc] = useState<string | null>(null);
 
   function reset() {
     setName(""); setSection(""); setManual(""); setOwner("factory"); setGtype(""); setSize("");
@@ -71,16 +75,18 @@ export default function AddArticlePage() {
       await supabase.from("articles").update({ owner }).eq("id", row.id);
     }
     setMade(row);
+    setReloadKey((k) => k + 1);
   }
 
   const margin = cost && retail ? parseFloat(retail) - parseFloat(cost) : null;
 
   return (
     <>
-      <Topbar title="Add New Article" subtitle="Define a garment and give it a barcode" />
+      <Topbar title="Add New Article" subtitle="Define a garment, give it a barcode — and every article saved so far, beside it" />
 
       <div className="px-6 pb-12">
-        <div className="mx-auto max-w-2xl">
+        <div className="grid grid-cols-1 gap-5 xl:grid-cols-[440px_minmax(0,1fr)] xl:items-start">
+        <div className="xl:sticky xl:top-4">
           {made ? (
             <div className="rounded-card border border-line bg-surface p-8 text-center shadow-card">
               <span className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-success-soft text-ink"><Shirt size={24} /></span>
@@ -99,14 +105,17 @@ export default function AddArticlePage() {
 
               <p className="mx-auto mt-4 max-w-sm text-[12.5px] leading-relaxed text-muted">
                 It has no recipe yet, so an order cannot calculate its material.
-                Set that in Karkhana → Articles.
+                Add it now, or later with the Recipe button on it in the list.
               </p>
 
               <div className="mt-5 flex flex-wrap justify-center gap-2">
                 <button onClick={reset} className="rounded-xl2 bg-ink px-5 py-2.5 text-[13px] font-semibold text-white">Add another</button>
-                <Link href="/articles" className="flex items-center gap-1.5 rounded-xl2 border border-line px-4 py-2.5 text-[13px] font-semibold text-ink/75 hover:bg-panel">
-                  Go to Articles <ArrowRight size={14} />
-                </Link>
+                {made.system_barcode && (
+                  <button onClick={() => setRecipeBc(made.system_barcode ?? null)}
+                    className="flex items-center gap-1.5 rounded-xl2 border border-line px-4 py-2.5 text-[13px] font-semibold text-ink/75 hover:bg-panel">
+                    <BookOpen size={14} /> Add its recipe
+                  </button>
+                )}
               </div>
             </div>
           ) : (
@@ -179,18 +188,21 @@ export default function AddArticlePage() {
                 {/* Bottom left, as asked — everything already saved is one
                     click away rather than somewhere else entirely. */}
                 <Link href="/edit-record"
-                  className="flex items-center gap-1.5 rounded-xl2 border border-line px-3.5 py-2.5 text-[12.5px] font-semibold text-ink/70 hover:bg-panel">
+                  className="flex items-center gap-1.5 whitespace-nowrap rounded-xl2 border border-line px-3.5 py-2.5 text-[12.5px] font-semibold text-ink/70 hover:bg-panel">
                   <Pencil size={14} /> Edit record
                 </Link>
-                <button onClick={reset} className="ml-auto rounded-xl2 border border-line px-4 py-2.5 text-[13px] font-semibold text-ink/70 hover:bg-panel">Clear</button>
+                <button onClick={reset} className="ml-auto whitespace-nowrap rounded-xl2 border border-line px-4 py-2.5 text-[13px] font-semibold text-ink/70 hover:bg-panel">Clear</button>
                 <button onClick={save} disabled={busy || !allowed}
-                  className="flex items-center gap-1.5 rounded-xl2 bg-ink px-6 py-2.5 text-[13px] font-semibold text-white disabled:opacity-50">
+                  className="flex items-center gap-1.5 whitespace-nowrap rounded-xl2 bg-ink px-6 py-2.5 text-[13px] font-semibold text-white disabled:opacity-50">
                   {busy && <Loader2 size={15} className="animate-spin" />} Create article
                 </button>
               </div>
               {!allowed && <p className="mt-2 text-right text-[12px] text-hint">You do not have permission to add articles.</p>}
             </div>
           )}
+        </div>
+
+        <ArticlesList reloadKey={reloadKey} recipeFor={recipeBc} onRecipeOpened={() => setRecipeBc(null)} />
         </div>
       </div>
     </>
