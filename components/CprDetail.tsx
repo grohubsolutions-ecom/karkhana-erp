@@ -306,7 +306,25 @@ export default function CprDetail({ row, onClose }: { row: Row; onClose: () => v
 
   const unmatched = Array.isArray(row.unmatched) ? (row.unmatched as string[]) : [];
   const netTotal = row.net_total ?? row.amount;
-  const gap = n(netTotal) - n(row.matched_total);
+
+  /* WHAT THE PARCELS ACCOUNT FOR, PER COURIER.
+     `matched_total` is the net of the DELIVERED parcels we hold. On a PostEx
+     CPR that is the whole story, so net − matched is money for parcels we have
+     no record of.
+
+     On an OwnEx invoice it is not. OwnEx also deducts every return's charge and
+     a fuel surcharge at invoice level, so net − matched was always negative or
+     meaningless — INV-20250023 showed "Paid for parcels we don't hold Rs 4,640"
+     with all 88 parcels matched. That 4,640 was simply the delivery charge on
+     the 21 delivered parcels, labelled as unexplained income.
+
+     For OwnEx the parcels account for:  delivered net − return charges − fuel.
+     Anything left over genuinely is not explained by the rows. */
+  const isOwnExInv = String(row.courier ?? "") === "OwnEx";
+  const explained = isOwnExInv
+    ? n(row.matched_total) - Math.abs(n(row.returns_cost)) - n(row.gst)
+    : n(row.matched_total);
+  const gap = n(netTotal) - explained;
 
   /* EACH COURIER DEDUCTS DIFFERENT THINGS, SO NAME THEM DIFFERENTLY.
      PostEx deducts GST and withholds income and sales tax. OwnEx charges a fuel
@@ -402,9 +420,17 @@ export default function CprDetail({ row, onClose }: { row: Row; onClose: () => v
               </div>
               {/* Not a discrepancy to hide — it is money received for parcels
                   this system never recorded, and it is worth knowing. */}
+              {isOwnExInv && (
+                <div className="flex justify-between">
+                  <span className="text-muted dark:text-[#a89f93]">Less return charges and fuel</span>
+                  <span className="tabular-nums">{money(explained)}</span>
+                </div>
+              )}
               {Math.abs(gap) > 1 && (
                 <div className="flex justify-between">
-                  <span className="text-muted dark:text-[#a89f93]">Paid for parcels we don&apos;t hold</span>
+                  <span className="text-muted dark:text-[#a89f93]">
+                    {isOwnExInv ? "Not explained by the parcel rows" : "Paid for parcels we don't hold"}
+                  </span>
                   <span className="tabular-nums text-amber-700">{money(gap)}</span>
                 </div>
               )}
