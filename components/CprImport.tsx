@@ -364,34 +364,56 @@ function parseOwnExInvoice(flat: string): Batch[] {
   const declaredCount = declShip ? Number(declShip[1]) : undefined;
   const declaredCod = declDel ? unParen(declDel[2]) : undefined;
 
+  /* THE PAYOUT IS COMPUTED FROM THE INVOICE'S OWN LABELLED LINES.
+       delivered COD − delivery charges (all parcels) − fuel surcharge
+
+     It used to be READ, from whatever number followed "Grand Total Rs." in the
+     extracted text. PDF text comes out in layout order, not reading order, and
+     on most OwnEx invoices that pattern caught the Delivered COD figure instead.
+     The importer then took COD as the net and ADDED the charges back on to make
+     a "Total" that appears nowhere on the paper:
+
+         INV-20250023   shown  Total 69,010 · Net 39,670
+                        real   COD 39,670 − 24,450 − 4,890 = Net 10,330
+
+     Twenty invoices carried the same fault, every one overstating what OwnEx
+     paid by exactly its own charges. The previous comment here explained the
+     misread as "OwnEx states the net", which is how a wrong reading of one
+     invoice became the rule for all of them.
+
+     Delivered COD is checked against the parcel rows above. The Grand Total
+     is now only a cross-check. If it matches the payout, good. If it matches the
+     delivered COD, it is the known misread and is ignored. If it matches neither,
+     the import stops and names all three numbers — a settlement that cannot be
+     made to add up is not written. */
+  const shipping = declShip ? unParen(declShip[2]) : undefined;
+  const fuelAmt  = fuel ? unParen(fuel[1]) : 0;
+  const payout = (declaredCod !== undefined && shipping !== undefined)
+    ? n2(declaredCod - shipping - fuelAmt) : undefined;
+  const grandRead = grand ? Math.abs(unParen(grand[1])) : undefined;
+
   let problem: string | undefined;
   if (!rows.length) problem = "no parcel rows could be read";
   else if (declaredCount && rows.length !== declaredCount)
     problem = `read ${rows.length} parcels, the invoice says ${declaredCount}`;
   else if (declaredCod !== undefined && Math.abs(codDelivered - declaredCod) > 1)
     problem = `delivered COD totals ${codDelivered}, the invoice says ${declaredCod}`;
+  else if (payout === undefined)
+    problem = "the invoice's Delivered or Shipping Charges line could not be read — cannot work out the payout";
+  else if (grandRead !== undefined
+           && Math.abs(grandRead - payout) > 1
+           && Math.abs(grandRead - declaredCod!) > 1)
+    problem = `Grand Total reads ${grandRead}, but delivered COD ${declaredCod} − charges ${shipping} − fuel ${fuelAmt} = ${payout}`;
 
   return [{
     ref, date, rows, courier: "OwnEx", declaredCount,
-    declaredNet: grand ? Math.abs(unParen(grand[1])) : undefined,
-    computedNet: n2(delivered.reduce((t, r) => t + r.net, 0)),
+    declaredNet: payout,
+    computedNet: payout,
     problem,
-    /* THE GROSS IS THE NET PLUS WHAT WAS DEDUCTED — not the same number twice.
-       This read `gross` from the invoice's COD total and `net` from its grand
-       total, which on an OwnEx invoice are the SAME figure: the amount actually
-       paid. So the panel showed "Total 641,891" and "Net Total 641,891" with
-       77,420 of shipping and 15,484 of fuel surcharge listed between them as
-       deductions that visibly changed nothing.
-
-       OwnEx states the net. The gross is therefore net + charges, and computing
-       it that way makes the column add up in the direction it is read. */
-    summary: (declDel && declShip) ? (() => {
-      const shipping = unParen(declShip[2]);
-      const gst = fuel ? unParen(fuel[1]) : 0;
-      const net = grand ? Math.abs(unParen(grand[1])) : 0;
-      return { gross: n2(net + shipping + gst), shipping, gst,
-               wh_income: 0, wh_sales: 0, net };
-    })() : undefined,
+    summary: payout !== undefined ? {
+      gross: declaredCod!, shipping: shipping!, gst: fuelAmt,
+      wh_income: 0, wh_sales: 0, net: payout,
+    } : undefined,
   }];
 }
 

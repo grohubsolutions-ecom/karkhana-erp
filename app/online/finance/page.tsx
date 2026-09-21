@@ -66,7 +66,15 @@ export default function FinancePage() {
   /* Which card is driving the list. Clicking a figure should show you the rows
      behind it — a number you cannot open is a number you have to take on
      trust, and this page exists precisely because those were wrong. */
-  const [pick, setPick] = useState<"" | "pending" | "received" | "charges">("");
+  /* OPENS ON PENDING, AND NEVER FALLS BACK TO A MIXED LIST.
+     This page is where the team goes to see what is still owed. It opened on
+     no filter at all, so paid parcels came up alongside unpaid ones under a
+     card that said "Pending payment", and pressing that card a second time
+     switched the filter off again. The owner asked for this to be strict once
+     already; the rule is now in the code rather than in somebody's memory.
+     Received and Charges are still one click away; clicking an active card
+     returns here, not to everything. */
+  const [pick, setPick] = useState<"" | "pending" | "received" | "charges">("pending");
   const [byCourier, setByCourier] = useState<CourierRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
@@ -246,7 +254,7 @@ export default function FinancePage() {
       <div className={`mt-5 grid grid-cols-2 gap-3 ${tab === "payments" ? "lg:grid-cols-5" : "lg:grid-cols-4"}`}>
         {cards.map(({ label, value, Icon, bg, note, key }, i) => (
           <button key={i} type="button"
-            onClick={() => key && setPick((p) => (p === key ? "" : key))}
+            onClick={() => key && setPick((p) => (p === key ? "pending" : key))}
             className={`min-w-0 rounded-card border ${bg} p-3.5 text-left transition sm:p-4 dark:bg-[#201c17] ${label === "—" ? "hidden opacity-0 lg:block" : ""} ${
               key ? "cursor-pointer hover:brightness-95 active:scale-[0.98]" : "cursor-default"} ${
               key && pick === key ? "border-ink ring-2 ring-ink/20 dark:border-white" : "border-line dark:border-white/[0.06]"} ${cards.length === 5 && i === 4 ? "col-span-2 lg:col-span-1" : ""}`}>

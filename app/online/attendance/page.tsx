@@ -1,15 +1,16 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Users, CalendarCheck, HandCoins, Wallet, RefreshCw, Phone, Pencil } from "lucide-react";
+import { Users, CalendarCheck, HandCoins, Wallet, RefreshCw, Phone, Pencil, Trash2 } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { AddEmployee, DayRoster, AddAdvance, localISO } from "@/components/AttendanceEntry";
 import MonthlySummary from "@/components/MonthlySummary";
 import { useConfirm } from "@/components/ConfirmDialog";
+import RosterEmployeeEdit, { type RosterEmp } from "@/components/RosterEmployeeEdit";
 import { Segmented, PageActions, useIsPhone } from "@/components/HubUI";
 
 type Tab = "employees" | "attendance" | "advances" | "salaries";
 type Row = Record<string, unknown>;
-type Emp = { id: string; name: string; designation?: string; department?: string; sal?: number; wd?: number; phone?: string };
+type Emp = { id: string; name: string; designation?: string; department?: string; sal?: number; wd?: number; phone?: string; dtime?: string };
 
 /* Attendance first: marking the day is what this page is opened for, every
    morning. Staff, advances and the payroll summary are one tap away.
@@ -50,12 +51,55 @@ export default function AttendancePage() {
   const [day, setDay] = useState(localISO());
   const [dirty, setDirty] = useState(0);
   const rosterTop = useRef<HTMLDivElement | null>(null);
+  const [msg, setMsg] = useState("");
+  // A refused action, kept apart from `err`: the table replaces itself with
+  // "Couldn't load" whenever `err` is set, and a refused removal is not a load failure.
+  const [actErr, setActErr] = useState("");
+  const [removing, setRemoving] = useState<string | null>(null);
+  const [editing, setEditing] = useState<RosterEmp | null>(null);
 
   const empName = (id: unknown) => emps.find((e) => e.id === id)?.name ?? String(id ?? "—");
 
+  /* REMOVING SOMEBODY FROM THE ROSTER.
+     This list had no way off it. People can be added to it from this very
+     screen — that box writes a roster row with a department typed by hand and
+     no staff record behind it — and anybody added that way was then beyond the
+     reach of every delete button in the system, including the Hub employees
+     page, which quite rightly only removes Hub employees.
+
+     Everything keyed to them goes: their attendance, advances, salary marks and
+     rate history. Their central staff record goes only if they are Hub; if they
+     belong to another department it is left alone and the answer says so,
+     because that record is Administration's and not this screen's to decide
+     about. */
+  async function removeEmployee(id: string, name: string) {
+    if (!supabase) return;
+    if (!(await confirm({
+      title: `Remove ${name} from attendance?`,
+      body: "Their attendance, advances and salary history go with them. This cannot be undone.",
+      confirmLabel: "Remove",
+    }))) return;
+
+    setRemoving(id); setActErr(""); setMsg("");
+    const { data, error } = await supabase.rpc("hub_remove_att_employee", { p_id: id });
+    setRemoving(null);
+
+    if (error) {
+      setActErr(/schema cache|does not exist|Could not find the function/i.test(error.message)
+        ? "This needs migration H235, which has not been run on the database yet. Open Supabase → SQL editor and run H235_remove_from_attendance_roster.sql, then try again."
+        : error.message);
+      return;
+    }
+    const r = data as { ok?: boolean; error?: string; report?: string } | null;
+    if (!r?.ok) { setActErr(r?.error ?? "The removal was refused and gave no reason."); return; }
+
+    await load("employees");
+    setMsg(r.report ?? `${name} removed.`);
+  }
+
   useEffect(() => {
     if (!isSupabaseConfigured || !supabase) { setLoading(false); return; }
-    supabase.from("online_att_employees").select("id,name,designation,department,sal,wd,phone").order("name")
+    supabase.from("online_att_employees").select("id,name,designation,department,sal,wd,phone,dtime").order("name")
       .then(({ data, error }) => { if (error) setErr(error.message); setEmps((data as Emp[]) ?? []); });
   }, []);
 
@@ -72,7 +116,7 @@ export default function AttendancePage() {
     const my = ++reqId.current;
     setLoading(true); setErr("");
     if (which === "employees") {
-      const { data, error } = await supabase.from("online_att_employees").select("id,name,designation,department,sal,wd,phone").order("name");
+      const { data, error } = await supabase.from("online_att_employees").select("id,name,designation,department,sal,wd,phone,dtime").order("name");
       if (my !== reqId.current) return;
       if (error) setErr(error.message); setEmps((data as Emp[]) ?? []); setRows((data as Row[]) ?? []);
     } else if (which === "attendance") {
@@ -186,6 +230,20 @@ export default function AttendancePage() {
 
       <Segmented className="mt-1 md:mt-6" value={tab} onChange={switchTab} options={TABS} />
 
+      {actErr && (
+        <div className="mt-4 flex items-start justify-between gap-2 rounded-card border border-red-300 bg-red-50 p-3 text-[13px] text-red-800">
+          <span>{actErr}</span>
+          <button onClick={() => setActErr("")} className="shrink-0 font-semibold opacity-60 hover:opacity-100">Dismiss</button>
+        </div>
+      )}
+
+      {msg && (
+        <div className="mt-4 flex items-start justify-between gap-2 rounded-card border border-emerald-300 bg-emerald-50 p-3 text-[13px] text-emerald-900">
+          <span>{msg}</span>
+          <button onClick={() => setMsg("")} className="shrink-0 font-semibold opacity-60 hover:opacity-100">Dismiss</button>
+        </div>
+      )}
+
       {tab === "salaries" ? (
         <div className="mt-5"><MonthlySummary department="HUB" /></div>
       ) : (<>
@@ -242,7 +300,8 @@ export default function AttendancePage() {
               );
             })
           : tab === "employees" ? rows.map((r, i) => (
-              <div key={i} className="flex items-center gap-3 rounded-xl2 border border-line bg-surface px-4 py-3 dark:border-white/[0.06] dark:bg-[#201c17]">
+              <div key={i} className="rounded-xl2 border border-line bg-surface px-4 py-3 dark:border-white/[0.06] dark:bg-[#201c17]">
+              <div className="flex items-center gap-3">
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-[14.5px] font-bold text-ink dark:text-[#f4f1ea]">{String(r.name ?? "—")}</div>
                   <div className="truncate text-[12px] text-muted dark:text-[#a89f93]">{[r.designation, r.department].filter(Boolean).join(" · ") || "—"}</div>
@@ -252,6 +311,19 @@ export default function AttendancePage() {
                   <a href={`tel:${String(r.phone)}`} aria-label={`Call ${String(r.name)}`}
                     className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-line text-ink active:bg-panel dark:border-white/10 dark:text-white"><Phone size={17} /></a>
                 ) : null}
+              </div>
+              {/* Edit and Remove on the phone too — the office uses this page on a phone as much as a desk. */}
+              <div className="mt-2.5 flex gap-2">
+                <button onClick={() => setEditing(r as unknown as RosterEmp)}
+                  className="flex h-10 items-center gap-1.5 rounded-full border border-line px-3.5 text-[12.5px] font-semibold active:bg-panel dark:border-white/15">
+                  <Pencil size={13} /> Edit
+                </button>
+                <button onClick={() => removeEmployee(String(r.id), String(r.name ?? "this person"))}
+                  disabled={removing === String(r.id)}
+                  className="flex h-10 items-center gap-1.5 rounded-full border border-line px-3.5 text-[12.5px] font-semibold text-red-700 active:bg-red-50 disabled:opacity-40 dark:border-white/15">
+                  <Trash2 size={13} /> Remove
+                </button>
+              </div>
               </div>
             ))
           : rows.map((r, i) => (
@@ -277,18 +349,18 @@ export default function AttendancePage() {
           <table className="w-full min-w-[620px] text-left text-[13px]">
             <thead>
               <tr className="border-b border-line text-[11.5px] uppercase tracking-wide text-hint dark:border-white/[0.06] dark:text-[#8a8175]">
-                {tab === "employees" && <><th className="px-4 py-3 font-semibold">Name</th><th className="px-4 py-3 font-semibold">Designation</th><th className="px-4 py-3 font-semibold">Department</th><th className="px-4 py-3 text-right font-semibold">Salary</th><th className="px-4 py-3 text-right font-semibold">Work days</th><th className="px-4 py-3 font-semibold">Phone</th></>}
+                {tab === "employees" && <><th className="px-4 py-3 font-semibold">Name</th><th className="px-4 py-3 font-semibold">Designation</th><th className="px-4 py-3 font-semibold">Department</th><th className="px-4 py-3 text-right font-semibold">Salary</th><th className="px-4 py-3 text-right font-semibold">Work days</th><th className="px-4 py-3 font-semibold">Phone</th><th className="px-4 py-3 text-right font-semibold">Actions</th></>}
                 {tab === "attendance" && <><th className="px-4 py-3 font-semibold">Employee</th><th className="px-4 py-3 font-semibold">Date</th><th className="px-4 py-3 font-semibold">Time in</th><th className="px-4 py-3 font-semibold">Status</th><th className="px-4 py-3" /></>}
                 {tab === "advances" && <><th className="px-4 py-3 font-semibold">Employee</th><th className="px-4 py-3 text-right font-semibold">Amount</th><th className="px-4 py-3 font-semibold">Date</th><th className="px-4 py-3 font-semibold">Deduct</th><th className="px-4 py-3 font-semibold">Note</th><th className="px-4 py-3 font-semibold">Settled</th></>}
               </tr>
             </thead>
             <tbody className="divide-y divide-line dark:divide-white/[0.05]">
               {loading ? (
-                Array.from({ length: 8 }).map((_, i) => <tr key={i}><td colSpan={6} className="px-4 py-3"><div className="h-4 animate-pulse rounded bg-panel/70 dark:bg-white/[0.05]" /></td></tr>)
+                Array.from({ length: 8 }).map((_, i) => <tr key={i}><td colSpan={tab === "employees" ? 7 : 6} className="px-4 py-3"><div className="h-4 animate-pulse rounded bg-panel/70 dark:bg-white/[0.05]" /></td></tr>)
               ) : err ? (
-                <tr><td colSpan={6} className="px-4 py-12 text-center text-[13px] text-danger">Couldn&apos;t load: {err}</td></tr>
+                <tr><td colSpan={tab === "employees" ? 7 : 6} className="px-4 py-12 text-center text-[13px] text-danger">Couldn&apos;t load: {err}</td></tr>
               ) : rows.length === 0 ? (
-                <tr><td colSpan={6}><Empty /></td></tr>
+                <tr><td colSpan={tab === "employees" ? 7 : 6}><Empty /></td></tr>
               ) : (
                 rows.map((r, i) => (
                   <tr key={i} className="text-ink transition hover:bg-panel/50 dark:text-[#e7e2d8] dark:hover:bg-white/[0.03]">
@@ -299,6 +371,22 @@ export default function AttendancePage() {
                       <td className="px-4 py-3 text-right font-semibold tabular-nums">{money(r.sal)}</td>
                       <td className="px-4 py-3 text-right tabular-nums">{String(r.wd ?? "—")}</td>
                       <td className="px-4 py-3 text-muted dark:text-[#a89f93]">{String(r.phone ?? "—")}</td>
+                      <td className="whitespace-nowrap px-4 py-3 text-right">
+                        <button
+                          onClick={() => setEditing(r as unknown as RosterEmp)}
+                          className="mr-1 rounded-full border border-line px-2.5 py-1 text-[11.5px] font-semibold hover:bg-panel dark:border-white/15 dark:hover:bg-white/10">
+                          <Pencil size={11} className="mr-1 inline" />Edit
+                        </button>
+                        <button
+                          onClick={() => removeEmployee(String(r.id), String(r.name ?? "this person"))}
+                          disabled={removing === String(r.id)}
+                          title={`Remove ${String(r.name ?? "")} from the attendance roster`}
+                          className="rounded-full border border-line px-2 py-1 text-[11.5px] font-semibold text-red-700 transition hover:bg-red-50 disabled:opacity-40 dark:border-white/15 dark:hover:bg-white/10">
+                          {removing === String(r.id)
+                            ? <RefreshCw size={11} className="animate-spin" />
+                            : <Trash2 size={11} />}
+                        </button>
+                      </td>
                     </>}
                     {tab === "attendance" && <>
                       <td className="px-4 py-3 font-semibold">{empName(r.emp_id)}</td>
@@ -323,6 +411,13 @@ export default function AttendancePage() {
         </div>
       </div>
       )}
+
+      <RosterEmployeeEdit
+        emp={editing}
+        all={emps as RosterEmp[]}
+        onClose={() => setEditing(null)}
+        onDone={async (m) => { setEditing(null); await load("employees"); setMsg(m); }}
+      />
 
       {!isSupabaseConfigured && <p className="mt-4 text-center text-[12px] text-hint dark:text-[#8a8175]">Preview build · connect Supabase to load attendance.</p>}
       </>)}
