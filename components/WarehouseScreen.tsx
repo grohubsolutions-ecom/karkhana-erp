@@ -10,10 +10,11 @@
  * the box, the item resolves, type the quantity, done. A scanner types the
  * code then presses Enter — so Enter is the trigger everywhere.
  */
-import { useCallback, useEffect, useMemo, useState, Suspense } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState, Suspense } from "react";
 
 import { Boxes, Plus, Loader2, Download, Undo2, Pencil, Trash2, ArrowDownToLine, ArrowUpFromLine , Printer } from "lucide-react";
 import Topbar from "@/components/Topbar";
+import ItemHistory from "@/components/ItemHistory";
 import Modal, { Field } from "@/components/Modal";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { usePermissions } from "@/lib/usePermissions";
@@ -29,8 +30,15 @@ type Move = { id: string; movement_no: string | null; movement_type: "IN" | "OUT
               delivery_no: number | null; branch_id: string | null; party_id: string | null;
               invoice_gap_reason: string | null;
               original_quantity: number | null; edited_at: string | null;
-              barcode: string; name: string };
+              barcode: string; name: string;
+              /* Already in v_khana_movements (K174) — the printed barcode and
+                 the money, used by the New GRN list, filters and totals. */
+              manual_code: string | null; cost_total: number | null; retail_total: number | null };
 type Party = { id: string; name: string };
+/* How many recent movements the lists hold. When a list reaches it, the
+   screen says so — an older entry missing from a filter would otherwise look
+   like it never happened. Each product's own history has no such cap. */
+const LIST_CAP = 1000;
 type Branch = { id: string; party_id: string; party: string; branch: string; deliveries: number };
 type Tab = "materials" | "stock" | "in" | "out";
 
@@ -134,6 +142,12 @@ function WarehouseInner({ section }: { section: Tab }) {
   const [fBranch, setFBranch] = useState("");
   const [fItem, setFItem] = useState("");
   const [fCat, setFCat] = useState("");
+  /* New GRN: filter by what the entry was — "opening stock", "B-pair", from
+     the factory… grouped regardless of capitals, since B-pair has been typed
+     three different ways. */
+  const [fNote, setFNote] = useState("");
+  /* Products: the product whose stock history is open. */
+  const [histItem, setHistItem] = useState<Item | null>(null);
   /* Editing an item is a plain update; correcting stock is not — it writes a
      movement (K146), so the total never stops matching its own history. */
   const [editItem, setEditItem] = useState<string | null>(null);
@@ -157,24 +171,27 @@ function WarehouseInner({ section }: { section: Tab }) {
   const [money, setMoney] = useState<Record<string, {
     cost: number | null; retail: number | null; gst: number | null;
     manual: string | null }>>({});
-  useEffect(() => {
+  /* Reloaded after every product save, not just when the page opens. It used
+     to load once, so a saved barcode or price went on showing the old value
+     until the page was refreshed — which looks exactly like a save that did
+     not work. */
+  const loadMoney = useCallback(async () => {
     if (!supabase) return;
-    (async () => {
-      const { data } = await supabase!.from("v_warehouse_report")
-        .select("system_code,manual_code,cost_price,retail_price,gst_rate");
-      const m: Record<string, { cost: number | null; retail: number | null;
-        gst: number | null; manual: string | null }> = {};
-      ((data as unknown as Record<string, unknown>[]) ?? []).forEach((r) => {
-        m[String(r.system_code)] = {
-          cost: r.cost_price == null ? null : Number(r.cost_price),
-          retail: r.retail_price == null ? null : Number(r.retail_price),
-          gst: r.gst_rate == null ? null : Number(r.gst_rate),
-          manual: (r.manual_code as string) ?? null,
-        };
-      });
-      setMoney(m);
-    })();
+    const { data } = await supabase!.from("v_warehouse_report")
+      .select("system_code,manual_code,cost_price,retail_price,gst_rate");
+    const m: Record<string, { cost: number | null; retail: number | null;
+      gst: number | null; manual: string | null }> = {};
+    ((data as unknown as Record<string, unknown>[]) ?? []).forEach((r) => {
+      m[String(r.system_code)] = {
+        cost: r.cost_price == null ? null : Number(r.cost_price),
+        retail: r.retail_price == null ? null : Number(r.retail_price),
+        gst: r.gst_rate == null ? null : Number(r.gst_rate),
+        manual: (r.manual_code as string) ?? null,
+      };
+    });
+    setMoney(m);
   }, []);
+  useEffect(() => { loadMoney(); }, [loadMoney]);
 
   /* Matches on our code, their barcode, or any part of the name. Ten is
      enough to choose from without becoming a second list to scroll. */
@@ -193,7 +210,7 @@ function WarehouseInner({ section }: { section: Tab }) {
     setLoading(true); setErr("");
     const [i, m, pa, br] = await Promise.all([
       supabase.from("v_khana_stock").select("*").order("name"),
-      supabase.from("v_khana_movements").select("*").order("created_at", { ascending: false }).limit(300),
+      supabase.from("v_khana_movements").select("*").order("created_at", { ascending: false }).limit(LIST_CAP),
       supabase.from("khana_parties").select("id,name").eq("is_active", true).order("name"),
       supabase.from("v_khana_branches").select("id,party_id,party,branch,deliveries").eq("is_active", true).order("branch"),
     ]);
@@ -208,7 +225,9 @@ function WarehouseInner({ section }: { section: Tab }) {
 
   const inRange = (iso: string | null) => {
     if (!iso) return !days && !dFrom && !dTo;   // never moved: only in "All time"
-    const day = String(iso).slice(0, 10);
+    /* Local day, not the UTC one — see ItemHistory: a 1 AM entry in Karachi
+       is still the previous day in UTC. */
+    const day = new Date(iso).toLocaleDateString("en-CA");
     if (dFrom && day < dFrom) return false;
     if (dTo && day > dTo) return false;
     return true;
@@ -303,8 +322,28 @@ function WarehouseInner({ section }: { section: Tab }) {
   }, [moves, invNo, partyId, branchId]);
 
   const catOf = (bc: string) => items.find((i) => i.barcode === bc)?.category ?? null;
+  /* One key per kind of entry. Factory transfers each carry their own STR
+     number, so they are grouped as one kind rather than one option each. */
+  const noteKey = (note: string | null) => {
+    const t = (note ?? "").trim().toLowerCase();
+    if (!t) return "(no note)";
+    if (/^str-.*from factory/.test(t)) return "from factory (str)";
+    if (t.startsWith("correction:")) return "stock correction";
+    return t;
+  };
+  const noteOptions = useMemo(() => {
+    const c: Record<string, number> = {};
+    moves.forEach((m) => { if (m.movement_type === "IN" && !m.voided_at) c[noteKey(m.note)] = (c[noteKey(m.note)] ?? 0) + 1; });
+    return Object.entries(c).sort((a, b) => b[1] - a[1]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [moves]);
+  /* Categories from the products themselves, so Baby, Shoes or Accessories
+     appear on their own the day something is stocked under them. */
+  const catOptions = useMemo(() =>
+    [...new Set(items.map((i) => i.category).filter((c): c is string => !!c))].sort(), [items]);
   const fMoves = useMemo(() => moves.filter((m) =>
-    hit(m.barcode, m.name, m.movement_no) && inRange(m.created_at)
+    hit(m.barcode, m.name, m.movement_no, m.manual_code, m.note, m.invoice_no) && inRange(m.created_at)
+    && (!fNote   || noteKey(m.note) === fNote)
     && (!fParty  || m.party === fParty)
     && (!fBranch || m.branch === fBranch)
     && (!fItem   || m.barcode === fItem)
@@ -313,7 +352,7 @@ function WarehouseInner({ section }: { section: Tab }) {
     /* Ticked invoices win over every other filter — when somebody has chosen
        three delivery notes, that is exactly what they want printed. */
     && (picked.size === 0 || (m.invoice_no ? picked.has(m.invoice_no) : false))
-  ), [moves, items, q, days, dFrom, dTo, fParty, fBranch, fItem, fCat, invFilter, picked]);
+  ), [moves, items, q, days, dFrom, dTo, fParty, fBranch, fItem, fCat, fNote, invFilter, picked]);
   const visible = fMoves.filter((m) => showVoided || !m.voided_at);
   const inMoves = visible.filter((m) => m.movement_type === "IN");
   const outMoves = visible.filter((m) => m.movement_type === "OUT")
@@ -529,23 +568,25 @@ function WarehouseInner({ section }: { section: Tab }) {
        failed to fill is the screen's fault, not the user's. */
     const code = eBar.trim() || i.barcode;
     if (!code) { setRowErr("This item has no code at all — set one before saving."); return; }
-    const { error } = await supabase.from("khana_final_items")
-      .update({ name: eName.trim(), barcode: code, category: eItemCat || null })
-      .eq("id", i.item_id);
+    /* Both halves in one step: the product (name, code, category) and its
+       article (printed barcode, prices). They used to be two writes, and the
+       article one never landed — the articles table only allows reading, and
+       a blocked write reports "0 rows" instead of an error. So the name and
+       code changed while the printed barcode and prices did not, and the two
+       halves quietly drifted apart. update_warehouse_product (K177) saves both
+       or neither, and keeps the article on the same code as the product. */
+    const num = (v: string) => (v === "" ? null : parseFloat(v));
+    const { error } = await supabase.rpc("update_warehouse_product", {
+      p_item_id: i.item_id,
+      p_patch: {
+        name: eName.trim(), barcode: code, category: eItemCat || null,
+        manual_barcode: eManual.trim() || null,
+        cost_price: num(eCost), retail_price: num(eRetail), gst_rate: num(eGst),
+      },
+    });
     if (error) { setRowErr(error.message); return; }
 
-    /* The article half: manual barcode and the money. Matched on the barcode
-       as it was BEFORE this edit, since that is what the article still holds. */
-    const num = (v: string) => (v === "" ? null : parseFloat(v));
-    const { error: aErr } = await supabase.from("articles").update({
-      name: eName.trim(),
-      manual_barcode: eManual.trim() || null,
-      cost_price: num(eCost), retail_price: num(eRetail), gst_rate: num(eGst),
-      system_barcode: code,
-    }).eq("system_barcode", i.barcode);
-    if (aErr) { setRowErr(aErr.message); return; }
-
-    setEditItem(null); setRowErr(""); load();
+    setEditItem(null); setRowErr(""); load(); loadMoney();
   }
 
   async function saveStock(i: Item) {
@@ -599,9 +640,9 @@ function WarehouseInner({ section }: { section: Tab }) {
           return out;
         })() }
     : { title: `Warehouse ${tab === "in" ? "New GRN" : tab === "out" ? "STR" : "Movements"}`,
-        headers: ["Number", "Date", "Barcode", "Item", "Type", "Quantity", "Party", "Branch", "Delivery #", "Invoice", "Note", "Voided"],
+        headers: ["Number", "Date", "Barcode", ...(tab === "in" ? ["Printed barcode"] : []), "Item", "Type", "Quantity", "Party", "Branch", "Delivery #", "Invoice", "Note", "Voided"],
         rows: (tab === "in" ? inMoves : outMoves).map((m) => [m.movement_no ?? "", when(m.created_at),
-          m.barcode, m.name, m.movement_type, m.quantity, m.party ?? "", m.branch ?? "",
+          m.barcode, ...(tab === "in" ? [m.manual_code ?? ""] : []), m.name, m.movement_type, m.quantity, m.party ?? "", m.branch ?? "",
           m.delivery_no ?? "", m.invoice_no ?? "", m.note ?? "", m.voided_at ? "yes" : ""]) };
 
   /* In and Out ARE the warehouse's GRNs — goods arriving and goods leaving.
@@ -691,8 +732,15 @@ function WarehouseInner({ section }: { section: Tab }) {
             <select value={fCat} onChange={(e) => { setFCat(e.target.value); setFItem(""); }}
               className="rounded-xl2 border border-line bg-surface px-3 py-2 text-[12.5px] outline-none focus:border-ink/30">
               <option value="">All categories</option>
-              {["Kids", "Child", "Ladies", "Men"].map((c) => <option key={c} value={c}>{c}</option>)}
+              {catOptions.map((c) => <option key={c} value={c}>{c}</option>)}
             </select>
+            {tab === "in" && noteOptions.length > 0 && (
+              <select value={fNote} onChange={(e) => setFNote(e.target.value)} title="What kind of entry"
+                className="rounded-xl2 border border-line bg-surface px-3 py-2 text-[12.5px] outline-none focus:border-ink/30">
+                <option value="">All notes</option>
+                {noteOptions.map(([k, c]) => <option key={k} value={k}>{k} ({c})</option>)}
+              </select>
+            )}
               {tab === "out" && invoices.length > 0 && (
                 <select value={invFilter} onChange={(e) => { setInvFilter(e.target.value); setPicked(new Set()); }}
                   className="rounded-full border border-line bg-surface px-3 py-1.5 text-[12px] outline-none">
@@ -730,10 +778,10 @@ function WarehouseInner({ section }: { section: Tab }) {
               className="max-w-[15rem] rounded-xl2 border border-line bg-surface px-3 py-2 text-[12.5px] outline-none focus:border-ink/30">
               <option value="">All products</option>
               {items.filter((i) => !fCat || i.category === fCat)
-                    .map((i) => <option key={i.item_id} value={i.barcode}>{i.name}</option>)}
+                    .map((i) => <option key={i.item_id} value={i.barcode}>{i.name} · {i.barcode}</option>)}
             </select>
-            {(fParty || fBranch || fItem || fCat) && (
-              <button onClick={() => { setFParty(""); setFBranch(""); setFItem(""); setFCat(""); }}
+            {(fParty || fBranch || fItem || fCat || fNote || q || dFrom || dTo) && (
+              <button onClick={() => { setFParty(""); setFBranch(""); setFItem(""); setFCat(""); setFNote(""); setQ(""); setDFrom(""); setDTo(""); }}
                 className="rounded-full border border-line px-3 py-1.5 text-[12px] font-semibold text-ink/60 hover:bg-panel">Clear</button>
             )}
           </div>
@@ -743,8 +791,9 @@ function WarehouseInner({ section }: { section: Tab }) {
           <div className="relative w-full max-w-xs">
             {/* One search box on this screen. On the product list it filters;
                 on a GRN screen the scan box above does the finding. */}
-            {tab === "materials" && (
-              <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search barcode or name…"
+            {(tab === "materials" || tab === "in") && (
+              <input value={q} onChange={(e) => setQ(e.target.value)}
+                placeholder={tab === "in" ? "Search the list: barcode, printed barcode, item, note…" : "Search barcode or name…"}
                 className="w-full max-w-xs rounded-xl2 border border-line bg-surface px-3 py-2 text-[13px] outline-none focus:border-ink/30" />
             )}
             {q && (
@@ -837,7 +886,12 @@ function WarehouseInner({ section }: { section: Tab }) {
                             <button onClick={() => { setEditItem(null); setRowErr(""); }} className="text-[11px] font-normal text-ink/50">cancel</button>
                             {rowErr && <span className="block text-[11px] font-medium text-danger">{rowErr}</span>}
                           </span>
-                        ) : (<>{i.name}
+                        ) : (<>
+                          {/* Click the name for every stock-in and stock-out it has had. */}
+                          <button onClick={() => setHistItem(i)} title="See its stock in and out"
+                            className="text-left font-semibold text-ink underline decoration-line decoration-dotted underline-offset-4 hover:decoration-ink">
+                            {i.name}
+                          </button>
                           {i.description && <span className="block text-[11px] font-normal text-hint">{i.description}</span>}</>)}
                       </td>
                       <td className="px-4 py-2.5">
@@ -1086,7 +1140,12 @@ function WarehouseInner({ section }: { section: Tab }) {
                 )}
                 {found && (
                   <p className="mt-2 text-[12.5px] text-ink/80">
-                    <b>{found.name}</b> · holding {n(found.quantity)}
+                    <b>{found.name}</b>
+                    <span className="ml-1.5 font-mono text-[12px] text-ink/60">{found.barcode}</span>
+                    {money[found.barcode]?.manual && (
+                      <span className="ml-1.5 font-mono text-[12px] text-muted">printed {money[found.barcode]!.manual}</span>
+                    )}
+                    {" "}· holding {n(found.quantity)}
                     {tab === "out" && parseFloat(qty) > found.quantity && (
                       <span className="text-danger"> — more than is there</span>)}
                   </p>
@@ -1095,18 +1154,28 @@ function WarehouseInner({ section }: { section: Tab }) {
               </div>
             )}
 
+            {/* The moment a barcode is found, everything that item has ever
+                done — so what is arriving can be checked against what came
+                before, without leaving the bench. */}
+            {tab === "in" && found && (
+              <ItemHistory barcode={found.barcode} name={found.name}
+                manual={money[found.barcode]?.manual ?? null}
+                stockNow={found.quantity} reloadKey={moves.length} />
+            )}
+
             <div className="overflow-hidden rounded-card border border-line bg-surface">
               <div className="overflow-x-auto"><table className="w-full text-left text-[13px]">
                 <thead><tr className="border-b border-line text-[11px] uppercase tracking-wide text-hint">
                   {tab === "out" && <th className="px-4 py-2.5 font-bold">#</th>}
                   <th className="px-4 py-2.5 font-bold">Date</th><th className="px-4 py-2.5 font-bold">Barcode</th>
+                  {tab === "in" && <th className="px-4 py-2.5 font-bold">Printed</th>}
                   <th className="px-4 py-2.5 font-bold">Item</th>
                   <th className="px-4 py-2.5 text-right font-bold">Qty</th>
                   <th className="px-4 py-2.5 font-bold">{tab === "out" ? "Went to" : "Note"}</th><th className="px-4 py-2.5"></th>
                 </tr></thead>
                 <tbody>
                   {(tab === "in" ? inMoves : outMoves).map((m, mi, arr) => (
-                    <>
+                    <Fragment key={m.id}>
                     {tab === "out" && (mi === 0 || `${arr[mi-1].party}|${arr[mi-1].branch}` !== `${m.party}|${m.branch}`) && (
                       <tr key={`h-${m.id}`} className="bg-panel/60">
                         <td colSpan={7} className="px-4 py-1.5 text-[11.5px] font-bold uppercase tracking-wide text-ink/70">
@@ -1129,6 +1198,9 @@ function WarehouseInner({ section }: { section: Tab }) {
                       )}
                       <td className="px-4 py-2.5 text-[12px] text-muted">{when(m.created_at)}</td>
                       <td className="px-4 py-2.5 font-mono text-[12px] text-ink">{m.barcode}</td>
+                      {tab === "in" && (
+                        <td className="px-4 py-2.5 font-mono text-[12px] text-muted">{m.manual_code ?? "—"}</td>
+                      )}
                       <td className="px-4 py-2.5 font-semibold text-ink">{m.name}</td>
                       <td className="px-4 py-2.5 text-right tnum font-bold text-ink">{n(m.quantity)}</td>
                       <td className="px-4 py-2.5 text-[12px] text-hint">
@@ -1189,17 +1261,45 @@ function WarehouseInner({ section }: { section: Tab }) {
                         ))}
                       </td>
                     </tr>
-                    </>
+                    </Fragment>
                   ))}
                   {(tab === "in" ? inMoves : outMoves).length === 0 && (
-                    <tr><td colSpan={tab === "out" ? 7 : 6} className="px-4 py-8 text-center text-[13px] text-muted">Nothing recorded yet.</td></tr>
+                    <tr><td colSpan={7} className="px-4 py-8 text-center text-[13px] text-muted">
+                      {moves.some((x) => x.movement_type === (tab === "in" ? "IN" : "OUT")) ? "Nothing matches these filters." : "Nothing recorded yet."}
+                    </td></tr>
                   )}
                 </tbody>
               </table></div>
+              {tab === "in" && inMoves.length > 0 && (() => {
+                const live = inMoves.filter((m) => !m.voided_at);
+                const pcs = live.reduce((a, m) => a + Number(m.quantity), 0);
+                const cost = live.reduce((a, m) => a + Number(m.cost_total ?? 0), 0);
+                const retail = live.reduce((a, m) => a + Number(m.retail_total ?? 0), 0);
+                return (
+                  <p className="border-t border-line bg-panel/40 px-4 py-2.5 text-[12.5px] text-ink/75">
+                    {live.length} entr{live.length === 1 ? "y" : "ies"} · <b className="tnum text-ink">{n(pcs)}</b> pieces
+                    {cost > 0 && <> · cost <b className="tnum text-ink">Rs {n(cost)}</b></>}
+                    {retail > 0 && <> · retail <b className="tnum text-ink">Rs {n(retail)}</b></>}
+                  </p>
+                );
+              })()}
+              {moves.length >= LIST_CAP && (
+                <p className="border-t border-line bg-amber-soft px-4 py-2 text-[12px] text-ink">
+                  This list holds the latest {LIST_CAP.toLocaleString()} movements; older ones are not in it. Every product&apos;s
+                  own history (click its name under Products, or find it above) is complete.
+                </p>
+              )}
             </div>
           </>
         )}
       </div>
+
+      <Modal open={!!histItem} onClose={() => setHistItem(null)} title="Stock in and out" wide>
+        {histItem && (
+          <ItemHistory framed={false} barcode={histItem.barcode} name={histItem.name}
+            manual={money[histItem.barcode]?.manual ?? null} stockNow={histItem.quantity} />
+        )}
+      </Modal>
 
       <Modal open={pOpen} onClose={() => setPOpen(false)} title="Add party or branch">
         <Field label="Belongs to (leave empty to add a new party)">

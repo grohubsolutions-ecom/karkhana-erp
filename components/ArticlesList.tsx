@@ -44,7 +44,7 @@ export default function ArticlesList({ reloadKey = 0, recipeFor: openFor = null,
   const [canManage, setCanManage] = useState(false);
   const [loading, setLoading] = useState(true);
 
-  const [artModal, setArtModal] = useState<null | { id?: string }>(null);
+  const [artModal, setArtModal] = useState<null | { id?: string; bc?: string | null }>(null);
   const [name, setName] = useState(""); const [gtype, setGtype] = useState(""); const [aud, setAud] = useState("");
   const [size, setSize] = useState(""); const [notes, setNotes] = useState(""); const [active, setActive] = useState(true);
   const [savingArt, setSavingArt] = useState(false); const [artErr, setArtErr] = useState("");
@@ -92,7 +92,7 @@ export default function ArticlesList({ reloadKey = 0, recipeFor: openFor = null,
 
   function openAdd() { setArtModal({}); setName(""); setGtype(""); setAud(""); setSize(""); setNotes(""); setActive(true); setArtErr("");
     setSection(""); setManualBc(""); setCost(""); setRetail(""); setGst(""); setMadeBc(null); }
-  function openEdit(a: Article) { setArtModal({ id: a.id }); setName(a.name); setGtype(a.garment_type || ""); setAud(a.audience || ""); setSize(a.size || ""); setNotes(a.notes || ""); setActive(a.is_active); setArtErr("");
+  function openEdit(a: Article) { setArtModal({ id: a.id, bc: a.system_barcode }); setName(a.name); setGtype(a.garment_type || ""); setAud(a.audience || ""); setSize(a.size || ""); setNotes(a.notes || ""); setActive(a.is_active); setArtErr("");
     setSection(a.section || ""); setManualBc(a.manual_barcode || "");
     setCost(a.cost_price == null ? "" : String(a.cost_price));
     setRetail(a.retail_price == null ? "" : String(a.retail_price));
@@ -113,21 +113,24 @@ export default function ArticlesList({ reloadKey = 0, recipeFor: openFor = null,
     if (!name.trim()) { setArtErr("Enter an article name."); return; }
     setSavingArt(true);
     if (artModal?.id) {
-      const { error } = await supabase.rpc("update_article", {
-        p_id: artModal.id, p_name: name.trim(), p_garment_type: gtype,
-        p_audience: aud, p_size: size, p_notes: notes, p_is_active: active,
-      });
-      /* Prices, GST and the manual barcode are plain columns — written
-         directly rather than widening the RPC's signature. */
-      if (!error) {
-        await supabase.from("articles").update({
+      /* One call, every field. This used to be two: a function for the name,
+         then a direct write for the barcode and prices. That direct write
+         never saved anything — the articles table only allows reading, and a
+         blocked write comes back as "0 rows changed", not as an error — so the
+         window closed as if it had worked while the old barcode stayed put.
+         update_article_details (K177) saves it all or refuses it all, and a
+         refusal arrives here as a message. */
+      const { error } = await supabase.rpc("update_article_details", {
+        p_id: artModal.id,
+        p_patch: {
+          name: name.trim(), garment_type: gtype, audience: aud, size, notes, is_active: active,
           section: section || null,
           manual_barcode: manualBc.trim() || null,
           cost_price: cost ? parseFloat(cost) : null,
           retail_price: retail ? parseFloat(retail) : null,
           gst_rate: gst ? parseFloat(gst) : null,
-        }).eq("id", artModal.id);
-      }
+        },
+      });
       setSavingArt(false);
       if (error) { setArtErr(error.message); return; }
       setArtModal(null); load();
@@ -319,7 +322,11 @@ export default function ArticlesList({ reloadKey = 0, recipeFor: openFor = null,
             </div>
             <div className="mt-3 grid grid-cols-2 gap-3">
               <div><label className="block text-[12px] font-medium text-muted">Section {artModal.id ? "" : "*"}</label>
-                <select value={section} onChange={(e) => setSection(e.target.value)} className={inp}>
+                {/* Locked once a barcode exists: 44-000001 says section 44 in its
+                    first two digits, and the barcode is never re-made on edit.
+                    The database refuses the change too — this just says so first. */}
+                <select value={section} onChange={(e) => setSection(e.target.value)} className={`${inp} disabled:cursor-not-allowed disabled:opacity-55`}
+                  disabled={!!artModal.bc} title={artModal.bc ? `Fixed by its barcode ${artModal.bc}` : undefined}>
                   <option value="">—</option>
                   <option value="40">40 · Baby/Newborn</option>
                   <option value="41">41 · Kids</option>

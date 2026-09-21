@@ -71,8 +71,16 @@ export default function AddArticlePage() {
     setBusy(false);
     if (error) { setErr(error.message); return; }
     const row = data as Made & { id?: string };
+    /* The article is created as Factory; Warehouse is set straight after.
+       That second step used to write to the table directly, which the table
+       silently ignores — so every "Warehouse" article came out as Factory.
+       It goes through update_article_details (K177) now, and if it is
+       refused the article still exists, so say exactly that. */
     if (owner !== "factory" && row?.id) {
-      await supabase.from("articles").update({ owner }).eq("id", row.id);
+      const { error: oErr } = await supabase.rpc("update_article_details", {
+        p_id: row.id, p_patch: { owner },
+      });
+      if (oErr) setErr(`Created, but it could not be marked as Warehouse: ${oErr.message}`);
     }
     setMade(row);
     setReloadKey((k) => k + 1);
@@ -91,6 +99,9 @@ export default function AddArticlePage() {
             <div className="rounded-card border border-line bg-surface p-8 text-center shadow-card">
               <span className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-success-soft text-ink"><Shirt size={24} /></span>
               <p className="mt-3 text-[15px] font-semibold text-ink">{name || "Article"} created</p>
+              {/* The form (and its error line) is gone once this card shows, so
+                  a problem after the save has to be shown here or not at all. */}
+              {err && <p className="mx-auto mt-2 max-w-sm rounded-xl2 bg-danger-soft px-3 py-2 text-[12.5px] font-medium text-danger">{err}</p>}
 
               <div className="mx-auto mt-4 max-w-xs rounded-xl2 border border-[#166534]/25 bg-success-soft p-4">
                 <p className="text-[11.5px] font-bold uppercase tracking-wide text-ink/55">System barcode</p>

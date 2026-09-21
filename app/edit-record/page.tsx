@@ -169,66 +169,92 @@ export default function EditRecordPage() {
     }
   }
 
+  /* Every write here either goes through a database function, or asks for
+     the changed rows back and checks that some came. The articles table only
+     allows reading, and a blocked write does not fail — it reports "0 rows
+     changed" — which is how this screen used to close as if it had saved
+     while the name, barcode and prices stayed exactly as they were. */
   async function save() {
     if (!supabase || !open) return;
     setBusy(true); setErr("");
-    let error = null as { message: string } | null;
-    if (open.kind === "product") {
-      const r = await supabase.from("khana_final_items")
-        .update({ is_active: active }).eq("id", open.id);
-      error = r.error;
-    } else {
-      const r = await supabase.rpc("set_item_active", {
-        p_kind: open.kind, p_id: open.id, p_active: active,
+    const fail = (m: string) => { setBusy(false); setErr(m); };
+    const num = (v: string) => (v === "" ? null : parseFloat(v));
+
+    if (open.kind === "article") {
+      /* One call for the whole article, active flag included, so it saves
+         entirely or not at all. */
+      const r = await supabase.rpc("update_article_details", {
+        p_id: open.id,
+        p_patch: {
+          name: name.trim() || open.name,
+          manual_barcode: manual.trim() || null,
+          section: section || null,
+          cost_price: num(cost), retail_price: num(retail), gst_rate: num(gst),
+          is_active: active,
+        },
       });
-      error = r.error;
-    }
-    if (!error && open.kind === "article") {
-      await supabase.from("articles").update({
-        name: name.trim() || open.name,
-        manual_barcode: manual.trim() || null,
-        section: section || null,
-        cost_price: cost === "" ? null : parseFloat(cost),
-        retail_price: retail === "" ? null : parseFloat(retail),
-        gst_rate: gst === "" ? null : parseFloat(gst),
-      }).eq("id", open.id);
+      if (r.error) return fail(r.error.message);
       /* The recipe is replaced whole — one call, so a half-saved recipe
          cannot exist. */
       const lines = bom.filter((l) => l.group_id && l.unit_id && parseFloat(l.quantity) > 0)
         .map((l) => ({ group_id: l.group_id, category_id: l.category_id,
                        size_id: l.size_id, unit_id: l.unit_id, quantity: parseFloat(l.quantity) }));
-      const r = await supabase.rpc("set_article_bom", { p_article_id: open.id, p_lines: lines });
-      if (r.error) { setBusy(false); setErr(r.error.message); return; }
+      const b = await supabase.rpc("set_article_bom", { p_article_id: open.id, p_lines: lines });
+      if (b.error) return fail(b.error.message);
     }
-    if (!error && open.kind === "product") {
-      await supabase.from("khana_final_items").update({
-        name: name.trim() || open.name,
-        barcode: manual.trim() || open.barcode,
-      }).eq("id", open.id);
-    }
-    if (!error && open.kind === "material") {
-      await supabase.rpc("set_min_quantity", {
-        p_item_id: open.id, p_min: minQ === "" ? null : parseFloat(minQ),
+
+    if (open.kind === "product") {
+      const a = await supabase.from("khana_final_items")
+        .update({ is_active: active }).eq("id", open.id).select("id");
+      if (a.error) return fail(a.error.message);
+      if (!a.data?.length) return fail("Nothing was saved — you may not have permission to change warehouse products.");
+      /* Name and code through the function that keeps the product and its
+         article on the same code; changing one without the other breaks the
+         link between them. */
+      const r = await supabase.rpc("update_warehouse_product", {
+        p_item_id: open.id,
+        p_patch: { name: name.trim() || open.name, barcode: manual.trim() || open.barcode },
       });
+      if (r.error) return fail(r.error.message);
     }
+
+    if (open.kind === "material") {
+      const a = await supabase.rpc("set_item_active", { p_kind: "material", p_id: open.id, p_active: active });
+      if (a.error) return fail(a.error.message);
+      const m = await supabase.rpc("set_min_quantity", { p_item_id: open.id, p_min: num(minQ) });
+      if (m.error) return fail(m.error.message);
+    }
+
     setBusy(false);
-    if (error) { setErr(error.message); return; }
     setOpen(null); load();
   }
 
   async function remove() {
     if (!supabase || !open) return;
     setBusy(true); setErr("");
-    const table = open.kind === "article" ? "articles"
-                : open.kind === "product" ? "khana_final_items" : "material_items";
-    const { error } = await supabase.from(table).delete().eq("id", open.id);
-    setBusy(false);
-    if (error) {
-      /* Almost always a foreign key: it appears in a GRN or an order. That is
-         the system protecting history, so say so instead of showing raw SQL. */
-      setErr("This cannot be deleted — it already appears in a GRN, an order or a recipe. Block it instead, and it will disappear from the dropdowns while its history stays intact.");
+    /* Articles through delete_article, which checks for production orders and
+       says so. A direct delete on articles is silently ignored — the same
+       trap as the edits above — so the article simply stayed. */
+    if (open.kind === "article") {
+      const { error } = await supabase.rpc("delete_article", { p_id: open.id });
+      setBusy(false);
+      if (error) { setErr(error.message); return; }
+      setOpen(null); load();
       return;
     }
+    const table = open.kind === "product" ? "khana_final_items" : "material_items";
+    const { data, error } = await supabase.from(table).delete().eq("id", open.id).select("id");
+    setBusy(false);
+    if (error) {
+      /* Only a foreign-key refusal (23503) means "used in history". Anything
+         else is shown as the database said it — a made-up reason sends
+         people looking for a problem that is not there. */
+      setErr(error.code === "23503"
+        ? "This cannot be deleted — it already appears in a GRN, an order or a recipe. Block it instead, and it will disappear from the dropdowns while its history stays intact."
+        : error.message);
+      return;
+    }
+    if (!data?.length) { setErr("Nothing was deleted — you may not have permission to delete this."); return; }
     setOpen(null); load();
   }
 
@@ -347,7 +373,11 @@ export default function EditRecordPage() {
                 </Field></div>
                 <div className="mt-3 grid grid-cols-2 gap-3">
                   <Field label="Section">
-                    <select value={section} onChange={(e) => setSection(e.target.value)} className={inp}>
+                    {/* Locked once the article has a barcode — its first two
+                        digits are the section, and the database refuses a
+                        change that would make them wrong. */}
+                    <select value={section} onChange={(e) => setSection(e.target.value)} className={`${inp} disabled:cursor-not-allowed disabled:opacity-55`}
+                      disabled={!!open.barcode} title={open.barcode ? `Fixed by its barcode ${open.barcode}` : undefined}>
                       <option value="">—</option>
                       {SECTIONS.map(([v, l]) => <option key={v} value={v}>{v} · {l}</option>)}
                     </select>
