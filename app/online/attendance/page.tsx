@@ -1,14 +1,15 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
-import { Users, CalendarCheck, HandCoins, Wallet, RefreshCw, Trash2 } from "lucide-react";
+import { Users, CalendarCheck, HandCoins, Wallet, RefreshCw, Trash2, Pencil } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { AddEmployee, MarkAttendance, AddAdvance } from "@/components/AttendanceEntry";
 import MonthlySummary from "@/components/MonthlySummary";
 import { useConfirm } from "@/components/ConfirmDialog";
+import RosterEmployeeEdit, { type RosterEmp } from "@/components/RosterEmployeeEdit";
 
 type Tab = "employees" | "attendance" | "advances" | "salaries";
 type Row = Record<string, unknown>;
-type Emp = { id: string; name: string; designation?: string; department?: string; sal?: number; wd?: number; phone?: string };
+type Emp = { id: string; name: string; designation?: string; department?: string; sal?: number; wd?: number; phone?: string; dtime?: string };
 
 const TABS: { key: Tab; label: string }[] = [
   { key: "employees", label: "Employees" },
@@ -43,7 +44,11 @@ export default function AttendancePage() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
+  // A refused action, kept apart from `err`: the table replaces itself with
+  // "Couldn't load" whenever `err` is set, and a refused removal is not a load failure.
+  const [actErr, setActErr] = useState("");
   const [removing, setRemoving] = useState<string | null>(null);
+  const [editing, setEditing] = useState<RosterEmp | null>(null);
 
   const empName = (id: unknown) => emps.find((e) => e.id === id)?.name ?? String(id ?? "—");
 
@@ -67,18 +72,18 @@ export default function AttendancePage() {
       confirmLabel: "Remove",
     }))) return;
 
-    setRemoving(id); setErr(""); setMsg("");
+    setRemoving(id); setActErr(""); setMsg("");
     const { data, error } = await supabase.rpc("hub_remove_att_employee", { p_id: id });
     setRemoving(null);
 
     if (error) {
-      setErr(/schema cache|does not exist|Could not find the function/i.test(error.message)
+      setActErr(/schema cache|does not exist|Could not find the function/i.test(error.message)
         ? "This needs migration H235, which has not been run on the database yet. Open Supabase → SQL editor and run H235_remove_from_attendance_roster.sql, then try again."
         : error.message);
       return;
     }
     const r = data as { ok?: boolean; error?: string; report?: string } | null;
-    if (!r?.ok) { setErr(r?.error ?? "The removal was refused and gave no reason."); return; }
+    if (!r?.ok) { setActErr(r?.error ?? "The removal was refused and gave no reason."); return; }
 
     await load("employees");
     setMsg(r.report ?? `${name} removed.`);
@@ -86,7 +91,7 @@ export default function AttendancePage() {
 
   useEffect(() => {
     if (!isSupabaseConfigured || !supabase) { setLoading(false); return; }
-    supabase.from("online_att_employees").select("id,name,designation,department,sal,wd,phone").order("name")
+    supabase.from("online_att_employees").select("id,name,designation,department,sal,wd,phone,dtime").order("name")
       .then(({ data }) => setEmps((data as Emp[]) ?? []));
   }, []);
 
@@ -94,7 +99,7 @@ export default function AttendancePage() {
     if (!isSupabaseConfigured || !supabase) { setLoading(false); return; }
     setLoading(true); setErr("");
     if (which === "employees") {
-      const { data, error } = await supabase.from("online_att_employees").select("id,name,designation,department,sal,wd,phone").order("name");
+      const { data, error } = await supabase.from("online_att_employees").select("id,name,designation,department,sal,wd,phone,dtime").order("name");
       if (error) setErr(error.message); setEmps((data as Emp[]) ?? []); setRows((data as Row[]) ?? []);
     } else if (which === "attendance") {
       const { data, error } = await supabase.from("online_att_records").select("id,emp_id,year,month,day,status,time_in").order("year", { ascending: false }).order("month", { ascending: false }).order("day", { ascending: false }).limit(1000);
@@ -172,6 +177,13 @@ export default function AttendancePage() {
         ))}
       </div></div>
 
+      {actErr && (
+        <div className="mt-4 flex items-start justify-between gap-2 rounded-card border border-red-300 bg-red-50 p-3 text-[13px] text-red-800">
+          <span>{actErr}</span>
+          <button onClick={() => setActErr("")} className="shrink-0 font-semibold opacity-60 hover:opacity-100">Dismiss</button>
+        </div>
+      )}
+
       {msg && (
         <div className="mt-4 flex items-start justify-between gap-2 rounded-card border border-emerald-300 bg-emerald-50 p-3 text-[13px] text-emerald-900">
           <span>{msg}</span>
@@ -197,7 +209,7 @@ export default function AttendancePage() {
           <table className="w-full min-w-[620px] text-left text-[13px]">
             <thead>
               <tr className="border-b border-line text-[11.5px] uppercase tracking-wide text-hint dark:border-white/[0.06] dark:text-[#8a8175]">
-                {tab === "employees" && <><th className="px-4 py-3 font-semibold">Name</th><th className="px-4 py-3 font-semibold">Designation</th><th className="px-4 py-3 font-semibold">Department</th><th className="px-4 py-3 text-right font-semibold">Salary</th><th className="px-4 py-3 text-right font-semibold">Work days</th><th className="px-4 py-3 font-semibold">Phone</th><th className="px-4 py-3 text-right font-semibold">Remove</th></>}
+                {tab === "employees" && <><th className="px-4 py-3 font-semibold">Name</th><th className="px-4 py-3 font-semibold">Designation</th><th className="px-4 py-3 font-semibold">Department</th><th className="px-4 py-3 text-right font-semibold">Salary</th><th className="px-4 py-3 text-right font-semibold">Work days</th><th className="px-4 py-3 font-semibold">Phone</th><th className="px-4 py-3 text-right font-semibold">Actions</th></>}
                 {tab === "attendance" && <><th className="px-4 py-3 font-semibold">Employee</th><th className="px-4 py-3 font-semibold">Date</th><th className="px-4 py-3 font-semibold">Time in</th><th className="px-4 py-3 font-semibold">Status</th></>}
                 {tab === "advances" && <><th className="px-4 py-3 font-semibold">Employee</th><th className="px-4 py-3 text-right font-semibold">Amount</th><th className="px-4 py-3 font-semibold">Date</th><th className="px-4 py-3 font-semibold">Deduct</th><th className="px-4 py-3 font-semibold">Note</th><th className="px-4 py-3 font-semibold">Settled</th></>}
               </tr>
@@ -220,6 +232,11 @@ export default function AttendancePage() {
                       <td className="px-4 py-3 text-right tabular-nums">{String(r.wd ?? "—")}</td>
                       <td className="px-4 py-3 text-muted dark:text-[#a89f93]">{String(r.phone ?? "—")}</td>
                       <td className="whitespace-nowrap px-4 py-3 text-right">
+                        <button
+                          onClick={() => setEditing(r as unknown as RosterEmp)}
+                          className="mr-1 rounded-full border border-line px-2.5 py-1 text-[11.5px] font-semibold hover:bg-panel dark:border-white/15 dark:hover:bg-white/10">
+                          <Pencil size={11} className="mr-1 inline" />Edit
+                        </button>
                         <button
                           onClick={() => removeEmployee(String(r.id), String(r.name ?? "this person"))}
                           disabled={removing === String(r.id)}
@@ -252,6 +269,13 @@ export default function AttendancePage() {
           </table>
         </div>
       </div>
+
+      <RosterEmployeeEdit
+        emp={editing}
+        all={emps as RosterEmp[]}
+        onClose={() => setEditing(null)}
+        onDone={async (m) => { setEditing(null); await load("employees"); setMsg(m); }}
+      />
 
       {!isSupabaseConfigured && <p className="mt-4 text-center text-[12px] text-hint dark:text-[#8a8175]">Preview build · connect Supabase to load attendance.</p>}
       </>)}
