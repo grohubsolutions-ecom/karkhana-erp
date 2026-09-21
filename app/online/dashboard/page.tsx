@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLiveTables } from "@/lib/useLiveTables";
 import { ShoppingBag, Clock, Undo2, Wallet, TrendingUp, Truck, RefreshCw, MapPin } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
-import RangeBar from "@/components/RangeBar";
+import { HubRange, PageActions, Segmented, useIsPhone } from "@/components/HubUI";
 import { rangeDates, rs } from "@/lib/dateRange";
 
 const STORES = [
@@ -26,7 +26,7 @@ function Pie({ data }: { data: { label: string; value: number }[] }) {
     return `M ${cx} ${cy} L ${cx + r * Math.cos(a0)} ${cy + r * Math.sin(a0)} A ${r} ${r} 0 ${large} 1 ${cx + r * Math.cos(a1)} ${cy + r * Math.sin(a1)} Z`;
   };
   return (
-    <div className="flex flex-wrap items-center gap-6">
+    <div className="flex flex-wrap items-center justify-center gap-6 sm:justify-start">
       <svg width="200" height="200" viewBox="0 0 200 200" className="shrink-0">
         {/* One slice is a whole circle, and an arc that starts and ends at the
             same point draws nothing — a store selling into one city showed an
@@ -105,6 +105,10 @@ const TONE_TXT = {
 const STORE_ORDER = ["LM", "TS", "TRZ"];
 
 export default function HubDashboard() {
+  const phone = useIsPhone();
+  /* On a phone the store columns do not fit side by side; the ladder shows one
+     store at a time, picked here. */
+  const [col, setCol] = useState("ALL");
   const [breakdown, setBreakdown] = useState<Breakdown | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
@@ -210,24 +214,26 @@ export default function HubDashboard() {
   ];
 
   return (
-    <div className="px-4 py-6 sm:px-6 md:px-10 md:py-8">
+    <div className="px-4 py-4 sm:px-6 md:px-10 md:py-8">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-[20px] font-extrabold tracking-tight text-ink sm:text-[22px] dark:text-[#f4f1ea]">Dashboard</h1>
-          <p className="mt-1 flex flex-wrap items-center gap-2 text-[13px] text-muted dark:text-[#a89f93]">
-            Orders, delivery performance &amp; COD across all three stores.
+          <h1 className="hidden text-[22px] font-extrabold tracking-tight text-ink md:block dark:text-[#f4f1ea]">Dashboard</h1>
+          <p className="flex flex-wrap items-center gap-2 text-[13px] text-muted md:mt-1 dark:text-[#a89f93]">
+            <span className="hidden md:inline">Orders, delivery performance &amp; COD across all three stores.</span>
             <span className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-semibold ${live ? "bg-success-soft text-success dark:bg-white/[0.08]" : "bg-panel text-muted dark:bg-white/[0.06] dark:text-[#a89f93]"}`}>
               <span className={`h-1.5 w-1.5 rounded-full ${live ? "animate-pulse bg-success" : "bg-muted"}`} />
               {live ? "Live" : "Not live"}
             </span>
           </p>
         </div>
-        <button onClick={() => load()} className="flex items-center gap-2 rounded-full border border-line bg-surface px-4 py-2 text-[13px] font-semibold text-ink transition hover:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:hover:bg-white/[0.12]">
-          <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> Refresh
-        </button>
+        <PageActions>
+          <button onClick={() => load()} className="flex items-center justify-center gap-2 rounded-full border border-line bg-surface px-4 py-2 text-[13px] font-semibold text-ink transition hover:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:hover:bg-white/[0.12]">
+            <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> Refresh
+          </button>
+        </PageActions>
       </div>
 
-      <RangeBar preset={preset} setPreset={setPreset} cf={cf} setCf={setCf} ct={ct} setCt={setCt}
+      <HubRange preset={preset} setPreset={setPreset} cf={cf} setCf={setCf} ct={ct} setCt={setCt}
         right={
           <select value={store} onChange={(e) => setStore(e.target.value)} className="rounded-full border border-line bg-surface px-3.5 py-2 text-[13px] font-medium text-ink outline-none dark:border-white/10 dark:bg-white/[0.05] dark:text-white">
             {STORES.map((s) => <option key={s.code} value={s.code}>{s.label}</option>)}
@@ -236,11 +242,11 @@ export default function HubDashboard() {
 
       <div className="mt-5 grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
         {cards.map(({ label, value, sub, Icon, bg }) => (
-          <div key={label} className={`rounded-card border border-line ${bg} p-4 dark:border-white/[0.06] dark:bg-[#201c17]`}>
-            <span className="flex h-9 w-9 items-center justify-center rounded-full bg-ink text-white dark:bg-white dark:text-[#141414]"><Icon size={16} /></span>
-            <div className="mt-3 text-[16px] font-extrabold tabular-nums text-ink sm:text-[18px] dark:text-[#f4f1ea]">{loading ? "—" : value}</div>
+          <div key={label} className={`min-w-0 rounded-card border border-line ${bg} p-3.5 sm:p-4 dark:border-white/[0.06] dark:bg-[#201c17]`}>
+            <span className="hidden h-9 w-9 items-center justify-center rounded-full bg-ink text-white sm:flex dark:bg-white dark:text-[#141414]"><Icon size={16} /></span>
+            <div className="max-sm:truncate text-[16px] font-extrabold tabular-nums text-ink sm:mt-3 sm:text-[18px] dark:text-[#f4f1ea]">{loading ? "—" : value}</div>
             <div className="text-[12px] font-medium text-muted dark:text-[#a89f93]">{label}</div>
-            <div className="mt-0.5 text-[11px] text-hint dark:text-[#8a8175]">{sub}</div>
+            <div className="mt-0.5 text-[11px] leading-tight text-hint dark:text-[#8a8175]">{sub}</div>
           </div>
         ))}
       </div>
@@ -287,10 +293,30 @@ export default function HubDashboard() {
       {rates.length > 0 && (
         <div className="mt-2">
           <button onClick={() => setShowMonths((v) => !v)}
-                  className="text-[12.5px] font-semibold text-muted underline-offset-2 transition hover:text-ink hover:underline dark:text-[#a89f93] dark:hover:text-white">
+                  className="min-h-[40px] text-[12.5px] font-semibold text-muted underline-offset-2 transition hover:text-ink hover:underline md:min-h-0 dark:text-[#a89f93] dark:hover:text-white">
             {showMonths ? "Hide month by month" : "Return rate month by month"}
           </button>
-          {showMonths && (
+          {showMonths && phone && (
+            <div className="mt-2 divide-y divide-line rounded-card border border-line bg-surface dark:divide-white/[0.06] dark:border-white/[0.06] dark:bg-[#201c17]">
+              {[...new Set(rates.map((x) => x.month_label))].map((m) => (
+                <div key={m} className="px-4 py-2.5">
+                  <div className="text-[12.5px] font-bold text-ink dark:text-[#f4f1ea]">{m}{rates.find((x) => x.month_label === m)?.is_part_month && <span className="ml-2 rounded-full bg-panel px-2 py-0.5 text-[10px] font-semibold text-hint dark:bg-white/[0.06]">still running</span>}</div>
+                  {rates.filter((x) => x.month_label === m && (x.courier === "PostEx" || x.courier === "OwnEx")).map((x) => {
+                    const d = x.change_pts === null ? null : Number(x.change_pts);
+                    return (
+                      <div key={x.courier} className="mt-1 flex items-baseline gap-2 text-[12.5px]">
+                        <span className="w-14 shrink-0 text-muted dark:text-[#a89f93]">{x.courier}</span>
+                        <b className="tabular-nums text-ink dark:text-[#f4f1ea]">{Number(x.return_pct ?? 0).toFixed(1)}%</b>
+                        <span className={`tabular-nums ${d === null ? "text-hint" : d <= 0 ? "text-emerald-700" : "text-red-700"}`}>{d === null ? "" : `${d > 0 ? "+" : ""}${d.toFixed(1)}`}</span>
+                        <span className="ml-auto truncate tabular-nums text-muted dark:text-[#a89f93]">{x.returned} back · {rs(Number(x.cod_returned ?? 0))}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
+          )}
+          {showMonths && !phone && (
             <div className="mt-2 overflow-x-auto rounded-card border border-line bg-surface dark:border-white/[0.06] dark:bg-[#201c17]">
               <table className="w-full min-w-[520px] text-left text-[13px]">
                 <thead className="border-b border-line text-[11.5px] uppercase tracking-wide text-muted dark:border-white/[0.06] dark:text-[#a89f93]">
@@ -337,7 +363,7 @@ export default function HubDashboard() {
 
       {/* COD money row */}
       <div className="mt-4 grid gap-3 sm:grid-cols-3">
-        <div className="rounded-card border border-line bg-surface p-4 dark:border-white/[0.06] dark:bg-[#201c17]">
+        <div className="rounded-card border border-line bg-surface p-3.5 sm:p-4 dark:border-white/[0.06] dark:bg-[#201c17]">
           <div className="text-[12px] font-medium text-muted dark:text-[#a89f93]">COD received</div>
           <div className="mt-1 text-[19px] font-extrabold tabular-nums text-success">{loading ? "—" : rs(M.received)}</div>
           <div className="mt-0.5 text-[11px] text-hint dark:text-[#8a8175]">collected by the courier and paid to you</div>
@@ -363,13 +389,50 @@ export default function HubDashboard() {
           30 days were then cancelled in Shopify; reading Shopify first would
           call a return a cancellation. */}
       <div className="mt-5 rounded-card border border-line bg-surface dark:border-white/[0.06] dark:bg-[#201c17]">
-        <div className="flex flex-wrap items-baseline justify-between gap-2 px-5 pb-2 pt-5">
+        <div className="flex flex-wrap items-baseline justify-between gap-2 px-4 pb-2 pt-4 sm:px-5 sm:pt-5">
           <h3 className="text-[14px] font-bold text-ink dark:text-[#f4f1ea]">Sales by store</h3>
           <span className="text-[11.5px] text-hint dark:text-[#8a8175]">order value · every column adds up</span>
         </div>
         {loading ? (
           <div className="py-10 text-center text-[13px] text-muted dark:text-[#a89f93]">Loading…</div>
-        ) : (
+        ) : phone ? (() => {
+          const s = M.storeCols.find((x) => (col === "ALL" ? x.is_total : x.store_code === col)) ?? M.storeCols[M.storeCols.length - 1];
+          return (
+            <div className="px-3 pb-3">
+              <Segmented value={col} onChange={setCol}
+                options={[{ key: "ALL", label: "All" }, ...M.storeCols.filter((x) => !x.is_total).map((x) => ({ key: x.store_code, label: x.store_code }))]} />
+              {s && (
+                <div className="mt-2">
+                  <div className="flex items-center gap-2 px-1 pb-1 pt-1 text-[12.5px] font-semibold text-muted dark:text-[#a89f93]">
+                    {!s.is_total && <span className="h-2 w-2 rounded-full" style={{ background: STORES.find((x) => x.code === s.store_code)?.color }} />}
+                    {s.is_total ? "All three stores" : STORES.find((x) => x.code === s.store_code)?.label ?? s.store_code}
+                  </div>
+                  {LADDER.map((row) => {
+                    const v = Number(s[row.v] ?? 0), n = Number(s[row.n] ?? 0);
+                    const share = !row.below && row.key !== "sale" && s.sale_value > 0 ? Math.round((v / s.sale_value) * 100) : null;
+                    return (
+                      <div key={row.key} className={`flex items-center gap-3 py-2.5 ${row.below ? "mt-1 border-t-2 border-line dark:border-white/[0.10]" : "border-t border-line/60 first:border-0 dark:border-white/[0.04]"}`}
+                        style={{ paddingLeft: `${4 + row.indent * 14}px` }}>
+                        <div className="min-w-0 flex-1">
+                          <div className={`text-[13.5px] ${row.strong ? "font-bold text-ink dark:text-[#f4f1ea]" : "font-medium text-ink dark:text-[#e7e2d8]"} ${row.tone ? TONE_TXT[row.tone] : ""}`}>{row.label}</div>
+                          {row.hint && <div className="truncate text-[11px] text-hint dark:text-[#8a8175]">{row.hint}</div>}
+                        </div>
+                        <div className="shrink-0 text-right tabular-nums">
+                          <div className={`whitespace-nowrap ${row.strong ? "text-[15px] font-extrabold" : "text-[13.5px] font-semibold"} ${row.tone ? TONE_TXT[row.tone] : "text-ink dark:text-[#f4f1ea]"}`}>{rs(v)}</div>
+                          <div className="whitespace-nowrap text-[11px] text-hint dark:text-[#8a8175]">{n.toLocaleString()} {n === 1 ? "order" : "orders"}{share !== null && ` · ${share}%`}</div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  <div className="flex items-center justify-between border-t border-line pt-2.5 text-[13.5px] dark:border-white/[0.06]">
+                    <span className="font-medium text-ink dark:text-[#e7e2d8]">Delivery rate</span>
+                    <b className="tabular-nums text-ink dark:text-[#f4f1ea]">{s.delivery_rate == null ? "—" : `${Number(s.delivery_rate).toFixed(1)}%`}</b>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })() : (
           <div className="overflow-x-auto">
             <table className="w-full min-w-[640px] text-left text-[13px]">
               <thead>
@@ -438,20 +501,20 @@ export default function HubDashboard() {
       </div>
 
       <div className="mt-4 grid gap-4 lg:grid-cols-2">
-        <div className="rounded-card border border-line bg-surface p-5 dark:border-white/[0.06] dark:bg-[#201c17]">
+        <div className="rounded-card border border-line bg-surface p-4 sm:p-5 dark:border-white/[0.06] dark:bg-[#201c17]">
           <h3 className="mb-4 flex items-center gap-2 text-[14px] font-bold text-ink dark:text-[#f4f1ea]"><MapPin size={16} /> Top cities</h3>
           {loading ? <div className="py-10 text-center text-[13px] text-muted dark:text-[#a89f93]">Loading…</div> : <Pie data={M.cities} />}
         </div>
 
         {/* Dispatched parcels per courier in the chosen dates. The old chips
             counted the first 1,000 parcels of all time, whatever dates were set. */}
-        <div className="rounded-card border border-line bg-surface p-5 dark:border-white/[0.06] dark:bg-[#201c17]">
+        <div className="rounded-card border border-line bg-surface p-4 sm:p-5 dark:border-white/[0.06] dark:bg-[#201c17]">
           <h3 className="mb-4 flex items-center gap-2 text-[14px] font-bold text-ink dark:text-[#f4f1ea]"><Truck size={16} /> By courier</h3>
           {loading ? <div className="py-10 text-center text-[13px] text-muted dark:text-[#a89f93]">Loading…</div>
           : M.couriers.length === 0 ? <div className="py-10 text-center text-[13px] text-muted dark:text-[#a89f93]">Nothing dispatched in this period.</div>
           : (
             <div className="-mx-1 overflow-x-auto px-1">
-            <table className="w-full min-w-[300px] text-[13px]">
+            <table className="w-full text-[13px] sm:min-w-[300px]">
               <thead className="text-[11.5px] uppercase tracking-wide text-muted dark:text-[#a89f93]">
                 <tr>
                   <th className="pb-2 text-left font-semibold">Courier</th>

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Plus, RefreshCw, Search, Loader2, PackagePlus, UserPlus, CheckCircle2, ChevronDown, LayoutGrid, Rows3 } from "lucide-react";
+import { PageActions, Segmented } from "@/components/HubUI";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { rs } from "@/lib/dateRange";
 
@@ -253,32 +254,32 @@ export default function ArticlesPage() {
       : r.retail_price ? rs(r.retail_price) : "no price";
 
   return (
-    <div className="px-4 py-6 sm:px-6 md:px-10 md:py-8">
+    <div className="px-4 py-4 sm:px-6 md:px-10 md:py-8">
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h1 className="text-[20px] font-extrabold tracking-tight text-ink sm:text-[22px] dark:text-[#f4f1ea]">Articles</h1>
+        <div className="hidden md:block">
+          <h1 className="text-[22px] font-extrabold tracking-tight text-ink dark:text-[#f4f1ea]">Articles</h1>
           <p className="mt-1 text-[13px] text-muted dark:text-[#a89f93]">
             Every product launch, who is holding it, and what the ads have cost.
           </p>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
+        <PageActions>
           <button onClick={() => setAdding(true)}
-            className="flex items-center gap-2 rounded-full bg-ink px-4 py-2 text-[13px] font-semibold text-white dark:bg-white dark:text-[#141414]">
+            className="flex items-center justify-center gap-2 rounded-full bg-ink px-4 py-2 text-[13px] font-semibold text-white dark:bg-white dark:text-[#141414]">
             <Plus size={15} /> New article
           </button>
           <button onClick={() => setAssigning(true)}
-            className="flex items-center gap-2 rounded-full border border-line bg-surface px-4 py-2 text-[13px] font-semibold text-ink transition hover:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:hover:bg-white/[0.12]">
+            className="flex items-center justify-center gap-2 rounded-full border border-line bg-surface px-4 py-2 text-[13px] font-semibold text-ink transition hover:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:hover:bg-white/[0.12]">
             <UserPlus size={15} /> Assign a task
           </button>
           <button onClick={load}
-            className="flex items-center gap-2 rounded-full border border-line bg-surface px-4 py-2 text-[13px] font-semibold text-ink transition hover:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:hover:bg-white/[0.12]">
+            className="flex items-center justify-center gap-2 rounded-full border border-line bg-surface px-4 py-2 text-[13px] font-semibold text-ink transition hover:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:hover:bg-white/[0.12]">
             <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> Refresh
           </button>
-        </div>
+        </PageActions>
       </div>
 
       {/* four numbers, and only four */}
-      <div className="mt-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
+      <div className="mt-4 grid grid-cols-2 gap-3 md:mt-5 lg:grid-cols-4">
         {/* No "total budget given" card. Adding a Rs 30,000 pot to a Rs 1,000
             daily cap produces a number that means nothing — the budgets are
             only comparable inside one article, so they are only shown there. */}
@@ -288,8 +289,8 @@ export default function ArticlesPage() {
           ["Ads approved, all time", rs(totals.spent), ""],
           ["Waiting for your approval", rs(totals.pending), totals.pending > 0 ? "ad spends to decide" : "nothing to decide"],
         ].map(([label, value, sub]) => (
-          <div key={label} className="rounded-card border border-line bg-surface p-4 dark:border-white/[0.06] dark:bg-[#201c17]">
-            <div className="text-[18px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">{loading ? "—" : value}</div>
+          <div key={label} className="min-w-0 rounded-card border border-line bg-surface p-3.5 sm:p-4 dark:border-white/[0.06] dark:bg-[#201c17]">
+            <div className="max-sm:truncate text-[17px] font-extrabold sm:text-[18px] tabular-nums text-ink dark:text-[#f4f1ea]">{loading ? "—" : value}</div>
             <div className="text-[12px] font-medium text-muted dark:text-[#a89f93]">{label}</div>
             {sub && <div className="mt-0.5 text-[11px] font-semibold text-amber-strong dark:text-amber">{sub}</div>}
           </div>
@@ -297,27 +298,20 @@ export default function ArticlesPage() {
       </div>
 
       <div className="mt-5 flex flex-wrap items-center gap-2">
-        <div className="flex w-max gap-1 rounded-full bg-panel p-1 dark:bg-white/[0.05]">
-          {TABS.map((t) => (
-            <button key={t.key} onClick={() => setTab(t.key)}
-              className={`whitespace-nowrap rounded-full px-3 py-1.5 text-[12.5px] font-semibold transition sm:px-4 ${tab === t.key ? "bg-ink text-white dark:bg-white dark:text-[#141414]" : "text-muted hover:text-ink dark:text-[#a89f93] dark:hover:text-white"}`}>
-              {t.label}
-            </button>
-          ))}
-        </div>
+        <Segmented className="min-w-0 flex-1 md:flex-none" value={tab} onChange={setTab} options={TABS} />
         {/* Its own full-width line on a phone — squeezed beside the tabs it
             was a sliver too narrow to type into. */}
-        <div className="order-last flex w-full min-w-0 items-center gap-2 rounded-full border border-line bg-surface px-3.5 py-2 sm:order-none sm:w-auto sm:flex-none dark:border-white/10 dark:bg-white/[0.05]">
+        <div className="order-last flex h-11 w-full min-w-0 items-center gap-2 rounded-full border border-line bg-surface px-3.5 py-0 sm:order-none sm:h-auto sm:py-2 sm:w-auto sm:flex-none dark:border-white/10 dark:bg-white/[0.05]">
           {searching ? <Loader2 size={15} className="animate-spin text-hint" /> : <Search size={15} className="text-hint dark:text-[#8a8175]" />}
           <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search name, code or pack"
-            className="w-full min-w-0 bg-transparent text-[13px] outline-none placeholder:text-hint sm:w-56 dark:text-[#f4f1ea]" />
+            className="h-full w-full min-w-0 bg-transparent text-[13px] outline-none placeholder:text-hint sm:w-56 dark:text-[#f4f1ea]" />
         </div>
 
         {/* the switch — same rows, cards or table */}
         <div role="group" aria-label="View" className="ml-auto flex gap-1 rounded-full bg-panel p-1 dark:bg-white/[0.05]">
           {([["cards", "Cards", LayoutGrid], ["table", "Table", Rows3]] as const).map(([k, label, Icon]) => (
             <button key={k} onClick={() => chooseView(k)} aria-pressed={view === k} aria-label={label} title={label}
-              className={`flex min-h-[32px] items-center gap-1.5 rounded-full px-3 py-1.5 text-[12.5px] font-semibold transition sm:px-3.5 ${
+              className={`flex min-h-[40px] items-center gap-1.5 rounded-full px-3 py-1.5 text-[12.5px] font-semibold transition sm:min-h-[32px] sm:px-3.5 ${
                 view === k ? "bg-ink text-white dark:bg-white dark:text-[#141414]"
                            : "text-muted hover:text-ink dark:text-[#a89f93] dark:hover:text-white"}`}>
               <Icon size={14} /> <span className="hidden sm:inline">{label}</span>
@@ -355,7 +349,7 @@ export default function ArticlesPage() {
                     </span>
                     {markTask !== t.task_id && (
                       <button onClick={() => { setMarkTask(t.task_id); setMarkT({ note: "", done_on: today() }); }}
-                        className="min-h-[32px] rounded-full border border-line px-3 py-1.5 text-[11.5px] font-semibold text-ink transition hover:bg-panel dark:border-white/15 dark:text-white dark:hover:bg-white/[0.06]">
+                        className="min-h-[40px] rounded-full border border-line px-3.5 py-1.5 text-[12px] sm:min-h-[32px] sm:px-3 sm:text-[11.5px] font-semibold text-ink transition hover:bg-panel dark:border-white/15 dark:text-white dark:hover:bg-white/[0.06]">
                         Mark done
                       </button>
                     )}
@@ -369,7 +363,7 @@ export default function ArticlesPage() {
                         from this side. The way back sits next to the record. */}
                     {undoTask !== t.task_id && (
                       <button onClick={() => { setUndoTask(t.task_id); setUndoWhy(""); }}
-                        className="min-h-[32px] rounded-full border border-line px-3 py-1.5 text-[11.5px] font-semibold text-muted transition hover:border-danger/40 hover:text-danger dark:border-white/15 dark:text-[#a89f93]">
+                        className="min-h-[40px] rounded-full border border-line px-3.5 py-1.5 text-[12px] sm:min-h-[32px] sm:px-3 sm:text-[11.5px] font-semibold text-muted transition hover:border-danger/40 hover:text-danger dark:border-white/15 dark:text-[#a89f93]">
                         Undo
                       </button>
                     )}

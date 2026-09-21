@@ -2,130 +2,80 @@
 import { useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { LayoutDashboard, ClipboardList, Truck, Wallet, CalendarCheck, Users, ArrowLeft, LogOut, ShoppingBag, Undo2, ChevronDown, type LucideIcon, AlertTriangle, PackageSearch } from "lucide-react";
+import { ArrowLeft, LogOut, ShoppingBag, ChevronDown, ChevronLeft, ChevronRight } from "lucide-react";
 import HubBell from "@/components/HubBell";
 import { supabase } from "@/lib/supabase";
 import { usePermissions } from "@/lib/usePermissions";
-/* requiredFor, not ROUTE_PERMS[href]: the prefix-aware lookup the page lock
-   in AppFrame uses. Disputes has no entry of its own, so ROUTE_PERMS[...] read
-   "no permission needed" — everybody saw a Finance menu whose Disputes link
-   then refused them. */
-import { requiredFor } from "@/lib/access";
 import ThemeToggle from "@/components/ThemeToggle";
+/* The list of places lives in hubNav, shared with the phone tab bar, and is
+   filtered there by requiredFor — the prefix-aware lookup the page lock uses. */
+import { visibleNav, isActive } from "@/components/hubNav";
 
-type NavItem = {
-  label: string; href: string; Icon: LucideIcon; soon?: boolean;
-  children?: { label: string; href: string; Icon: LucideIcon }[];
-};
-
-/* Returns sit under Logistics, not Finance. A return is a parcel problem before
-   it is a money problem, and the people chasing one are the logistics team. */
-const NAV: NavItem[] = [
-  { label: "Dashboard", href: "/online/dashboard", Icon: LayoutDashboard },
-  { label: "Orders", href: "/online/orders", Icon: ClipboardList },
-  /* ARTICLES — the product-launch pipeline. It sits above Logistics because a
-     product is created before it is ever shipped, and the administration opens
-     this one several times a day to ask the only question it exists to answer:
-     who is holding my article right now. */
-  { label: "Articles Management", href: "/online/articles", Icon: PackageSearch },
-  { label: "Logistics", href: "/online/logistics", Icon: Truck, children: [
-      { label: "Shipments", href: "/online/logistics", Icon: Truck },
-      { label: "Returns", href: "/online/logistics/returns", Icon: Undo2 },
-  ] },
-  /* Finance gains children for the same reason Logistics has them: disputes are
-     a separate job with its own worklist, not a tab inside the settlements
-     screen. Without an entry here the page existed and nothing pointed at it. */
-  { label: "Finance", href: "/online/finance", Icon: Wallet, children: [
-      { label: "Settlements", href: "/online/finance", Icon: Wallet },
-      { label: "Disputes", href: "/online/finance/disputes", Icon: AlertTriangle },
-  ] },
-  /* People, grouped. The department's accounts person adds staff and marks
-     attendance in one place, because that is one job. Logins and permissions
-     stay in Administration — adding a person and granting them access to money
-     are different decisions, and only one of them belongs to a department. */
-  { label: "People", href: "/online/attendance", Icon: CalendarCheck, children: [
-      { label: "Attendance", href: "/online/attendance", Icon: CalendarCheck },
-      { label: "Employees",  href: "/online/employees",  Icon: Users },
-  ] },
-];
-
-export default function OnlineSidebar({ open, onClose }: { open?: boolean; onClose?: () => void }) {
-  /* Which groups the person has opened by hand.
-     A group used to open only while you were inside it, so the arrow was
-     decoration — it turned, but pressing it navigated instead of toggling and
-     there was no way to close a section you were standing in. Now the arrow is
-     a button that owns the state, and the route only decides what is open
-     BEFORE anyone touches it. */
+/* THE DESKTOP MENU, OUT OF THE WAY UNTIL IT IS WANTED.
+ *
+ * It used to take a permanent 248px strip down the left of every page. Working
+ * in Finance or Disputes, that is a quarter of a laptop screen spent on a list
+ * of places you are not going to. Now the page gets the full width, and the
+ * menu slides in over it from a small tab on the left edge. Choosing a page
+ * puts it away again; so do Esc, a click outside it, and its own ‹ button.
+ *
+ * On a phone none of this is rendered — the header and bottom tab bar in
+ * HubPhoneChrome do the job. */
+export default function OnlineSidebar({ open, onClose }: { open: boolean; onClose: () => void }) {
+  /* Which groups the person has opened by hand. The arrow is a button that owns
+     the state; the route only decides what is open BEFORE anyone touches it. */
   const [manual, setManual] = useState<Record<string, boolean>>({});
   const { ready, can } = usePermissions();
-
-  /* THE MENU SHOWS ONLY WHAT THE PERSON CAN OPEN.
-     The Karkhana sidebar has filtered like this all along; this one did not, so
-     somebody granted Finance alone still saw Orders, Logistics and Returns and
-     was refused at each. Listing doors that all turn you away is worse than
-     listing none — it tells someone the system has places for them and then
-     does not let them in.
-
-     A parent disappears when none of its children survive: a People group with
-     nothing under it is a heading pointing at nothing. */
-  const visible = NAV.map((n) => {
-    if (n.children) {
-      const kids = n.children.filter((c) => can(requiredFor(c.href)));
-      return kids.length ? { ...n, children: kids } : null;
-    }
-    return can(requiredFor(n.href)) ? n : null;
-  }).filter((n): n is (typeof NAV)[number] => n !== null);
+  const visible = ready ? visibleNav(can) : [];
   const pathname = usePathname();
   const router = useRouter();
   async function logout() { if (supabase) await supabase.auth.signOut(); router.replace("/login"); }
-  const active = (href: string) => pathname === href || pathname.startsWith(href + "/");
   return (
     <>
-      {open && <div className="fixed inset-0 z-40 bg-black/40 md:hidden" onClick={onClose} />}
-      <aside className={`flex w-[248px] shrink-0 flex-col border-r border-line bg-surface dark:border-white/[0.06] dark:bg-[#201c17] fixed inset-y-0 left-0 z-50 transition-transform md:static md:z-auto md:translate-x-0 ${open ? "translate-x-0" : "-translate-x-full"}`}>
-        <Link href="/" onClick={onClose} className="flex items-center gap-2 px-5 pt-5 text-[12.5px] font-semibold text-muted transition hover:text-ink dark:text-[#a89f93] dark:hover:text-white">
-          <ArrowLeft size={15} /> All departments
-        </Link>
-        {/* The bell sits with the department name because that is the first
-            place the eye lands on opening the panel, and an unread count is
-            only useful if it is seen before the person starts doing something
-            else. */}
-        <div className="flex items-center gap-2.5 px-5 pb-5 pt-4">
+      {/* A click anywhere outside the menu puts it away. Rendered only while
+          open, so it can never sit invisibly over the page. */}
+      {open && <div className="fixed inset-0 z-40 hidden bg-black/20 md:block" onClick={onClose} aria-hidden="true" />}
+      <aside id="hub-menu" aria-label="Hub menu" inert={!open}
+        className={`fixed inset-y-0 left-0 z-50 hidden w-[248px] flex-col border-r border-line bg-surface shadow-xl transition-transform duration-200 ease-out md:flex dark:border-white/[0.06] dark:bg-[#201c17] ${open ? "translate-x-0" : "-translate-x-full"}`}>
+        <div className="flex items-center justify-between gap-2 pl-5 pr-3 pt-4">
+          <Link href="/" className="flex items-center gap-2 text-[12.5px] font-semibold text-muted transition hover:text-ink dark:text-[#a89f93] dark:hover:text-white">
+            <ArrowLeft size={15} /> All departments
+          </Link>
+          <button type="button" onClick={onClose} aria-label="Hide menu" title="Hide menu (Esc)"
+            className="flex h-8 w-8 items-center justify-center rounded-full text-muted transition hover:bg-panel hover:text-ink dark:text-[#a89f93] dark:hover:bg-white/[0.08] dark:hover:text-white">
+            <ChevronLeft size={18} />
+          </button>
+        </div>
+        <div className="flex items-center gap-2.5 px-5 pb-5 pt-3">
           <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-ink text-white dark:bg-white dark:text-[#141414]"><ShoppingBag size={18} /></span>
           <div className="min-w-0 flex-1 leading-tight">
             <div className="text-[15px] font-extrabold tracking-tight dark:text-[#f4f1ea]">Hub Department</div>
             <div className="text-[11px] text-muted dark:text-[#a89f93]">Online orders</div>
           </div>
-          {/* Opens rightward, into the page. The sidebar is only 248px wide,
-              so a panel anchored the other way lands off the screen. */}
-          {/* Desktop only. On a phone the header carries the bell; inside this
-              sliding drawer the panel was measured from the drawer, not the
-              screen, and opened squeezed to a sliver. */}
-          <span className="hidden md:block"><HubBell align="left" /></span>
         </div>
-        <nav className="flex-1 space-y-1 overflow-y-auto px-3" onClick={(e) => { if ((e.target as HTMLElement).closest("a")) onClose?.(); }}>
-          {ready && visible.map(({ label, href, Icon, soon, children }) => {
-            const on = active(href);
+        <nav className="flex-1 space-y-1 overflow-y-auto px-3">
+          {visible.map(({ label, href, Icon, soon, children }) => {
+            const on = isActive(pathname, { label, href, Icon, children, short: label });
             // Opened by hand wins; otherwise a section opens because you are in it.
-            const openGroup = !!children && (manual[href] ?? on);
+            const openGroup = !!children && (manual[label] ?? on);
             return (
-              <div key={href}>
-                <Link href={href} className={`flex items-center gap-3 rounded-xl2 px-3.5 py-2.5 text-[14px] transition ${on ? "bg-periwinkle-soft font-semibold text-ink dark:bg-white/[0.10] dark:text-white" : "text-muted hover:bg-panel hover:text-ink dark:text-[#a89f93] dark:hover:bg-white/[0.06] dark:hover:text-white"}`}>
-                  <Icon size={18} strokeWidth={2} />
-                  <span className="flex-1">{label}</span>
-                  {soon && <span className="rounded-full bg-panel px-1.5 py-0.5 text-[9.5px] font-bold uppercase tracking-wide text-hint dark:bg-white/[0.06] dark:text-[#8a8175]">Soon</span>}
+              <div key={label}>
+                <div className={`flex items-center rounded-xl2 transition ${on ? "bg-periwinkle-soft dark:bg-white/[0.10]" : "hover:bg-panel dark:hover:bg-white/[0.06]"}`}>
+                  <Link href={href} className={`flex min-w-0 flex-1 items-center gap-3 px-3.5 py-2.5 text-[14px] ${on ? "font-semibold text-ink dark:text-white" : "text-muted hover:text-ink dark:text-[#a89f93] dark:hover:text-white"}`}>
+                    <Icon size={18} strokeWidth={2} />
+                    <span className="flex-1">{label}</span>
+                    {soon && <span className="rounded-full bg-panel px-1.5 py-0.5 text-[9.5px] font-bold uppercase tracking-wide text-hint dark:bg-white/[0.06] dark:text-[#8a8175]">Soon</span>}
+                  </Link>
                   {children && (
-                    /* Inside the Link, so the arrow has to stop the click from
-                       navigating — otherwise pressing it would open the section
-                       AND move you, which is not what an arrow means. */
+                    /* Beside the link, not inside it: pressing the arrow opens or
+                       closes the section and never navigates. */
                     <button type="button" aria-label={openGroup ? `Collapse ${label}` : `Expand ${label}`}
-                      onClick={(e) => { e.preventDefault(); e.stopPropagation();
-                                        setManual((m) => ({ ...m, [href]: !openGroup })); }}
-                      className="-mr-1 rounded-full p-1 hover:bg-black/5 dark:hover:bg-white/10">
+                      onClick={() => setManual((m) => ({ ...m, [label]: !openGroup }))}
+                      className="mr-1 flex h-8 w-8 items-center justify-center rounded-full text-muted hover:bg-black/5 dark:text-[#a89f93] dark:hover:bg-white/10">
                       <ChevronDown size={15} className={`transition ${openGroup ? "rotate-180" : ""}`} />
                     </button>
                   )}
-                </Link>
+                </div>
                 {openGroup && (
                   <div className="ml-4 mt-1 space-y-0.5 border-l border-line pl-3 dark:border-white/[0.08]">
                     {children!.map((c) => {
@@ -149,5 +99,21 @@ export default function OnlineSidebar({ open, onClose }: { open?: boolean; onClo
         </div>
       </aside>
     </>
+  );
+}
+
+/* THE TAB ON THE LEFT EDGE — the way back to the menu while it is hidden.
+   The bell lives here too: it used to sit in the menu, and a bell inside a
+   hidden menu is a bell nobody hears. Its list opens to the right, into the
+   page. */
+export function SidebarTab({ open, onOpen }: { open: boolean; onOpen: () => void }) {
+  return (
+    <div className="fixed left-0 top-4 z-30 hidden flex-col items-center gap-1 rounded-r-2xl border border-l-0 border-line bg-surface py-1.5 pl-0.5 pr-1 shadow-card md:flex dark:border-white/10 dark:bg-[#201c17]">
+      <button type="button" onClick={onOpen} aria-label="Show menu" title="Show menu" aria-expanded={open} aria-controls="hub-menu"
+        className="flex h-8 w-8 items-center justify-center rounded-full text-ink transition hover:bg-panel dark:text-white dark:hover:bg-white/[0.08]">
+        <ChevronRight size={18} />
+      </button>
+      <HubBell align="left" />
+    </div>
   );
 }

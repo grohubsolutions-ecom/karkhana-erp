@@ -1,10 +1,10 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { Wallet, FileText, Undo2, RefreshCw, CheckCircle2, Clock, Truck } from "lucide-react";
+import { Wallet, FileText, Undo2, RefreshCw, CheckCircle2, Clock, Truck, ChevronRight } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import ReturnsPanel from "@/components/ReturnsPanel";
-import RangeBar from "@/components/RangeBar";
+import { HubRange, Segmented, PageActions, useIsPhone } from "@/components/HubUI";
 import { rangeDates } from "@/lib/dateRange";
 import { AddFinanceRow, EditFinanceRow } from "@/components/FinanceEntry";
 import CprImport from "@/components/CprImport";
@@ -53,6 +53,7 @@ const isPaid = (s: unknown) => s === "Paid" || s === "Received";
 
 export default function FinancePage() {
   const [tab, setTab] = useState<Tab>("payments");
+  const phone = useIsPhone();
   const [store, setStore] = useState("ALL");
   /* Whose settlements am I looking at?
      PostEx and OwnEx bill on completely different terms — PostEx deducts
@@ -200,10 +201,11 @@ export default function FinancePage() {
   }, [tab, rowsF, summary]);
 
   return (
-    <div className="px-4 py-6 sm:px-6 md:px-10 md:py-8">
+    <div className="px-4 py-4 sm:px-6 md:px-10 md:py-8">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-[20px] font-extrabold sm:text-[22px] tracking-tight text-ink dark:text-[#f4f1ea]">Finance</h1>
+        {/* On a phone the header's switcher already leads to Disputes. */}
+        <div className="hidden md:block">
+          <h1 className="text-[22px] font-extrabold tracking-tight text-ink dark:text-[#f4f1ea]">Finance</h1>
           {/* Disputes are money on both sides — COD counted as revenue in
               Shopify, and a return charge already paid. Worth a way in from
               here rather than only from inside each settlement. */}
@@ -213,7 +215,7 @@ export default function FinancePage() {
           </Link>
           <p className="mt-1 text-[13px] text-muted dark:text-[#a89f93]">CPR reconciliation, and pending &amp; received payments. Returns moved to Logistics.</p>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
+        <PageActions>
           {(tab === "payments" || tab === "cpr") && (
             <select value={courier} onChange={(e) => setCourier(e.target.value)}
                     className="rounded-full border border-line bg-surface px-3.5 py-2 text-[13px] font-medium text-ink outline-none dark:border-white/10 dark:bg-white/[0.05] dark:text-white">
@@ -229,22 +231,15 @@ export default function FinancePage() {
               an invoice onto a screen that cannot display the result. */}
           {tab === "cpr" && <CprImport onDone={() => load(tab)} />}
           <AddFinanceRow tab={tab} onDone={() => load(tab)} />
-          <button onClick={() => load(tab)} className="flex items-center gap-2 rounded-full border border-line bg-surface px-4 py-2 text-[13px] font-semibold text-ink transition hover:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:hover:bg-white/[0.12]">
+          <button onClick={() => load(tab)} className="flex items-center justify-center gap-2 rounded-full border border-line bg-surface px-4 py-2 text-[13px] font-semibold text-ink transition hover:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:hover:bg-white/[0.12]">
             <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> Refresh
           </button>
-        </div>
+        </PageActions>
       </div>
 
-      <RangeBar preset={preset} setPreset={setPreset} cf={cf} setCf={setCf} ct={ct} setCt={setCt} />
+      <HubRange preset={preset} setPreset={setPreset} cf={cf} setCf={setCf} ct={ct} setCt={setCt} />
 
-      <div className="mt-5 -mx-4 overflow-x-auto px-4 sm:mx-0 sm:px-0"><div className="flex w-max gap-1 rounded-full bg-panel p-1 dark:bg-white/[0.05]">
-        {TABS.map((t) => (
-          <button key={t.key} onClick={() => setTab(t.key)}
-            className={`rounded-full px-4 py-1.5 text-[12.5px] font-semibold transition ${tab === t.key ? "bg-ink text-white dark:bg-white dark:text-[#141414]" : "text-muted hover:text-ink dark:text-[#a89f93] dark:hover:text-white"}`}>
-            {t.label}
-          </button>
-        ))}
-      </div></div>
+      <Segmented className="mt-4 md:mt-5" value={tab} onChange={setTab} options={TABS} />
 
       {tab === "returns" ? <div className="mt-5"><ReturnsPanel store={store} from={rangeDates(preset, cf, ct)[0]} to={rangeDates(preset, cf, ct)[1]} /></div> : <>
       {/* Five on payments, four elsewhere. Two per row on a phone. */}
@@ -252,12 +247,16 @@ export default function FinancePage() {
         {cards.map(({ label, value, Icon, bg, note, key }, i) => (
           <button key={i} type="button"
             onClick={() => key && setPick((p) => (p === key ? "" : key))}
-            className={`rounded-card border ${bg} p-4 text-left transition dark:bg-[#201c17] ${label === "—" ? "opacity-0" : ""} ${
-              key ? "cursor-pointer hover:brightness-95" : "cursor-default"} ${
-              key && pick === key ? "border-ink ring-2 ring-ink/20 dark:border-white" : "border-line dark:border-white/[0.06]"}`}>
-            <span className="flex h-9 w-9 items-center justify-center rounded-full bg-ink text-white dark:bg-white dark:text-[#141414]"><Icon size={16} /></span>
-            <div className="mt-3 text-[20px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">{loading ? "—" : value}</div>
-            <div className="text-[12px] font-medium text-muted dark:text-[#a89f93]">{label}</div>
+            className={`min-w-0 rounded-card border ${bg} p-3.5 text-left transition sm:p-4 dark:bg-[#201c17] ${label === "—" ? "hidden opacity-0 lg:block" : ""} ${
+              key ? "cursor-pointer hover:brightness-95 active:scale-[0.98]" : "cursor-default"} ${
+              key && pick === key ? "border-ink ring-2 ring-ink/20 dark:border-white" : "border-line dark:border-white/[0.06]"} ${cards.length === 5 && i === 4 ? "col-span-2 lg:col-span-1" : ""}`}>
+            <div className="flex items-center gap-2.5 sm:block">
+              <span className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-full bg-ink text-white sm:flex dark:bg-white dark:text-[#141414]"><Icon size={15} /></span>
+              <div className="min-w-0 sm:mt-3">
+                <div className="max-sm:truncate text-[16px] font-extrabold tabular-nums text-ink sm:text-[20px] dark:text-[#f4f1ea]">{loading ? "—" : value}</div>
+                <div className="text-[12px] font-medium max-sm:truncate text-muted dark:text-[#a89f93]">{label}</div>
+              </div>
+            </div>
             {note && !loading && <div className="mt-0.5 text-[11px] text-hint dark:text-[#8a8175]">{note}</div>}
             {key && pick === key && <div className="mt-1 text-[10.5px] font-semibold uppercase tracking-wide text-ink dark:text-white">filtering ↓</div>}
           </button>
@@ -269,7 +268,7 @@ export default function FinancePage() {
       {cprRow && <CprDetail row={cprRow} onClose={() => setCprRow(null)} />}
 
       {tab === "payments" && byCourier.length > 0 && !loading && (
-        <div className="mt-3 flex flex-wrap gap-2">
+        <div className="mt-3 grid gap-2 sm:flex sm:flex-wrap">
           {/* Each chip shows the figure for whichever CARD is selected. Showing
               "pending" while the Received card was active answered a question
               nobody had asked. Clicking a chip also sets the courier filter, so
@@ -283,7 +282,7 @@ export default function FinancePage() {
             return (
               <button key={c.courier} type="button"
                 onClick={() => setCourier(on ? "All couriers" : c.courier)}
-                className={`rounded-full border px-3.5 py-1.5 text-[12px] transition ${
+                className={`min-h-[44px] rounded-full border px-3.5 py-1.5 text-left text-[12px] transition sm:min-h-0 ${
                   on ? "border-ink bg-ink text-white dark:border-white dark:bg-white dark:text-[#141414]"
                      : "border-line bg-surface text-muted hover:bg-panel dark:border-white/10 dark:bg-white/[0.05] dark:text-[#a89f93]"}`}>
                 <span className={`font-semibold ${on ? "" : "text-ink dark:text-[#f4f1ea]"}`}>{c.courier}</span>
@@ -298,6 +297,47 @@ export default function FinancePage() {
         </div>
       )}
 
+      {phone ? (
+        <div className="mt-4 space-y-2">
+          {loading ? Array.from({ length: 6 }).map((_, i) => <div key={i} className="h-[76px] animate-pulse rounded-xl2 bg-panel/70 dark:bg-white/[0.05]" />)
+          : err ? <p className="px-4 py-10 text-center text-[13px] text-danger">Couldn&apos;t load: {err}</p>
+          : rowsF.length === 0 ? <p className="px-4 py-14 text-center text-[13px] text-muted dark:text-[#a89f93]">{pick || store !== "ALL" || courier !== "All couriers" ? "Nothing matches these filters." : "Nothing in this period."}</p>
+          : rowsF.map((r, i) => (
+            <button key={i} type="button" onClick={() => (tab === "cpr" ? setCprRow(r) : setEditRow(r))}
+              className="flex w-full items-center gap-3 rounded-xl2 border border-line bg-surface px-4 py-3 text-left transition active:scale-[0.99] active:bg-panel dark:border-white/[0.06] dark:bg-[#201c17] dark:active:bg-white/[0.05]">
+              {tab === "payments" ? (
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="truncate text-[14.5px] font-bold text-ink dark:text-[#f4f1ea]">{String(r.order_number ?? "—")}</span>
+                    <span className="ml-auto shrink-0 text-[14.5px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">{money(r.cod_amount)}</span>
+                  </div>
+                  <div className="mt-0.5 flex items-center gap-2 text-[12px] text-muted dark:text-[#a89f93]">
+                    <span className="min-w-0 flex-1 truncate">{String(r.courier ?? "—")} · {String(r.tracking_id ?? "—")}</span>
+                    {badge(String(r.payment_status ?? "Pending"), isPaid(r.payment_status) ? "ok" : "warn")}
+                  </div>
+                  <div className="mt-1 flex items-center gap-2 text-[12px] text-muted dark:text-[#a89f93]">
+                    <span className="min-w-0 flex-1 truncate">{r.cpr_number ? String(r.cpr_number) : <span className="text-hint">not settled yet</span>}{r.payment_date ? ` · paid ${String(r.payment_date)}` : ""}</span>
+                    <span className="shrink-0">net <b className="tabular-nums text-ink dark:text-[#f4f1ea]">{money(r.cpr_net_amount)}</b></span>
+                  </div>
+                </div>
+              ) : (
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="truncate font-mono text-[13.5px] font-bold text-ink dark:text-[#f4f1ea]">{String(r.cpr_number ?? "—")}</span>
+                    <span className="ml-auto shrink-0 text-[14.5px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">{money(r.net_total ?? r.amount)}</span>
+                  </div>
+                  <div className="mt-0.5 flex items-center gap-2 text-[12px] text-muted dark:text-[#a89f93]">
+                    <span className="min-w-0 flex-1 truncate">{String(r.courier ?? "—")} · {String(r.store_code ?? "—")} · {String(r.cpr_date ?? "—")}</span>
+                    {badge(String(r.status ?? "Pending"), r.status === "Paid" || r.status === "Cleared" ? "ok" : "warn")}
+                  </div>
+                  <div className="mt-0.5 text-[12px] text-muted dark:text-[#a89f93]">{String(r.delivered_count ?? r.orders_count ?? 0)} delivered · {String(r.returned_count ?? 0)} returned</div>
+                </div>
+              )}
+              <ChevronRight size={16} className="shrink-0 text-hint" />
+            </button>
+          ))}
+        </div>
+      ) : (
       <div className="mt-4 overflow-hidden rounded-card border border-line bg-surface dark:border-white/[0.06] dark:bg-[#201c17]">
         <div className="overflow-x-auto">
           <table className="w-full min-w-[680px] text-left text-[13px]">
@@ -401,6 +441,7 @@ export default function FinancePage() {
           </table>
         </div>
       </div>
+      )}
 
       {!loading && !err && rowsF.length > 0 && (
         <>
@@ -409,7 +450,7 @@ export default function FinancePage() {
           Showing {rowsF.length.toLocaleString()} of {(matchCount ?? rowsF.length).toLocaleString()}
           {(matchCount ?? 0) > rowsF.length && " — narrow the dates to see the rest"}
         </p>
-        <p className="mt-1 text-center text-[12px] text-hint dark:text-[#8a8175]">Tip: click any row to {tab === "payments" ? "mark it paid" : tab === "cpr" ? "see how the courier calculated it" : "mark it received"}.</p>
+        <p className="mt-1 text-center text-[12px] text-hint dark:text-[#8a8175]">Tip: {phone ? "tap" : "click"} any row to {tab === "payments" ? "mark it paid" : tab === "cpr" ? "see how the courier calculated it" : "mark it received"}.</p>
         </>
       )}
 

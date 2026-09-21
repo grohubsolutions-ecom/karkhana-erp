@@ -1,9 +1,9 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLiveTables } from "@/lib/useLiveTables";
-import { Package, Truck, CheckCircle2, Undo2, Percent, Wallet, Search, RefreshCw, XCircle, Clock, TrendingUp } from "lucide-react";
+import { Package, Truck, CheckCircle2, Undo2, Percent, Wallet, Search, RefreshCw, XCircle, Clock, TrendingUp, ChevronRight } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
-import RangeBar from "@/components/RangeBar";
+import { HubRange, Segmented, PageActions, useIsPhone, Sheet, Detail } from "@/components/HubUI";
 import { rangeDates, num, rs } from "@/lib/dateRange";
 import { AddShipment } from "@/components/LogisticsEntry";
 import CourierSync from "@/components/CourierSync";
@@ -18,8 +18,8 @@ const STORES = [
   { code: "TS", label: "TopShop" }, { code: "TRZ", label: "Trenzee" },
 ];
 const COURIERS = ["All couriers", "PostEx", "OwnEx"];
-const VIEWS: { key: View; label: string }[] = [
-  { key: "list", label: "Shipments" }, { key: "couriers", label: "Courier performance" }, { key: "status", label: "By Status" },
+const VIEWS: { key: View; label: string; short: string }[] = [
+  { key: "list", label: "Shipments", short: "Parcels" }, { key: "couriers", label: "Courier performance", short: "Couriers" }, { key: "status", label: "By Status", short: "Status" },
 ];
 
 function deliveryClass(s: string) {
@@ -65,6 +65,9 @@ export default function LogisticsPage() {
   const [statusFilter, setStatusFilter] = useState("");
   const [q, setQ] = useState("");
   const [view, setView] = useState<View>("list");
+  const phone = useIsPhone();
+  /* One parcel, in full — on a phone the table's seven columns do not fit. */
+  const [open, setOpen] = useState<Logi | null>(null);
   const [preset, setPreset] = useState("30d");
   const [cf, setCf] = useState(""); const [ct, setCt] = useState("");
   /* The search box updates `q` on every key; the database is only asked once
@@ -201,6 +204,10 @@ export default function LogisticsPage() {
   const refreshOnClick = useCallback((e: React.MouseEvent) => {
     const t = e.target as HTMLElement | null;
     if (!t?.closest?.("button, select, [role='tab'], [role='option']")) return;
+    /* Switching the view or opening a parcel changes nothing the database
+       needs to answer. On a phone every such tap used to pull the whole list
+       again 600ms later and repaint it under the thumb. */
+    if (t.closest("[data-no-refresh]")) return;
     if (clickTimer.current) clearTimeout(clickTimer.current);
     clickTimer.current = setTimeout(() => {
       if (Date.now() - lastLoadAt.current < 2500) return;   // something already refreshed
@@ -286,12 +293,12 @@ export default function LogisticsPage() {
   const maxStatus = Math.max(...byStatus.map((s) => s.count), 1);
 
   return (
-    <div onClickCapture={refreshOnClick} className="px-4 py-6 sm:px-6 md:px-10 md:py-8">
+    <div onClickCapture={refreshOnClick} className="px-4 py-4 sm:px-6 md:px-10 md:py-8">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-[20px] font-extrabold tracking-tight text-ink sm:text-[22px] dark:text-[#f4f1ea]">Logistics</h1>
-          <p className="mt-1 flex flex-wrap items-center gap-2 text-[13px] text-muted dark:text-[#a89f93]">
-            PostEx / OwnEx tracking, delivery performance &amp; RTS.
+          <h1 className="hidden text-[22px] font-extrabold tracking-tight text-ink md:block dark:text-[#f4f1ea]">Logistics</h1>
+          <p className="flex flex-wrap items-center gap-2 text-[13px] text-muted md:mt-1 dark:text-[#a89f93]">
+            <span className="hidden md:inline">PostEx / OwnEx tracking, delivery performance &amp; RTS.</span>
             <span className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-semibold ${live ? "bg-success-soft text-success dark:bg-white/[0.08]" : "bg-panel text-muted dark:bg-white/[0.06] dark:text-[#a89f93]"}`}>
               <span className={`h-1.5 w-1.5 rounded-full ${live ? "animate-pulse bg-success" : "bg-muted"}`} />
               {live ? "Live" : "Not live"}
@@ -299,19 +306,18 @@ export default function LogisticsPage() {
             </span>
           </p>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
+        <PageActions>
           <SmartImport onDone={load} />
           <HealthCheck />
           <CourierSync onDone={load} />
-          
           <AddShipment onDone={load} />
-          <button onClick={() => load()} className="flex items-center gap-2 rounded-full border border-line bg-surface px-4 py-2 text-[13px] font-semibold text-ink transition hover:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:hover:bg-white/[0.12]">
+          <button onClick={() => load()} className="flex items-center justify-center gap-2 rounded-full border border-line bg-surface px-4 py-2 text-[13px] font-semibold text-ink transition hover:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:hover:bg-white/[0.12]">
             <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> Refresh
           </button>
-        </div>
+        </PageActions>
       </div>
 
-      <RangeBar preset={preset} setPreset={setPreset} cf={cf} setCf={setCf} ct={ct} setCt={setCt}
+      <HubRange preset={preset} setPreset={setPreset} cf={cf} setCf={setCf} ct={ct} setCt={setCt}
         right={
           <>
             <select value={store} onChange={(e) => setStore(e.target.value)} className="rounded-full border border-line bg-surface px-3.5 py-2 text-[13px] font-medium text-ink outline-none dark:border-white/10 dark:bg-white/[0.05] dark:text-white">
@@ -326,7 +332,7 @@ export default function LogisticsPage() {
             {/* the courier's own statuses — Booked, Out For Delivery, Attempted
                 and the rest — built from the data, so a new one appears by itself */}
             <select value={rawStatus} onChange={(e) => setRawStatus(e.target.value)}
-              className="max-w-[220px] rounded-full border border-line bg-surface px-3.5 py-2 text-[13px] font-medium text-ink outline-none dark:border-white/10 dark:bg-white/[0.05] dark:text-white">
+              className="max-w-[220px] rounded-full max-md:max-w-none border border-line bg-surface px-3.5 py-2 text-[13px] font-medium text-ink outline-none dark:border-white/10 dark:bg-white/[0.05] dark:text-white">
               <option>All statuses</option>
               {[...new Map(statusCounts.map((r) => [r.raw_status, r])).values()]
                 .sort((a, b) => Number(b.parcels) - Number(a.parcels))
@@ -352,11 +358,15 @@ export default function LogisticsPage() {
             onClick={() => clickable && setStatusFilter(statusFilter === filter ? "" : (filter as string))}
             disabled={!clickable}
             title={clickable ? `Show only ${label.toLowerCase()}` : undefined}
-            className={`rounded-card border ${active ? "border-ink ring-2 ring-ink/20 dark:border-white/40" : "border-line dark:border-white/[0.06]"} ${bg} p-4 text-left transition ${clickable ? "cursor-pointer hover:brightness-95 dark:hover:brightness-110" : "cursor-default"} dark:bg-[#201c17]`}>
-            <span className="flex h-9 w-9 items-center justify-center rounded-full bg-ink text-white dark:bg-white dark:text-[#141414]"><Icon size={16} /></span>
-            <div className={`mt-3 text-[15px] font-extrabold tabular-nums sm:text-[17px] ${warn ? "text-amber-strong dark:text-amber" : "text-ink dark:text-[#f4f1ea]"}`}>{loading ? "—" : value}</div>
-            <div className="text-[12px] font-medium text-muted dark:text-[#a89f93]">{label}</div>
-            {sub && <div className="mt-0.5 text-[10.5px] text-hint dark:text-[#8a8175]">{sub}</div>}
+            className={`rounded-card border ${active ? "border-ink ring-2 ring-ink/20 dark:border-white/40" : "border-line dark:border-white/[0.06]"} ${bg} p-3.5 text-left transition sm:p-4 ${clickable ? "cursor-pointer hover:brightness-95 active:scale-[0.98] dark:hover:brightness-110" : "cursor-default"} dark:bg-[#201c17]`}>
+            <div className="flex items-center gap-2.5 sm:block">
+              <span className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-full bg-ink text-white sm:flex dark:bg-white dark:text-[#141414]"><Icon size={15} /></span>
+              <div className="min-w-0 sm:mt-3">
+                <div className={`max-sm:truncate text-[15px] font-extrabold tabular-nums sm:text-[17px] ${warn ? "text-amber-strong dark:text-amber" : "text-ink dark:text-[#f4f1ea]"}`}>{loading ? "—" : value}</div>
+                <div className="text-[12px] font-medium max-sm:truncate text-muted dark:text-[#a89f93]">{label}</div>
+              </div>
+            </div>
+            {sub && <div className="mt-1 text-[10.5px] leading-tight text-hint dark:text-[#8a8175]">{sub}</div>}
           </button>
           );
         })}
@@ -364,14 +374,43 @@ export default function LogisticsPage() {
 
       {statusFilter && (
         <button onClick={() => setStatusFilter("")}
-          className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-ink px-3 py-1.5 text-[12px] font-semibold text-white dark:bg-white dark:text-[#141414]">
+          className="mt-3 inline-flex min-h-[40px] items-center gap-1.5 rounded-full bg-ink px-4 py-1.5 text-[12.5px] font-semibold text-white md:min-h-0 dark:bg-white dark:text-[#141414]">
           Showing {statusFilter} only · clear
         </button>
       )}
 
       {/* per-courier split — reconciling against a courier portal needs their
           share, not a combined figure. Counted in the database (0052). */}
-      {courierSplit.length > 1 && (
+      {courierSplit.length > 1 && phone && (
+        <div className="mt-4 space-y-2">
+          {courierSplit.map((c) => {
+            const isTotal = c.courier === "TOTAL";
+            const cell = (label: string, v: string, cls = "") => (
+              <div className="min-w-0"><div className={`max-sm:truncate text-[14px] font-bold tabular-nums ${cls || "text-ink dark:text-[#f4f1ea]"}`}>{v}</div><div className="truncate text-[11px] text-muted dark:text-[#a89f93]">{label}</div></div>);
+            return (
+              <div key={c.courier} className={`rounded-xl2 border border-line px-4 py-3 dark:border-white/[0.06] ${isTotal ? "bg-panel dark:bg-white/[0.06]" : "bg-surface dark:bg-[#201c17]"}`}>
+                <div className="flex items-baseline justify-between gap-2">
+                  <span className="text-[14.5px] font-extrabold text-ink dark:text-[#f4f1ea]">{isTotal ? "All couriers" : c.courier}</span>
+                  <span className="text-[13px] font-bold tabular-nums text-ink dark:text-[#f4f1ea]">{Number(c.delivery_rate).toFixed(1)}% <span className="font-medium text-muted dark:text-[#a89f93]">delivered</span></span>
+                </div>
+                <div className="mt-2 grid grid-cols-3 gap-x-3 gap-y-2">
+                  {cell("Total", Number(c.total).toLocaleString())}
+                  {cell("In transit", Number(c.transit_portal ?? c.transit).toLocaleString())}
+                  {cell("Delivered", Number(c.delivered).toLocaleString(), "text-success")}
+                  {cell("Returned", Number(c.returned_received ?? c.rts).toLocaleString(), "text-danger")}
+                  {cell("Out for return", Number(c.out_for_return ?? 0).toLocaleString())}
+                  {cell("Cancelled", Number(c.cancelled).toLocaleString())}
+                  <div className="col-span-3 flex justify-between gap-3 border-t border-line pt-2 text-[12.5px] dark:border-white/[0.06]">
+                    <span className="text-muted dark:text-[#a89f93]">COD delivered <b className="tabular-nums text-ink dark:text-[#f4f1ea]">{rs(Number(c.cod))}</b></span>
+                    <span className="text-muted dark:text-[#a89f93]">Due <b className="tabular-nums text-ink dark:text-[#f4f1ea]">{Number(c.receivable) > 0 ? rs(Number(c.receivable)) : "—"}</b></span>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {courierSplit.length > 1 && !phone && (
         <div className="mt-4 overflow-x-auto rounded-card border border-line bg-surface dark:border-white/[0.06] dark:bg-[#201c17]">
           <table className="w-full min-w-[760px] text-[12.5px]">
             <thead className="text-left text-[11px] uppercase tracking-wide text-hint dark:text-[#8a8175]">
@@ -413,14 +452,14 @@ export default function LogisticsPage() {
 
       {/* delivered trend — the courier portals show this, so we do too */}
       {!loading && trend.length > 1 && (
-        <div className="mt-4 rounded-card border border-line bg-surface p-5 dark:border-white/[0.06] dark:bg-[#201c17]">
+        <div className="mt-4 rounded-card border border-line bg-surface p-4 sm:p-5 dark:border-white/[0.06] dark:bg-[#201c17]">
           <h3 className="mb-3 flex items-center gap-2 text-[14px] font-bold text-ink dark:text-[#f4f1ea]"><TrendingUp size={16} /> Delivered per day</h3>
-          <div className="flex h-28 items-end gap-1.5">
+          <div className="flex h-28 items-end gap-1 sm:gap-1.5">
             {trend.map((d) => {
               const max = Math.max(...trend.map((x) => x.count), 1);
               return (
                 <div key={d.date} className="group flex flex-1 flex-col items-center gap-1">
-                  <span className="text-[10px] font-semibold tabular-nums text-muted opacity-0 transition group-hover:opacity-100 dark:text-[#a89f93]">{d.count}</span>
+                  <span className="text-[9.5px] font-semibold tabular-nums text-muted opacity-100 transition sm:opacity-0 sm:group-hover:opacity-100 dark:text-[#a89f93]">{d.count}</span>
                   <div className="w-full rounded-t bg-success transition hover:opacity-80" style={{ height: `${Math.max((d.count / max) * 80, 3)}px` }} title={`${d.date}: ${d.count} delivered`} />
                   <span className="text-[9.5px] text-hint dark:text-[#8a8175]">{d.date.slice(8)}</span>
                 </div>
@@ -430,17 +469,53 @@ export default function LogisticsPage() {
         </div>
       )}
 
-      <div className="mt-5 -mx-4 overflow-x-auto px-4 sm:mx-0 sm:px-0">
-        <div className="flex w-max gap-1 rounded-full bg-panel p-1 dark:bg-white/[0.05]">
-          {VIEWS.map((v) => (
-            <button key={v.key} onClick={() => setView(v.key)}
-              className={`whitespace-nowrap rounded-full px-4 py-1.5 text-[12.5px] font-semibold transition ${view === v.key ? "bg-ink text-white dark:bg-white dark:text-[#141414]" : "text-muted hover:text-ink dark:text-[#a89f93] dark:hover:text-white"}`}>
-              {v.label}
-            </button>
-          ))}
-        </div>
-      </div>
+      <div data-no-refresh><Segmented className="mt-5" value={view} onChange={setView} options={VIEWS} /></div>
 
+      {phone ? (
+        <div data-no-refresh className="mt-3 space-y-2">
+          {loading ? Array.from({ length: 6 }).map((_, i) => <div key={i} className="h-[72px] animate-pulse rounded-xl2 bg-panel/70 dark:bg-white/[0.05]" />)
+          : err ? <p className="px-4 py-10 text-center text-[13px] text-danger">Couldn&apos;t load logistics: {err}</p>
+          : (view === "list" ? filtered.length === 0 : view === "couriers" ? byCourier.length === 0 : byStatus.length === 0)
+            ? <p className="px-4 py-14 text-center text-[13px] text-muted dark:text-[#a89f93]">{statusFilter || term || rawStatus !== "All statuses" ? "Nothing matches these filters." : "No shipments in this period."}</p>
+          : view === "list" ? filtered.slice(0, 500).map((l, i) => (
+              <button key={i} type="button" onClick={() => setOpen(l)}
+                className="flex w-full items-center gap-3 rounded-xl2 border border-line bg-surface px-4 py-3 text-left transition active:scale-[0.99] active:bg-panel dark:border-white/[0.06] dark:bg-[#201c17] dark:active:bg-white/[0.05]">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="truncate text-[14.5px] font-bold text-ink dark:text-[#f4f1ea]">{String(l.order_number ?? "—")}</span>
+                    <span className="shrink-0 rounded-md bg-panel px-1.5 py-0.5 text-[10.5px] font-bold text-muted dark:bg-white/[0.06] dark:text-[#a89f93]">{String(l.store_code ?? "")}</span>
+                    <span className="ml-auto shrink-0 text-[14.5px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">{l.cod_amount == null ? "—" : rs(num(l.cod_amount))}</span>
+                  </div>
+                  <div className="mt-1 flex items-center gap-2">
+                    <span className="min-w-0 flex-1 truncate text-[12.5px] text-muted dark:text-[#a89f93]">{String(l.courier ?? "—")} · {String(l.tracking_id ?? "—")}</span>
+                    <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold ${deliveryClass(String(l.delivery_status))}`}>{String(l.delivery_status ?? "—")}</span>
+                  </div>
+                  <div className="mt-0.5 text-[12px] text-hint dark:text-[#8a8175]">Dispatched {String(l.dispatch_date ?? "—")}{l.delivery_date ? ` · delivered ${String(l.delivery_date)}` : ""}</div>
+                </div>
+                <ChevronRight size={16} className="shrink-0 text-hint" />
+              </button>
+            ))
+          : view === "couriers" ? byCourier.map((c) => (
+              <div key={c.name} className="rounded-xl2 border border-line bg-surface px-4 py-3 dark:border-white/[0.06] dark:bg-[#201c17]">
+                <div className="flex items-baseline justify-between"><span className="text-[14.5px] font-bold text-ink dark:text-[#f4f1ea]">{c.name}</span><span className="text-[14px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">{c.rate.toFixed(1)}%</span></div>
+                <div className="mt-1 text-[12.5px] text-muted dark:text-[#a89f93]">{c.total.toLocaleString()} shipments · <span className="text-success">{c.delivered.toLocaleString()} delivered</span> · <span className="text-danger">{c.rts.toLocaleString()} RTS</span></div>
+                <div className="mt-0.5 text-[12.5px] text-muted dark:text-[#a89f93]">COD {rs(c.cod)} · fees {rs(c.fees)}</div>
+              </div>
+            ))
+          : byStatus.map((st) => (
+              <div key={st.name} className="rounded-xl2 border border-line bg-surface px-4 py-3 dark:border-white/[0.06] dark:bg-[#201c17]">
+                <div className="flex items-center justify-between gap-3">
+                  <span className={`rounded-full px-2.5 py-1 text-[11.5px] font-semibold ${deliveryClass(st.name)}`}>{st.name}</span>
+                  <span className="text-[14px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">{st.count.toLocaleString()}</span>
+                </div>
+                <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-panel dark:bg-white/[0.06]"><div className="h-full rounded-full bg-periwinkle" style={{ width: `${Math.max((st.count / maxStatus) * 100, 2)}%` }} /></div>
+              </div>
+            ))}
+          {!loading && !err && filtered.length > 0 && view === "list" && (
+            <p className="px-1 pt-1 text-[12px] text-hint dark:text-[#8a8175]">Showing {Math.min(filtered.length, 500).toLocaleString()} of {(matchCount ?? filtered.length).toLocaleString()} shipments{(matchCount ?? 0) > 500 && " — narrow the dates or search to see the rest"}</p>
+          )}
+        </div>
+      ) : (
       <div className="mt-4 overflow-hidden rounded-card border border-line bg-surface dark:border-white/[0.06] dark:bg-[#201c17]">
         <div className="overflow-x-auto">
           <table className="w-full min-w-[680px] text-left text-[13px]">
@@ -504,6 +579,26 @@ export default function LogisticsPage() {
             {(matchCount ?? 0) > 500 && " — narrow the dates or search to see the rest"}
           </div>
         )}
+      </div>
+      )}
+
+      <div data-no-refresh>
+        <Sheet open={!!open} onClose={() => setOpen(null)}
+          title={<span className="flex items-center gap-2">{String(open?.order_number ?? "")}<span className={`rounded-full px-2 py-0.5 text-[11.5px] font-semibold ${deliveryClass(String(open?.delivery_status))}`}>{String(open?.delivery_status ?? "")}</span></span>}
+          subtitle={`${String(open?.store_code ?? "")} · ${String(open?.courier ?? "")}`}>
+          {open && (
+            <div>
+              <Detail label="Tracking">{String(open.tracking_id ?? "—")}</Detail>
+              <Detail label="Dispatched">{String(open.dispatch_date ?? "—")}</Detail>
+              <Detail label="Delivered">{String(open.delivery_date ?? "—")}</Detail>
+              <Detail label="COD">{open.cod_amount == null ? "—" : rs(num(open.cod_amount))}</Detail>
+              <Detail label="Courier fee">{open.courier_fee == null ? "—" : rs(num(open.courier_fee))}</Detail>
+              <Detail label="Paid to us">{open.cpr_net_amount == null ? "—" : rs(num(open.cpr_net_amount))}</Detail>
+              <Detail label="Payment">{String(open.payment_status ?? "—")}</Detail>
+              {open.rts ? <Detail label="Return">{String(open.rts_reason ?? open.rts)}</Detail> : null}
+            </div>
+          )}
+        </Sheet>
       </div>
       {!isSupabaseConfigured && <p className="mt-4 text-center text-[12px] text-hint dark:text-[#8a8175]">Preview build · connect Supabase to load live shipments.</p>}
     </div>

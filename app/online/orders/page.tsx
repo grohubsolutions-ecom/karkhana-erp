@@ -1,11 +1,11 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useLiveTables } from "@/lib/useLiveTables";
-import { ShoppingBag, Clock, Truck, XCircle, Wallet, TrendingUp, Search, RefreshCw } from "lucide-react";
+import { ShoppingBag, Clock, Truck, Wallet, TrendingUp, Search, RefreshCw, Phone, MessageCircle, ChevronRight } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { AddOrder, ImportOrders } from "@/components/OrdersEntry";
 import ShopifySync from "@/components/ShopifySync";
-import RangeBar from "@/components/RangeBar";
+import { HubRange, Segmented, PageActions, useIsPhone, Sheet, Detail, waNumber } from "@/components/HubUI";
 import { rangeDates, num, rs } from "@/lib/dateRange";
 
 type Order = Record<string, unknown>;
@@ -26,9 +26,9 @@ const STORES = [
    no order ever holds them, so choosing either always showed "Nothing matches".
    Delivery and returns are on the Shipments and Returns pages. */
 const STATUSES = ["All", "Pending", "Dispatched", "Cancelled"];
-const VIEWS: { key: View; label: string }[] = [
-  { key: "list", label: "Orders" }, { key: "cities", label: "By City" },
-  { key: "status", label: "By Status" }, { key: "stores", label: "By Store" },
+const VIEWS: { key: View; label: string; short: string }[] = [
+  { key: "list", label: "Orders", short: "Orders" }, { key: "cities", label: "By City", short: "City" },
+  { key: "status", label: "By Status", short: "Status" }, { key: "stores", label: "By Store", short: "Store" },
 ];
 
 function statusClass(s: string) {
@@ -86,6 +86,21 @@ export default function OrdersPage() {
      itself stops at 1,000, so its length is not the answer. */
   const [matchCount, setMatchCount] = useState<number | null>(null);
   const [grouped, setGrouped] = useState<{ name: string; count: number; amt: number }[]>([]);
+  const phone = useIsPhone();
+  /* ONE ORDER, IN FULL. On a phone the table's eight columns do not fit, so a
+     tap opens the order in a sheet — with the address (fetched then, not for
+     every row) and buttons to call or WhatsApp the customer. */
+  const [open, setOpen] = useState<Order | null>(null);
+  const [more, setMore] = useState<Order | null>(null);
+  useEffect(() => {
+    setMore(null);
+    if (!open?.id || !supabase) return;
+    let live = true;
+    supabase.from("online_orders").select("address,item_count,tags,note,cancel_reason,payment_gateway,fulfillment_status")
+      .eq("id", open.id as number).maybeSingle()
+      .then(({ data }) => { if (live) setMore((data as Order) ?? {}); });
+    return () => { live = false; };
+  }, [open]);
 
   /* Rows are for the TABLE only. The cards come from hub_orders_summary(),
      because PostgREST caps a response at 1,000 rows whatever .limit() asks for
@@ -205,23 +220,23 @@ export default function OrdersPage() {
   const maxCount = Math.max(...grouped.map((g) => g.count), 1);
 
   return (
-    <div className="px-4 py-6 sm:px-6 md:px-10 md:py-8">
+    <div className="px-4 py-4 sm:px-6 md:px-10 md:py-8">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-[20px] font-extrabold tracking-tight text-ink sm:text-[22px] dark:text-[#f4f1ea]">Orders</h1>
+        <div className="hidden md:block">
+          <h1 className="text-[22px] font-extrabold tracking-tight text-ink dark:text-[#f4f1ea]">Orders</h1>
           <p className="mt-1 text-[13px] text-muted dark:text-[#a89f93]">Online orders across Little Minors, TopShop &amp; Trenzee.</p>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
+        <PageActions>
           <ShopifySync onDone={load} />
           <AddOrder onDone={load} />
           <ImportOrders onDone={load} />
-          <button onClick={() => load()} className="flex items-center gap-2 rounded-full border border-line bg-surface px-4 py-2 text-[13px] font-semibold text-ink transition hover:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:hover:bg-white/[0.12]">
+          <button onClick={() => load()} className="flex items-center justify-center gap-2 rounded-full border border-line bg-surface px-4 py-2 text-[13px] font-semibold text-ink transition hover:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:hover:bg-white/[0.12]">
             <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> Refresh
           </button>
-        </div>
+        </PageActions>
       </div>
 
-      <RangeBar preset={preset} setPreset={setPreset} cf={cf} setCf={setCf} ct={ct} setCt={setCt}
+      <HubRange preset={preset} setPreset={setPreset} cf={cf} setCf={setCf} ct={ct} setCt={setCt}
         right={
           <>
             <select value={store} onChange={(e) => setStore(e.target.value)} className="rounded-full border border-line bg-surface px-3.5 py-2 text-[13px] font-medium text-ink outline-none dark:border-white/10 dark:bg-white/[0.05] dark:text-white">
@@ -239,25 +254,67 @@ export default function OrdersPage() {
 
       <div className="mt-5 grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
         {cards.map(({ label, value, Icon, bg }) => (
-          <div key={label} className={`rounded-card border border-line ${bg} p-4 dark:border-white/[0.06] dark:bg-[#201c17]`}>
-            <span className="flex h-9 w-9 items-center justify-center rounded-full bg-ink text-white dark:bg-white dark:text-[#141414]"><Icon size={16} /></span>
-            <div className="mt-3 text-[16px] font-extrabold tabular-nums text-ink sm:text-[18px] dark:text-[#f4f1ea]">{loading ? "—" : value}</div>
-            <div className="text-[12px] font-medium text-muted dark:text-[#a89f93]">{label}</div>
+          <div key={label} className={`rounded-card border border-line ${bg} p-3.5 sm:p-4 dark:border-white/[0.06] dark:bg-[#201c17]`}>
+            <div className="flex items-center gap-2.5 sm:block">
+              <span className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-full bg-ink text-white sm:flex dark:bg-white dark:text-[#141414]"><Icon size={15} /></span>
+              <div className="min-w-0 sm:mt-3">
+                <div className="max-sm:truncate text-[15px] font-extrabold tabular-nums text-ink sm:text-[18px] dark:text-[#f4f1ea]">{loading ? "—" : value}</div>
+                <div className="text-[12px] font-medium text-muted dark:text-[#a89f93]">{label}</div>
+              </div>
+            </div>
           </div>
         ))}
       </div>
 
-      <div className="mt-5 -mx-4 overflow-x-auto px-4 sm:mx-0 sm:px-0">
-        <div className="flex w-max gap-1 rounded-full bg-panel p-1 dark:bg-white/[0.05]">
-          {VIEWS.map((v) => (
-            <button key={v.key} onClick={() => setView(v.key)}
-              className={`whitespace-nowrap rounded-full px-4 py-1.5 text-[12.5px] font-semibold transition ${view === v.key ? "bg-ink text-white dark:bg-white dark:text-[#141414]" : "text-muted hover:text-ink dark:text-[#a89f93] dark:hover:text-white"}`}>
-              {v.label}
-            </button>
-          ))}
-        </div>
-      </div>
+      <Segmented className="mt-5" value={view} onChange={setView} options={VIEWS} />
 
+      {phone ? (
+        <div className="mt-3 space-y-2">
+          {loading ? Array.from({ length: 6 }).map((_, i) => <div key={i} className="h-[76px] animate-pulse rounded-xl2 bg-panel/70 dark:bg-white/[0.05]" />)
+          : err ? <p className="px-4 py-10 text-center text-[13px] text-danger">Couldn&apos;t load orders: {err}</p>
+          : (view === "list" ? filtered.length === 0 : grouped.length === 0) ? <p className="px-4 py-14 text-center text-[13px] text-muted dark:text-[#a89f93]">{orders.length === 0 ? "No orders in this period — fills once the Shopify sync is live." : "Nothing matches these filters."}</p>
+          : view === "list" ? filtered.slice(0, 500).map((o, i) => (
+              <button key={i} type="button" onClick={() => setOpen(o)}
+                className="flex w-full items-center gap-3 rounded-xl2 border border-line bg-surface px-4 py-3 text-left transition active:scale-[0.99] active:bg-panel dark:border-white/[0.06] dark:bg-[#201c17] dark:active:bg-white/[0.05]">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="truncate text-[14.5px] font-bold text-ink dark:text-[#f4f1ea]">{String(o.order_number ?? "—")}</span>
+                    <span className="shrink-0 rounded-md bg-panel px-1.5 py-0.5 text-[10.5px] font-bold text-muted dark:bg-white/[0.06] dark:text-[#a89f93]">{String(o.store_code ?? "")}</span>
+                    <span className="ml-auto shrink-0 text-[14.5px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">{rs(num(o.amount))}</span>
+                  </div>
+                  <div className="mt-1 flex items-center gap-2">
+                    <span className="min-w-0 flex-1 truncate text-[13px] text-ink dark:text-[#e7e2d8]">{String(o.customer_name ?? "—")}</span>
+                    <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold ${statusClass(String(o.status))}`}>{String(o.status ?? "—")}</span>
+                  </div>
+                  <div className="mt-0.5 flex items-center gap-2 text-[12px] text-muted dark:text-[#a89f93]">
+                    <span className="truncate">{String(o.city ?? "—")} · {String(o.order_date ?? "—")}</span>
+                    <span className="ml-auto shrink-0">{payLabel(o.financial_status)}</span>
+                  </div>
+                </div>
+                <ChevronRight size={16} className="shrink-0 text-hint" />
+              </button>
+            ))
+          : grouped.map((g) => (
+              <div key={g.name} className="rounded-xl2 border border-line bg-surface px-4 py-3 dark:border-white/[0.06] dark:bg-[#201c17]">
+                <div className="flex items-baseline gap-3">
+                  <span className="min-w-0 flex-1 truncate text-[14px] font-bold text-ink dark:text-[#f4f1ea]">{g.name}</span>
+                  <span className="shrink-0 text-[12.5px] tabular-nums text-muted dark:text-[#a89f93]">{g.count.toLocaleString()} orders</span>
+                  <span className="shrink-0 text-[14px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">{rs(g.amt)}</span>
+                </div>
+                <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-panel dark:bg-white/[0.06]">
+                  <div className="h-full rounded-full bg-periwinkle" style={{ width: `${Math.max((g.count / maxCount) * 100, 2)}%` }} />
+                </div>
+              </div>
+            ))}
+          {!loading && !err && (view === "list" ? filtered.length > 0 : grouped.length > 0) && (
+            <p className="px-1 pt-1 text-[12px] text-hint dark:text-[#8a8175]">
+              {view === "list"
+                ? `Showing ${Math.min(filtered.length, 500).toLocaleString()} of ${(matchCount ?? filtered.length).toLocaleString()} orders${(matchCount ?? 0) > 500 ? " — narrow the dates or search to see the rest" : ""}`
+                : `${grouped.reduce((a, g) => a + g.count, 0).toLocaleString()} orders in ${grouped.length.toLocaleString()} groups`}
+            </p>
+          )}
+        </div>
+      ) : (
       <div className="mt-4 overflow-hidden rounded-card border border-line bg-surface dark:border-white/[0.06] dark:bg-[#201c17]">
         <div className="overflow-x-auto">
           <table className="w-full min-w-[640px] text-left text-[13px]">
@@ -314,6 +371,33 @@ export default function OrdersPage() {
           </div>
         )}
       </div>
+      )}
+
+      <Sheet open={!!open} onClose={() => setOpen(null)}
+        title={<span className="flex items-center gap-2">{String(open?.order_number ?? "")}<span className={`rounded-full px-2 py-0.5 text-[11.5px] font-semibold ${statusClass(String(open?.status))}`}>{String(open?.status ?? "")}</span></span>}
+        subtitle={`${String(open?.store_code ?? "")} · ${String(open?.order_date ?? "")}`}
+        footer={open && (open.phone ? (
+          <div className="grid grid-cols-2 gap-2">
+            <a href={`tel:${String(open.phone)}`} className="flex h-12 items-center justify-center gap-2 rounded-full bg-ink text-[14px] font-semibold text-white active:opacity-80 dark:bg-white dark:text-[#141414]"><Phone size={17} /> Call</a>
+            {waNumber(open.phone)
+              ? <a href={`https://wa.me/${waNumber(open.phone)}`} target="_blank" rel="noreferrer" className="flex h-12 items-center justify-center gap-2 rounded-full border border-line text-[14px] font-semibold text-ink active:bg-panel dark:border-white/10 dark:text-white"><MessageCircle size={17} /> WhatsApp</a>
+              : <span className="flex h-12 items-center justify-center rounded-full border border-line text-[13px] text-muted dark:border-white/10">No WhatsApp number</span>}
+          </div>) : undefined)}>
+        {open && (
+          <div>
+            <Detail label="Customer">{String(open.customer_name ?? "—")}</Detail>
+            <Detail label="Phone">{String(open.phone ?? "—")}</Detail>
+            <Detail label="City">{String(open.city ?? "—")}</Detail>
+            <Detail label="Address">{more ? String(more.address || "—") : <span className="text-hint">loading…</span>}</Detail>
+            <Detail label="Amount">{rs(num(open.amount))}</Detail>
+            <Detail label="Payment">{payLabel(open.financial_status)}</Detail>
+            {more?.item_count != null && <Detail label="Items">{String(more.item_count)}</Detail>}
+            {Array.isArray(more?.tags) && (more!.tags as string[]).length > 0 && <Detail label="Tags">{(more!.tags as string[]).join(", ")}</Detail>}
+            {more?.cancel_reason ? <Detail label="Cancelled">{String(more.cancel_reason)}</Detail> : null}
+            {more?.note ? <Detail label="Note">{String(more.note)}</Detail> : null}
+          </div>
+        )}
+      </Sheet>
       {!isSupabaseConfigured && <p className="mt-4 text-center text-[12px] text-hint dark:text-[#8a8175]">Preview build · connect Supabase to load live orders.</p>}
     </div>
   );

@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { Bell } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { usePermissions } from "@/lib/usePermissions";
@@ -41,11 +41,15 @@ function ago(iso: string) {
   return `${Math.floor(s / 86400)}d ago`;
 }
 
-export default function HubBell({ dark = false, align = "right" }: { dark?: boolean; align?: "left" | "right" }) {
+export default function HubBell({ dark = false, align = "right", size = "md" }: { dark?: boolean; align?: "left" | "right"; size?: "md" | "lg" }) {
   const [items, setItems] = useState<Note[]>([]);
   const [open, setOpen] = useState(false);
   const router = useRouter();
   const box = useRef<HTMLDivElement | null>(null);
+  /* The bell lives in the header, which stays put while pages change under it.
+     Going anywhere closes the list, so it is never left open over a new page. */
+  const path = usePathname();
+  useEffect(() => { setOpen(false); }, [path]);
 
   /* A NOTIFICATION IS NOT A DOOR.
      This used to send anyone who tapped a notification to the article page.
@@ -105,10 +109,10 @@ export default function HubBell({ dark = false, align = "right" }: { dark?: bool
   return (
     <div className="relative" ref={box}>
       <button onClick={toggle} aria-label={unread ? `${unread} unread notifications` : "Notifications"}
-        className={`relative rounded-full p-2 transition ${dark
+        className={`relative flex items-center justify-center rounded-full transition ${size === "lg" ? `h-11 w-11 ${dark ? "active:bg-white/10" : "active:bg-panel dark:active:bg-white/[0.08]"}` : "h-8 w-8"} ${dark
           ? "border border-white/20 text-white/70 hover:bg-white/10 hover:text-white"
           : "text-muted hover:bg-panel hover:text-ink dark:text-[#a89f93] dark:hover:bg-white/[0.08] dark:hover:text-white"}`}>
-        <Bell size={16} />
+        <Bell size={size === "lg" ? 20 : 16} />
         {unread > 0 && (
           <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-danger px-1 text-[10px] font-bold leading-none text-white">
             {unread > 9 ? "9+" : unread}
@@ -116,6 +120,9 @@ export default function HubBell({ dark = false, align = "right" }: { dark?: bool
         )}
       </button>
 
+      {/* On a phone the list opens as a sheet over a dimmed page: a tap
+          outside closes it, and the page behind does not scroll meanwhile. */}
+      {open && <div className="fixed inset-0 z-40 bg-black/25 sm:bg-transparent md:hidden" onClick={() => setOpen(false)} />}
       {open && (
         /* WHERE THIS PANEL OPENS, and why it used to fall off the screen.
          *
@@ -134,7 +141,7 @@ export default function HubBell({ dark = false, align = "right" }: { dark?: bool
          *           header, which is where `align` comes from.
          */
         <div className={[
-          "fixed inset-x-3 top-16 z-50 max-h-[70vh] overflow-y-auto rounded-card border border-line",
+          "fixed inset-x-2 top-[calc(60px+env(safe-area-inset-top))] z-50 max-h-[calc(100dvh-150px)] overflow-y-auto overscroll-contain rounded-card border border-line",
           "bg-surface shadow-card dark:border-white/10 dark:bg-[#201c17]",
           "sm:absolute sm:inset-x-auto sm:top-full sm:mt-2 sm:w-[360px]",
           align === "left" ? "sm:left-0" : "sm:right-0",

@@ -23,6 +23,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Loader2, RefreshCw, AlertTriangle, Check } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import EmployeeMonthDetail from "@/components/EmployeeMonthDetail";
+import { useIsPhone } from "@/components/HubUI";
 
 type Row = {
   emp_id: string; name: string; designation: string | null; salary: number;
@@ -45,6 +46,9 @@ export default function MonthlySummary({ department = "HUB" }: { department?: st
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState("");
   const [detail, setDetail] = useState<Row | null>(null);
+  /* Eleven columns do not fit a phone. There, each person is a card: what they
+     are owed, and the days and deductions that produce it. */
+  const phone = useIsPhone();
 
   const load = useCallback(async () => {
     if (!isSupabaseConfigured || !supabase) { setLoading(false); return; }
@@ -77,10 +81,9 @@ export default function MonthlySummary({ department = "HUB" }: { department?: st
     half: a.half + Number(r.half),
     absent: a.absent + Number(r.absent),
     lost: a.lost + Number(r.absent_deduction),
-    gross: a.gross + Number(r.gross),
     advances: a.advances + Number(r.advances),
     payable: a.payable + Number(r.payable),
-  }), { present: 0, half: 0, absent: 0, lost: 0, gross: 0, advances: 0, payable: 0 });
+  }), { present: 0, half: 0, absent: 0, lost: 0, advances: 0, payable: 0 });
 
   const isCurrentMonth = year === today.getFullYear() && month === today.getMonth() + 1;
 
@@ -91,16 +94,16 @@ export default function MonthlySummary({ department = "HUB" }: { department?: st
           <h2 className="text-[16px] font-bold text-ink dark:text-[#f4f1ea]">Monthly summary</h2>
           <p className="text-[12.5px] text-muted dark:text-[#a89f93]">Days, advances &amp; payable salary</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex w-full items-center gap-2 sm:w-auto">
           <select value={month} onChange={(e) => setMonth(Number(e.target.value))}
-                  className="rounded-full border border-line bg-surface px-3 py-1.5 text-[13px] dark:border-white/10 dark:bg-white/[0.05] dark:text-white">
+                  className="h-11 min-w-0 flex-1 rounded-full border border-line bg-surface px-3 py-1.5 text-[13px] sm:h-auto sm:flex-none dark:border-white/10 dark:bg-white/[0.05] dark:text-white">
             {MONTHS.slice(1).map((m, i) => <option key={m} value={i + 1}>{m}</option>)}
           </select>
           <select value={year} onChange={(e) => setYear(Number(e.target.value))}
-                  className="rounded-full border border-line bg-surface px-3 py-1.5 text-[13px] dark:border-white/10 dark:bg-white/[0.05] dark:text-white">
+                  className="h-11 rounded-full border border-line bg-surface px-3 py-1.5 text-[13px] sm:h-auto dark:border-white/10 dark:bg-white/[0.05] dark:text-white">
             {[year - 1, year, year + 1].map((y) => <option key={y} value={y}>{y}</option>)}
           </select>
-          <button onClick={load} className="rounded-full border border-line bg-surface p-2 hover:bg-panel dark:border-white/10 dark:bg-white/[0.05]">
+          <button onClick={load} aria-label="Refresh" className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-line bg-surface p-2 hover:bg-panel sm:h-auto sm:w-auto dark:border-white/10 dark:bg-white/[0.05]">
             <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
           </button>
         </div>
@@ -112,6 +115,45 @@ export default function MonthlySummary({ department = "HUB" }: { department?: st
         </div>
       )}
 
+      {phone ? (
+        <div className="mt-4 space-y-2">
+          {loading ? <p className="px-3 py-10 text-center text-muted"><Loader2 size={15} className="mr-2 inline animate-spin" /> Loading…</p>
+          : rows.length === 0 ? <p className="px-3 py-12 text-center text-[13px] text-muted dark:text-[#a89f93]">Nobody in this department for {MONTHS[month]} {year}.</p>
+          : rows.map((r) => (
+            <div key={r.emp_id} className="rounded-xl2 border border-line bg-surface px-4 py-3 dark:border-white/[0.06] dark:bg-[#201c17]">
+              <div className="flex items-start gap-3">
+                <button onClick={() => setDetail(r)} className="min-w-0 flex-1 text-left">
+                  <div className="truncate text-[14.5px] font-bold text-ink underline decoration-line underline-offset-4 dark:text-[#f4f1ea] dark:decoration-white/20">{r.name}</div>
+                  <div className="truncate text-[12px] text-muted dark:text-[#a89f93]">{r.designation ? `${r.designation} · ` : ""}{rs(r.salary)} a month</div>
+                </button>
+                <div className="shrink-0 text-right">
+                  <div className="text-[15px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">{rs(r.payable)}</div>
+                  <div className="text-[11px] text-muted dark:text-[#a89f93]">payable</div>
+                </div>
+              </div>
+              <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[12.5px] tabular-nums">
+                <span className="font-semibold text-emerald-700">{r.present} present</span>
+                {Number(r.half) > 0 && <span className="text-amber-700">{r.half} half</span>}
+                {Number(r.absent) > 0 && <span className="text-red-700">{r.absent} absent (− {rs(r.absent_deduction)})</span>}
+                <span className="text-muted dark:text-[#a89f93]">{r.paid_off} off paid{Number(r.extra_days) > 0 ? ` +${r.extra_days}` : ""}</span>
+                <span className="font-semibold text-ink dark:text-[#e7e2d8]">{r.counted_days} counted</span>
+                {Number(r.advances) > 0 && <span className="text-muted dark:text-[#a89f93]">advance {rs(r.advances)}</span>}
+              </div>
+              <button onClick={() => togglePaid(r)} disabled={busy === r.emp_id}
+                className={`mt-2.5 flex h-10 w-full items-center justify-center gap-1.5 rounded-full text-[13px] font-semibold transition disabled:opacity-50 ${
+                  r.is_paid ? "bg-success-soft text-emerald-800" : "border border-line text-muted active:bg-panel dark:border-white/15 dark:text-[#a89f93]"}`}>
+                {busy === r.emp_id ? <Loader2 size={13} className="animate-spin" /> : r.is_paid ? <><Check size={13} /> Paid — tap to undo</> : "Unpaid — tap when paid"}
+              </button>
+            </div>
+          ))}
+          {rows.length > 0 && (
+            <div className="rounded-xl2 bg-panel px-4 py-3 text-[12.5px] tabular-nums dark:bg-white/[0.05]">
+              <div className="flex justify-between text-[14px] font-extrabold text-ink dark:text-[#f4f1ea]"><span>Total payable</span><span>{rs(t.payable)}</span></div>
+              <div className="mt-1 text-muted dark:text-[#a89f93]">{t.present} present · {t.half} half · {t.absent} absent (− {rs(t.lost)}) · advances {rs(t.advances)}</div>
+            </div>
+          )}
+        </div>
+      ) : (
       <div className="mt-4 -mx-4 overflow-x-auto px-4 sm:mx-0 sm:px-0">
         <table className="w-full min-w-[860px] text-[13px]">
           <thead className="border-b border-line text-left text-muted dark:border-white/10 dark:text-[#a89f93]">
@@ -124,7 +166,6 @@ export default function MonthlySummary({ department = "HUB" }: { department?: st
               <th className="px-3 py-3 text-right font-semibold text-red-700">Lost</th>
               <th className="px-3 py-3 text-right font-semibold">Paid off</th>
               <th className="px-3 py-3 text-right font-semibold">Counted</th>
-              <th className="px-3 py-3 text-right font-semibold">Earned</th>
               <th className="px-3 py-3 text-right font-semibold">Advance</th>
               <th className="px-3 py-3 text-right font-semibold">Payable</th>
               <th className="px-3 py-3 text-right font-semibold">Paid</th>
@@ -166,12 +207,6 @@ export default function MonthlySummary({ department = "HUB" }: { department?: st
                   {r.paid_off}{Number(r.extra_days) > 0 && <span className="text-emerald-700"> +{r.extra_days}</span>}
                 </td>
                 <td className="px-3 py-3 text-right font-semibold tabular-nums">{r.counted_days}</td>
-                {/* EARNED — what the counted days are worth, before advances.
-                    Payable is that minus what has already been taken, so when
-                    somebody has drawn more than they have earned the payable
-                    goes negative and the reason was nowhere on the row. Now the
-                    three read left to right: earned, advance, payable. */}
-                <td className="px-3 py-3 text-right tabular-nums">{rs(r.gross)}</td>
                 <td className="px-3 py-3 text-right tabular-nums text-muted dark:text-[#a89f93]">
                   {Number(r.advances) ? rs(r.advances) : "—"}
                 </td>
@@ -198,7 +233,6 @@ export default function MonthlySummary({ department = "HUB" }: { department?: st
                 <td className="px-3 py-3 text-right tabular-nums text-red-700">{t.absent}</td>
                 <td className="px-3 py-3 text-right tabular-nums text-red-700">− {rs(t.lost)}</td>
                 <td /><td />
-                <td className="px-3 py-3 text-right tabular-nums">{rs(t.gross)}</td>
                 <td className="px-3 py-3 text-right tabular-nums">{rs(t.advances)}</td>
                 <td className="px-3 py-3 text-right text-[15px] tabular-nums">{rs(t.payable)}</td>
                 <td />
@@ -207,6 +241,7 @@ export default function MonthlySummary({ department = "HUB" }: { department?: st
           )}
         </table>
       </div>
+      )}
 
       {detail && (
         <EmployeeMonthDetail row={detail} year={year} month={month}

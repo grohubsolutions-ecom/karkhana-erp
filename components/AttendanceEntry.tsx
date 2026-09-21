@@ -1,37 +1,16 @@
 "use client";
-import { useEffect, useState } from "react";
-import { Plus, UserPlus, CalendarCheck, Wallet, Loader2, CheckCircle2, AlertTriangle } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Plus, UserPlus, Wallet, Loader2, CheckCircle2, AlertTriangle, ChevronLeft, ChevronRight, CalendarDays, CheckCheck } from "lucide-react";
+import { useConfirm } from "@/components/ConfirmDialog";
 import { supabase } from "@/lib/supabase";
 import Modal, { Field, inputCls, btnPrimary, btnGhost } from "@/components/Modal";
 
 type Result = { ok: boolean; msg: string } | null;
 export type EmpLite = { id: string; name: string };
 
-/* THE CODE IS WHAT GETS STORED, AND IT MUST BE ONE LETTER.
-   This wrote the full word — "Present" — while every imported record and the
-   payable function use 'P'. Anything marked from today would have been
-   invisible to the salary calculation, and nobody would have found out until
-   payday. The label is for the person; the code is for the database.
-
-   Leave is PAID: an approved day off should not cost somebody their wage, which
-   is the whole difference between leave and absence. It counts as a present day.
-   Absent is unpaid — the day simply is not counted, and that is the deduction. */
-const STATUSES: { code: string; label: string; hint: string }[] = [
-  { code: "P", label: "Present",  hint: "full day, paid" },
-  { code: "H", label: "Half day", hint: "counts as ½ a day" },
-  { code: "L", label: "Leave",    hint: "approved, paid in full" },
-  { code: "A", label: "Absent",   hint: "not counted — a day's pay is lost" },
-  /* CLEAR REMOVES THE MARK ENTIRELY, back to blank.
-     Every other option OVERWRITES: mark somebody Absent and the day still says
-     something. There was no way to say "this day should never have been marked"
-     — and on a Sunday that matters, because a Sunday marked Present earns an
-     EXTRA day on top of being paid, so one stray tap put Abdul Rehman on 31
-     counted days and Rs 62,018 against a Rs 61,000 salary.
-
-     Overwriting with Absent would have been worse: it would have read as a day
-     he failed to turn up, on a day nobody was expected to. */
-  { code: "",  label: "Clear",    hint: "remove the mark — back to not marked" },
-];
+/* THE CODE IS WHAT GETS STORED, AND IT MUST BE ONE LETTER — P, H, L or A —
+   because the payable calculation reads exactly those. The label is for the
+   person; the code is for the database. (The roster below says why.) */
 const MONTHS = ["January", "February", "March", "April", "May", "June",
   "July", "August", "September", "October", "November", "December"];
 
@@ -103,150 +82,277 @@ export function AddEmployee({ onDone }: { onDone: () => void }) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Daily attendance                                                   */
+/*  Daily attendance — the day roster                                  */
 /* ------------------------------------------------------------------ */
-export function MarkAttendance({ emps, onDone }: { emps: EmpLite[]; onDone: () => void }) {
-  const [open, setOpen] = useState(false);
+/* ONE PASS, EVERYBODY, ON ONE SCREEN.
+ *
+ * This used to be a dialog: pick ONE status, tick the people it applies to in
+ * a small box that scrolled by itself, save, then do it again for the next
+ * status. A normal day — six present, one absent, one on leave — was three
+ * rounds of that, inside a sheet that also scrolled. On a phone it meant
+ * scrolling up and down again and again.
+ *
+ * Now every person is a row with four big buttons. What the day already says
+ * is lit as it loads, so a correction looks like one. Tap to change; tap the
+ * lit button again to clear the mark. "Mark the rest present" fills everyone
+ * not yet marked. Nothing is written until Save — the bar at the bottom says
+ * how many changes are waiting, and Undo throws them away.
+ *
+ * WHAT IS STORED IS UNCHANGED: one row per person per day, id
+ * `${emp}-${y}-${m}-${d}`, one letter for the status (P / H / L / A — the
+ * payable calculation reads exactly these), and clearing DELETES the row
+ * rather than writing an empty status.
+ *
+ * Leave is PAID (counts as a present day). Absent is unpaid. A Sunday marked
+ * Present earns an EXTRA day on top of being paid — one stray tap once put
+ * Abdul Rehman on 31 counted days — so a Sunday or holiday says so up front. */
+const MARKS = [
+  { code: "P", short: "P", label: "Present",  on: "border-transparent bg-emerald-600 text-white" },
+  { code: "H", short: "½", label: "Half day", on: "border-transparent bg-amber-500 text-white" },
+  { code: "L", short: "L", label: "Leave",    on: "border-transparent bg-sky-600 text-white" },
+  { code: "A", short: "A", label: "Absent",   on: "border-transparent bg-red-600 text-white" },
+];
+const markLabel = (c: string) => MARKS.find((x) => x.code === c)?.label ?? "Not marked";
+
+/* The date in Lahore, not in London: toISOString() is UTC, which before 5am
+   here is still yesterday. */
+export const localISO = (d = new Date()) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const parts = (iso: string) => iso.split("-").map(Number) as [number, number, number];
+const shiftDay = (iso: string, n: number) => { const [y, m, d] = parts(iso); return localISO(new Date(y, m - 1, d + n)); };
+export const dayLabel = (iso: string) => {
+  const [y, m, d] = parts(iso);
+  return new Date(y, m - 1, d).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", year: "numeric" });
+};
+
+type Saved = Record<string, { status: string; time_in: string }>;
+
+export function DayRoster({ emps, date, onDate, onDirty, onDone }: {
+  emps: (EmpLite & { designation?: string | null })[];
+  date: string; onDate: (iso: string) => void;
+  onDirty?: (n: number) => void; onDone: () => void;
+}) {
+  const confirm = useConfirm();
+  const [saved, setSaved] = useState<Saved>({});
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [res, setRes] = useState<Result>(null);
-  const [date, setDate] = useState(today());
-  /* WHAT IS ALREADY MARKED FOR THIS DAY.
-     Marking twice has always corrected the record — the id is built from
-     employee and date, so a second save overwrites. What was missing was
-     being able to SEE it: the list gave no hint that somebody was already
-     marked, so a correction looked identical to a first entry and a mistake
-     stayed invisible until it turned up in a salary. */
-  const [existing, setExisting] = useState<Record<string, string>>({});
-  useEffect(() => {
-    (async () => {
-      if (!supabase || !date) return;
-      const d = new Date(date);
-      if (isNaN(d.getTime())) return;
-      const { data } = await supabase.from("online_att_records")
-        .select("emp_id,status")
-        .eq("year", d.getFullYear()).eq("month", d.getMonth() + 1).eq("day", d.getDate());
-      const m: Record<string, string> = {};
-      for (const r of (data ?? []) as { emp_id: string; status: string }[]) m[r.emp_id] = r.status;
-      setExisting(m);
-    })();
-  }, [date, res]);
-
-  const [status, setStatus] = useState("P");
   const [timeIn, setTimeIn] = useState("");
-  const [timeOut, setTimeOut] = useState("");
-  const [picked, setPicked] = useState<string[]>([]);
+  const [holiday, setHoliday] = useState<string | null>(null);
+  /* If the day's marks could not be read, the roster does not know what is
+     already saved — so it cannot be marked. "All present" on a blank it only
+     believes is blank would overwrite real Absent and Leave marks. */
+  const [loadErr, setLoadErr] = useState("");
+  const req = useRef(0);
+  const [y, m, d] = parts(date);
+  const sunday = new Date(y, m - 1, d).getDay() === 0;
+  const isToday = date === localISO();
 
-  const toggle = (id: string) => setPicked((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]));
+  const load = useCallback(async () => {
+    if (!supabase) { setLoading(false); return; }
+    const my = ++req.current;
+    setLoading(true);
+    const [recs, hol] = await Promise.all([
+      supabase.from("online_att_records").select("emp_id,status,time_in").eq("year", y).eq("month", m).eq("day", d),
+      supabase.from("online_att_holidays").select("name").eq("hdate", date).maybeSingle(),
+    ]);
+    if (my !== req.current) return;
+    setLoadErr(recs.error ? recs.error.message : "");
+    const map: Saved = {};
+    for (const r of (recs.data ?? []) as { emp_id: string; status: string; time_in: string | null }[])
+      map[r.emp_id] = { status: r.status, time_in: r.time_in ?? "" };
+    setSaved(map);
+    setHoliday((hol.data as { name?: string } | null)?.name ?? null);
+    setLoading(false);
+  }, [date, y, m, d]);
 
+  // A new day starts clean: its own marks, no leftover changes.
+  useEffect(() => { setDraft({}); setRes(null); load(); }, [load]);
 
+  const changes = Object.entries(draft);
+  useEffect(() => { onDirty?.(changes.length); }, [changes.length, onDirty]);
 
+  const current = (id: string) => (id in draft ? draft[id] : saved[id]?.status ?? "");
+
+  const locked = loading || busy || !!loadErr;
+  function tap(id: string, code: string) {
+    if (locked) return;
+    setRes(null);
+    setDraft((prev) => {
+      const was = saved[id]?.status ?? "";
+      const now = id in prev ? prev[id] : was;
+      const target = now === code ? "" : code;   // tapping the lit one clears it
+      const next = { ...prev };
+      if (target === was) delete next[id]; else next[id] = target;
+      return next;
+    });
+  }
+  const unmarked = emps.filter((e) => current(e.id) === "");
+  function markRestPresent() {
+    if (locked) return;
+    setRes(null);
+    setDraft((prev) => {
+      const next = { ...prev };
+      for (const e of unmarked) { if ((saved[e.id]?.status ?? "") === "P") delete next[e.id]; else next[e.id] = "P"; }
+      return next;
+    });
+  }
+
+  async function goTo(next: string) {
+    /* A date box being typed into reports half-finished years (0002-09-21).
+       Only a whole, plausible date moves the roster. */
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(next) || Number(next.slice(0, 4)) < 2020 || next === date) return;
+    if (changes.length) {
+      const ok = await confirm({ title: "Leave without saving?", body: `${changes.length} change${changes.length === 1 ? "" : "s"} for ${dayLabel(date)} will be thrown away.`, confirmLabel: "Discard", cancelLabel: "Stay" });
+      if (!ok) return;
+    }
+    onDate(next);
+  }
 
   async function save() {
-    if (!supabase) return;
-    if (!picked.length) { setRes({ ok: false, msg: "Select at least one employee." }); return; }
-    const d = new Date(date);
-    if (isNaN(d.getTime())) { setRes({ ok: false, msg: "Pick a valid date." }); return; }
+    if (!supabase || !changes.length) return;
     setBusy(true); setRes(null);
-
-    const [y, m, day] = [d.getFullYear(), d.getMonth() + 1, d.getDate()];
-    // id is built from employee + date, so marking the same day twice corrects
-    // the record instead of creating a second one
-    /* Clearing is a delete, not a write. Storing an empty status would leave a
-       row that says nothing and still has to be reasoned about. */
-    if (status === "") {
-      const { error: de } = await supabase.from("online_att_records").delete()
-        .in("emp_id", picked).eq("year", y).eq("month", m).eq("day", day);
-      setBusy(false);
-      if (de) { setRes({ ok: false, msg: de.message }); return; }
-      setRes({ ok: true, msg: `${picked.length} mark(s) removed for ${date}. Those days now count as not marked.` });
-      setPicked([]);
-      onDone();
-      return;
-    }
-
-    const rowsToSave = picked.map((emp_id) => ({
-      id: `${emp_id}-${y}-${m}-${day}`,
-      emp_id, year: y, month: m, day,
-      status,
-      time_in:  status === "P" || status === "H" ? timeIn  : "",
-      /* Cleared when the day is not worked, so a leftover time from a previous
-         edit cannot claim somebody was present on a day marked absent. */
-      time_out: status === "P" || status === "H" ? timeOut : "",
+    const ups = changes.filter(([, s]) => s).map(([emp_id, status]) => ({
+      id: `${emp_id}-${y}-${m}-${d}`, emp_id, year: y, month: m, day: d, status,
+      time_in: status === "P" || status === "H" ? (timeIn || saved[emp_id]?.time_in || "") : "",
     }));
-
-    const { error } = await supabase.from("online_att_records").upsert(rowsToSave, { onConflict: "emp_id,year,month,day" });
+    const dels = changes.filter(([, s]) => !s).map(([id]) => id);
+    if (ups.length) {
+      const { error } = await supabase.from("online_att_records").upsert(ups, { onConflict: "emp_id,year,month,day" });
+      if (error) { setBusy(false); setRes({ ok: false, msg: error.message }); return; }
+    }
+    if (dels.length) {
+      const { error } = await supabase.from("online_att_records").delete()
+        .in("emp_id", dels).eq("year", y).eq("month", m).eq("day", d);
+      if (error) { setBusy(false); setRes({ ok: false, msg: error.message }); return; }
+    }
+    const corrected = ups.filter((u) => saved[u.emp_id] && saved[u.emp_id].status !== u.status).length;
+    const counts = MARKS.map((k) => [k.label, ups.filter((u) => u.status === k.code).length] as const).filter(([, n]) => n);
     setBusy(false);
-    if (error) { setRes({ ok: false, msg: error.message }); return; }
-    // Say plainly when a save changed something rather than added it.
-    const changed = picked.filter((id) => existing[id] && existing[id] !== status).length;
-    setRes({ ok: true, msg: `${rowsToSave.length} marked ${status} for ${date}` +
-      (changed ? ` — ${changed} of them corrected from a previous mark.` : ".") });
-    setPicked([]);
+    setRes({ ok: true, msg: `Saved for ${dayLabel(date)}: ` +
+      [...counts.map(([l, n]) => `${n} ${l.toLowerCase()}`), ...(dels.length ? [`${dels.length} cleared`] : [])].join(", ") +
+      (corrected ? ` (${corrected} corrected).` : ".") });
+    setDraft({});
+    await load();
     onDone();
   }
 
-  return (
-    <>
-      <button onClick={() => { setOpen(true); setRes(null); }} className={btnPrimary}><CalendarCheck size={15} /> Mark attendance</button>
-      <Modal open={open} onClose={() => setOpen(false)} wide title="Mark attendance"
-        subtitle="Pick a date and status, then tick everyone it applies to. Re-marking the same day corrects the record.">
-        <div className="grid gap-3 sm:grid-cols-3">
-          <Field label="Date"><input type="date" className={inputCls} value={date} onChange={(e) => setDate(e.target.value)} /></Field>
-          <Field label="Status">
-            <select className={inputCls} value={status} onChange={(e) => setStatus(e.target.value)}>{STATUSES.map((s) => <option key={s.code} value={s.code}>{s.label} — {s.hint}</option>)}</select>
-          </Field>
-          <Field label="Time in">
-            <input type="time" className={inputCls} value={timeIn} disabled={status !== "P" && status !== "H"}
-              onChange={(e) => setTimeIn(e.target.value)} />
-          </Field>
-          <Field label="Time out">
-            <input type="time" className={inputCls} value={timeOut} disabled={status !== "P" && status !== "H"}
-              onChange={(e) => setTimeOut(e.target.value)} />
-          </Field>
-        </div>
+  const tally = MARKS.map((k) => ({ ...k, n: emps.filter((e) => current(e.id) === k.code).length }));
 
-        <div className="mt-4">
-          <div className="mb-2 flex items-center justify-between">
-            <span className="text-[12.5px] font-semibold text-ink dark:text-[#f4f1ea]">Employees ({picked.length} selected)</span>
-            <button onClick={() => setPicked(picked.length === emps.length ? [] : emps.map((e) => e.id))}
-              className="text-[12px] font-semibold text-muted underline hover:text-ink dark:text-[#a89f93] dark:hover:text-white">
-              {picked.length === emps.length ? "Clear all" : "Select all"}
+  return (
+    <section className={`rounded-card border border-line bg-surface p-3 sm:p-4 dark:border-white/[0.06] dark:bg-[#201c17] ${changes.length ? "mb-[76px] md:mb-0" : ""}`}>
+      {/* the day */}
+      <div className="flex items-center gap-2">
+        <button type="button" onClick={() => goTo(shiftDay(date, -1))} aria-label="Previous day"
+          className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-line text-ink active:bg-panel dark:border-white/10 dark:text-white"><ChevronLeft size={20} /></button>
+        <label className="relative flex h-11 min-w-0 flex-1 cursor-pointer items-center justify-center gap-2 rounded-full bg-panel px-3 text-[14.5px] font-bold text-ink dark:bg-white/[0.06] dark:text-[#f4f1ea]">
+          <CalendarDays size={16} className="shrink-0 text-muted" />
+          <span className="truncate">{dayLabel(date)}</span>
+          <input type="date" aria-label="Pick a day" value={date} onChange={(e) => goTo(e.target.value)}
+            /* On a desktop a click on a hidden date box only focuses it; open
+               the calendar instead, as a phone does. */
+            onClick={(e) => { try { (e.currentTarget as HTMLInputElement & { showPicker?: () => void }).showPicker?.(); } catch { /* older browsers open it themselves */ } }}
+            className="absolute inset-0 h-full w-full cursor-pointer opacity-0" />
+        </label>
+        <button type="button" onClick={() => goTo(shiftDay(date, 1))} aria-label="Next day" disabled={isToday}
+          className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-line text-ink active:bg-panel disabled:opacity-30 dark:border-white/10 dark:text-white"><ChevronRight size={20} /></button>
+      </div>
+      {!isToday && (
+        <button type="button" onClick={() => goTo(localISO())} className="mt-2 w-full text-center text-[12.5px] font-semibold text-muted underline dark:text-[#a89f93]">Back to today</button>
+      )}
+
+      {(sunday || holiday) && (
+        <p className="mt-3 flex items-start gap-2 rounded-xl2 bg-amber-soft px-3 py-2.5 text-[12.5px] leading-snug text-amber-900 dark:bg-white/[0.06] dark:text-amber">
+          <AlertTriangle size={15} className="mt-0.5 shrink-0" />
+          <span>{holiday ? `${holiday} — a holiday.` : "Sunday."} Marking someone Present here pays an <b>extra</b> day. Only mark people who actually worked.</span>
+        </p>
+      )}
+
+      {/* quick actions */}
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <button type="button" onClick={markRestPresent} disabled={locked || unmarked.length === 0}
+          className="flex h-11 flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-full bg-ink px-4 text-[13.5px] font-semibold text-white active:opacity-80 disabled:opacity-40 sm:flex-none dark:bg-white dark:text-[#141414]">
+          <CheckCheck size={16} /> {unmarked.length === 0 ? "All marked" : unmarked.length === emps.length ? "All present" : `Rest present (${unmarked.length})`}
+        </button>
+        <label className="flex h-11 items-center gap-2 rounded-full border border-line px-3 text-[12.5px] font-semibold text-muted dark:border-white/10 dark:text-[#a89f93]">
+          Time in
+          <input type="time" value={timeIn} onChange={(e) => setTimeIn(e.target.value)}
+            className="w-[92px] bg-transparent text-[13px] text-ink outline-none dark:text-white" />
+        </label>
+      </div>
+      <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1 text-[11.5px] text-muted dark:text-[#a89f93]">
+        {tally.map((t) => <span key={t.code}><b className="text-ink dark:text-[#f4f1ea]">{t.short}</b> {t.label} · {t.n}</span>)}
+        <span>· {unmarked.length} not marked</span>
+      </div>
+
+      <Feedback res={res} />
+      {loadErr && (
+        <div className="mt-3 flex items-start gap-2 rounded-xl2 bg-danger-soft px-3 py-2.5 text-[12.5px] text-danger">
+          <AlertTriangle size={15} className="mt-0.5 shrink-0" />
+          <span className="flex-1">Couldn&apos;t read this day&apos;s marks, so marking is paused — saving now could overwrite them. {loadErr}</span>
+          <button type="button" onClick={load} className="h-9 shrink-0 rounded-full border border-danger/30 px-3 font-semibold">Retry</button>
+        </div>
+      )}
+
+      {/* everybody */}
+      <ul className="mt-2 divide-y divide-line dark:divide-white/[0.06]">
+        {loading ? Array.from({ length: Math.max(emps.length, 4) }).map((_, i) => (
+          <li key={i} className="flex items-center gap-3 py-3"><div className="h-4 flex-1 animate-pulse rounded bg-panel dark:bg-white/[0.06]" /><div className="h-11 w-[188px] animate-pulse rounded-xl2 bg-panel dark:bg-white/[0.06]" /></li>
+        )) : emps.length === 0 ? (
+          <li className="py-8 text-center text-[13px] text-muted dark:text-[#a89f93]">No employees yet — add one under Staff.</li>
+        ) : emps.map((e) => {
+          const now = current(e.id);
+          const was = saved[e.id]?.status ?? "";
+          const changed = e.id in draft;
+          return (
+            <li key={e.id} className={`flex items-center gap-3 py-2.5 ${changed ? "-mx-3 bg-amber-soft/50 px-3 sm:-mx-4 sm:px-4 dark:bg-white/[0.03]" : ""}`}>
+              <div className="min-w-0 flex-1">
+                <div className="line-clamp-2 text-[14.5px] font-semibold leading-tight text-ink dark:text-[#f4f1ea]">{e.name}</div>
+                <div className="mt-0.5 truncate text-[11.5px] text-muted dark:text-[#a89f93]">
+                  {changed
+                    ? (was ? `was ${markLabel(was)} · not saved` : "not saved yet")
+                    : was ? `${markLabel(was)}${saved[e.id]?.time_in ? ` · in ${saved[e.id].time_in}` : ""}` : (e.designation || "not marked")}
+                </div>
+              </div>
+              <div className="flex shrink-0 gap-1" role="group" aria-label={`${e.name}`}>
+                {MARKS.map((k) => {
+                  const on = now === k.code;
+                  return (
+                    <button key={k.code} type="button" onClick={() => tap(e.id, k.code)} aria-pressed={on} aria-label={`${e.name}: ${k.label}`} disabled={locked}
+                      className={`flex h-11 w-11 items-center justify-center rounded-xl border text-[15px] font-extrabold transition active:scale-95 disabled:opacity-60 ${on ? k.on
+                        : "border-line bg-surface text-muted dark:border-white/10 dark:bg-white/[0.03] dark:text-[#a89f93]"}`}>
+                      {k.short}
+                    </button>
+                  );
+                })}
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+      <p className="mt-2 text-[11.5px] leading-snug text-hint dark:text-[#8a8175]">
+        Tap a lit button again to clear that mark. Leave is paid; Absent loses the day&apos;s pay.
+      </p>
+
+      {/* waiting changes: above the tab bar on a phone, at the foot of the card on a desktop */}
+      {changes.length > 0 && (
+        <div className="fixed inset-x-0 bottom-[calc(60px+env(safe-area-inset-bottom))] z-30 border-t border-line bg-surface px-3 py-2.5 shadow-[0_-6px_20px_rgba(20,16,12,0.08)] md:sticky md:bottom-0 md:-mx-4 md:mt-3 md:rounded-b-card md:px-4 dark:border-white/[0.08] dark:bg-[#201c17]">
+          <div className="mx-auto flex max-w-3xl items-center gap-2">
+            <div className="min-w-0 flex-1 text-[13px] leading-tight text-ink dark:text-[#f4f1ea]">
+              <b>{changes.length} change{changes.length === 1 ? "" : "s"}</b>
+              <span className="block truncate text-[11.5px] text-muted dark:text-[#a89f93]">{dayLabel(date)} · not saved yet</span>
+            </div>
+            <button type="button" onClick={() => { setDraft({}); setRes(null); }} disabled={busy}
+              className="h-11 rounded-full border border-line px-4 text-[13.5px] font-semibold text-ink active:bg-panel dark:border-white/10 dark:text-white">Undo</button>
+            <button type="button" onClick={save} disabled={busy}
+              className="flex h-11 items-center gap-2 rounded-full bg-ink px-5 text-[13.5px] font-semibold text-white active:opacity-80 disabled:opacity-50 dark:bg-white dark:text-[#141414]">
+              {busy && <Loader2 size={15} className="animate-spin" />} Save
             </button>
           </div>
-          <div className="max-h-[240px] overflow-y-auto rounded-card border border-line p-1 dark:border-white/[0.06]">
-            {emps.length === 0 && <p className="px-3 py-6 text-center text-[13px] text-muted dark:text-[#a89f93]">No employees yet — add one first.</p>}
-            {emps.map((e) => {
-              const now = existing[e.id];
-              return (
-              <label key={e.id} className="flex cursor-pointer items-center gap-2.5 rounded-xl2 px-3 py-2 text-[13px] text-ink transition hover:bg-panel dark:text-[#f4f1ea] dark:hover:bg-white/[0.05]">
-                <input type="checkbox" checked={picked.includes(e.id)} onChange={() => toggle(e.id)} className="h-4 w-4 accent-current" />
-                <span className="flex-1">{e.name}</span>
-                {/* What this day already says, so a correction looks like one. */}
-                {now && (
-                  <span className={`rounded-full px-2 py-0.5 text-[10.5px] font-bold ${
-                    now === "P" ? "bg-success-soft text-emerald-800"
-                    : now === "H" ? "bg-amber-soft text-amber-900"
-                    : now === "L" ? "bg-periwinkle-soft text-sky-800"
-                    : "bg-salmon-soft text-red-800"}`}>
-                    already {now}
-                  </span>
-                )}
-              </label>
-            );})}
-          </div>
-          <p className="mt-1.5 text-[11.5px] text-hint dark:text-[#8a8175]">
-            Saving again for the same day replaces what is there — that is how a
-            wrong mark is corrected.
-          </p>
         </div>
-
-        <Feedback res={res} />
-        <div className="mt-5 flex gap-2">
-          <button onClick={save} disabled={busy} className={btnPrimary}>{busy && <Loader2 size={14} className="animate-spin" />} Save attendance</button>
-          <button onClick={() => setOpen(false)} className={btnGhost}>Close</button>
-        </div>
-      </Modal>
-    </>
+      )}
+    </section>
   );
 }
 

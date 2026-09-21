@@ -172,13 +172,13 @@ export default function ArticleDetail() {
   const hasPacks = packs.length > 1;
 
   return (
-    <div className="px-4 py-6 sm:px-6 md:px-10 md:py-8">
+    <div className="px-4 py-4 sm:px-6 md:px-10 md:py-8">
       <button onClick={() => router.push("/online/articles")}
-        className="flex items-center gap-1.5 text-[12.5px] font-semibold text-muted transition hover:text-ink dark:text-[#a89f93] dark:hover:text-white">
+        className="hidden items-center gap-1.5 text-[12.5px] font-semibold text-muted transition hover:text-ink md:flex dark:text-[#a89f93] dark:hover:text-white">
         <ArrowLeft size={14} /> All articles
       </button>
 
-      <div className="mt-3 flex flex-wrap items-start justify-between gap-3">
+      <div className="flex flex-wrap items-start justify-between gap-3 md:mt-3">
         <div>
           <h1 className="text-[21px] font-extrabold tracking-tight text-ink sm:text-[24px] dark:text-[#f4f1ea]">
             {a.final_name || a.rough_name}
@@ -327,7 +327,7 @@ export default function ArticleDetail() {
       )}
 
       {/* money */}
-      <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="mt-4 grid grid-cols-2 gap-2 sm:gap-3 lg:grid-cols-4">
         {[
           ["Cost", a.exact_cost != null ? rs(Number(a.exact_cost)) : "—", a.exact_cost == null ? "not entered yet" : "single"],
           /* With packs on it, the headline is the range — a single figure would
@@ -342,8 +342,8 @@ export default function ArticleDetail() {
             pending > 0 ? `${rs(pending)} waiting on you`
                         : `${rs(Math.max(0, budget - spentNow))} left${a.ads_basis === "total" ? "" : ` ${a.period_label}`}`],
         ].map(([label, value, sub]) => (
-          <div key={label} className="rounded-card border border-line bg-surface p-4 dark:border-white/[0.06] dark:bg-[#201c17]">
-            <div className="text-[17px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">{value}</div>
+          <div key={label} className="min-w-0 rounded-card border border-line bg-surface p-3.5 sm:p-4 dark:border-white/[0.06] dark:bg-[#201c17]">
+            <div className="text-[15px] font-extrabold leading-tight tabular-nums text-ink sm:text-[17px] dark:text-[#f4f1ea]">{value}</div>
             <div className="text-[12px] font-medium text-muted dark:text-[#a89f93]">{label}</div>
             {sub && <div className="mt-0.5 text-[11px] text-hint dark:text-[#8a8175]">{sub}</div>}
           </div>

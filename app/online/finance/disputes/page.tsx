@@ -20,9 +20,13 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { ArrowLeft, RefreshCw, Loader2, AlertTriangle, ExternalLink } from "lucide-react";
+import { ArrowLeft, RefreshCw, Loader2, AlertTriangle, ExternalLink, Check } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { useConfirm } from "@/components/ConfirmDialog";
+import { HubRange, PageActions, useIsPhone } from "@/components/HubUI";
+
+const PERIODS = [["7d", "7 days"], ["30d", "30 days"], ["60d", "60 days"], ["90d", "90 days"], ["all", "All time"], ["custom", "Custom"]]
+  .map(([key, label]) => ({ key, label }));
 
 type Dispute = {
   tracking_id: string;
@@ -64,6 +68,7 @@ export default function DisputesPage() {
   const [courier, setCourier] = useState("All");
   const [cpr, setCpr] = useState("All");
   const [picked, setPicked] = useState<string[]>([]);
+  const phone = useIsPhone();
   /* The date belongs here, not in the view. Four fixed dates have been written
      into this system and every one had to be undone; a filter somebody can
      change costs nothing and never goes stale. Defaults to the last 60 days,
@@ -184,26 +189,28 @@ export default function DisputesPage() {
   }
 
   return (
-    <div className="px-4 py-6 sm:px-6 md:px-10 md:py-8">
+    <div className="px-4 py-4 sm:px-6 md:px-10 md:py-8">
       <Link href="/online/finance"
-            className="mb-1 inline-flex items-center gap-1.5 text-[12.5px] font-semibold text-muted transition hover:text-ink dark:text-[#a89f93] dark:hover:text-white">
+            className="mb-1 hidden items-center gap-1.5 md:inline-flex text-[12.5px] font-semibold text-muted transition hover:text-ink dark:text-[#a89f93] dark:hover:text-white">
         <ArrowLeft size={14} /> Finance
       </Link>
 
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h1 className="text-[21px] font-extrabold tracking-tight text-ink dark:text-[#f4f1ea] sm:text-[24px]">
+          <h1 className="hidden text-[24px] font-extrabold tracking-tight text-ink md:block dark:text-[#f4f1ea]">
             Disputes
           </h1>
-          <p className="mt-0.5 max-w-2xl text-[13px] text-muted dark:text-[#a89f93]">
+          <p className="mt-0.5 max-w-2xl text-[12.5px] text-muted sm:text-[13px] dark:text-[#a89f93]">
             The courier billed us for bringing these back. Shopify still shows the order
             as live, so it counts as revenue there and nobody is chasing the parcel.
           </p>
         </div>
-        <button onClick={() => load()}
-                className="inline-flex items-center gap-1.5 rounded-full border border-line px-3 py-1.5 text-[12.5px] font-semibold text-muted transition hover:bg-panel dark:border-white/10 dark:text-[#a89f93] dark:hover:bg-white/10">
-          <RefreshCw size={13} /> Refresh
-        </button>
+        <PageActions>
+          <button onClick={() => load()}
+                  className="inline-flex items-center justify-center gap-1.5 rounded-full border border-line px-3 py-1.5 text-[12.5px] font-semibold text-muted transition hover:bg-panel dark:border-white/10 dark:text-[#a89f93] dark:hover:bg-white/10">
+            <RefreshCw size={13} /> Refresh
+          </button>
+        </PageActions>
       </div>
 
       {/* The totals below are added from the loaded list, which stops at 1,000.
@@ -213,84 +220,75 @@ export default function DisputesPage() {
           {matchCount.toLocaleString()} disputes in this range — only the newest {rows.length.toLocaleString()} are counted below. Narrow the dates.
         </p>
       )}
-      <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
-        <div className="rounded-card border border-line bg-surface p-4 dark:border-white/10 dark:bg-[#201c17]">
-          <div className="text-[22px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">
+      <div className="mt-4 grid grid-cols-3 gap-2 sm:gap-3">
+        <div className="min-w-0 rounded-card border border-line bg-surface p-3 sm:p-4 dark:border-white/10 dark:bg-[#201c17]">
+          <div className="max-sm:truncate text-[16px] font-extrabold tabular-nums text-ink sm:text-[22px] dark:text-[#f4f1ea]">
             {loading ? "—" : totals.n.toLocaleString()}
           </div>
-          <div className="text-[12.5px] font-semibold text-ink dark:text-[#f4f1ea]">Open disputes</div>
-          <div className="text-[11.5px] text-muted dark:text-[#a89f93]">not cancelled in Shopify</div>
+          <div className="text-[11.5px] font-semibold leading-tight text-ink sm:text-[12.5px] dark:text-[#f4f1ea]">Open disputes</div>
+          <div className="hidden text-[11.5px] text-muted sm:block dark:text-[#a89f93]">not cancelled in Shopify</div>
         </div>
-        <div className="rounded-card border border-line bg-surface p-4 dark:border-white/10 dark:bg-[#201c17]">
-          <div className="text-[22px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">
+        <div className="min-w-0 rounded-card border border-line bg-surface p-3 sm:p-4 dark:border-white/10 dark:bg-[#201c17]">
+          <div className="max-sm:truncate text-[16px] font-extrabold tabular-nums text-ink sm:text-[22px] dark:text-[#f4f1ea]">
             {loading ? "—" : rs(totals.cod)}
           </div>
-          <div className="text-[12.5px] font-semibold text-ink dark:text-[#f4f1ea]">COD on the orders</div>
-          <div className="text-[11.5px] text-muted dark:text-[#a89f93]">still counted as sales in Shopify</div>
+          <div className="text-[11.5px] font-semibold leading-tight text-ink sm:text-[12.5px] dark:text-[#f4f1ea]">COD on the orders</div>
+          <div className="hidden text-[11.5px] text-muted sm:block dark:text-[#a89f93]">still counted as sales in Shopify</div>
         </div>
-        <div className="rounded-card border border-amber-300 bg-amber-soft p-4">
-          <div className="text-[22px] font-extrabold tabular-nums text-amber-900">
+        <div className="min-w-0 rounded-card border border-amber-300 bg-amber-soft p-3 sm:p-4">
+          <div className="max-sm:truncate text-[16px] font-extrabold tabular-nums text-amber-900 sm:text-[22px]">
             {loading ? "—" : rs(totals.charge)}
           </div>
-          <div className="text-[12.5px] font-semibold text-amber-900">Charged to bring them back</div>
-          <div className="text-[11.5px] text-amber-800">already paid to the courier</div>
+          <div className="text-[11.5px] font-semibold leading-tight text-amber-900 sm:text-[12.5px]">Charged to bring them back</div>
+          <div className="hidden text-[11.5px] text-amber-800 sm:block">already paid to the courier</div>
         </div>
       </div>
 
       {/* Filter by when the parcel came back — the date that matters for a
           dispute, since that is what the courier billed for. */}
-      <div className="mt-4 flex flex-wrap items-center gap-1.5">
-        {[["7d","7 days"],["30d","30 days"],["60d","60 days"],["90d","90 days"],["all","All time"],["custom","Custom"]]
-          .map(([k, label]) => (
-          <button key={k} onClick={() => setPreset(k)}
-                  className={`rounded-full px-3 py-1.5 text-[12.5px] font-semibold transition ${
-                    preset === k ? "bg-ink text-white dark:bg-white dark:text-[#141414]"
-                                 : "border border-line text-muted hover:bg-panel dark:border-white/10 dark:text-[#a89f93]"}`}>
-            {label}
-          </button>
-        ))}
-        {preset === "custom" && (
-          <>
-            <input type="date" value={cf} onChange={(e) => setCf(e.target.value)}
-                   className="rounded-full border border-line bg-surface px-3 py-1.5 text-[12.5px] dark:border-white/10 dark:bg-white/[0.05] dark:text-white" />
-            <input type="date" value={ct} onChange={(e) => setCt(e.target.value)}
-                   className="rounded-full border border-line bg-surface px-3 py-1.5 text-[12.5px] dark:border-white/10 dark:bg-white/[0.05] dark:text-white" />
-          </>
-        )}
-      </div>
+      <HubRange presets={PERIODS} preset={preset} setPreset={setPreset} cf={cf} setCf={setCf} ct={ct} setCt={setCt}
+        right={<>
+          <select value={courier} onChange={(e) => setCourier(e.target.value)}
+                  className="rounded-full border border-line bg-surface px-3 py-2 text-[12.5px] font-medium dark:border-white/10 dark:bg-white/[0.05] dark:text-white">
+            {["All", "PostEx", "OwnEx"].map((c) => <option key={c} value={c}>{c === "All" ? "All couriers" : c}</option>)}
+          </select>
+          <select value={cpr} onChange={(e) => setCpr(e.target.value)}
+                  className="max-w-[220px] rounded-full border border-line bg-surface px-3 py-2 text-[12.5px] font-medium max-md:max-w-none dark:border-white/10 dark:bg-white/[0.05] dark:text-white">
+            <option value="All">All settlements</option>
+            {cprs.map((c) => <option key={c}>{c}</option>)}
+          </select>
+          <div className="flex">
+            <input value={qLive} onChange={(e) => setQLive(e.target.value)}
+                   placeholder="Search order, tracking, customer"
+                   className="w-56 rounded-full border border-line bg-surface px-3.5 py-2 text-[13px] outline-none dark:border-white/10 dark:bg-white/[0.05] dark:text-white" />
+          </div>
+        </>} />
 
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        <input value={qLive} onChange={(e) => setQLive(e.target.value)}
-               placeholder="Search order, tracking, customer"
-               className="w-56 rounded-full border border-line bg-surface px-3.5 py-2 text-[13px] outline-none dark:border-white/10 dark:bg-white/[0.05] dark:text-white" />
-        <select value={courier} onChange={(e) => setCourier(e.target.value)}
-                className="rounded-full border border-line bg-surface px-3 py-2 text-[12.5px] font-medium dark:border-white/10 dark:bg-white/[0.05] dark:text-white">
-          {["All", "PostEx", "OwnEx"].map((c) => <option key={c}>{c}</option>)}
-        </select>
-        <select value={cpr} onChange={(e) => setCpr(e.target.value)}
-                className="max-w-[220px] rounded-full border border-line bg-surface px-3 py-2 text-[12.5px] font-medium dark:border-white/10 dark:bg-white/[0.05] dark:text-white">
-          <option>All</option>
-          {cprs.map((c) => <option key={c}>{c}</option>)}
-        </select>
-
-        <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+        <div className="flex w-full items-center gap-2 md:ml-auto md:w-auto md:justify-end">
           {picked.length > 0 && (
             <button onClick={() => setPicked([])}
-                    className="text-[12.5px] font-semibold text-muted underline underline-offset-2 dark:text-[#a89f93]">
+                    className="min-h-[40px] text-[12.5px] font-semibold text-muted underline underline-offset-2 md:min-h-0 dark:text-[#a89f93]">
               clear {picked.length}
             </button>
           )}
           <button onClick={allShown} disabled={!shown.length}
-                  className="min-h-[36px] rounded-full border border-line px-3 py-1.5 text-[12.5px] font-semibold disabled:opacity-40 dark:border-white/10">
+                  className="ml-auto min-h-[40px] rounded-full border border-line px-3.5 py-1.5 text-[12.5px] font-semibold disabled:opacity-40 md:ml-0 md:min-h-[36px] dark:border-white/10">
             Select all {shown.length}
           </button>
+        </div>
+        {/* Close / cancel: beside the filters on a desktop; on a phone a bar
+            above the tab bar once something is ticked, in reach wherever the
+            ticked rows are. */}
+        <div className={`${picked.length ? "flex" : "hidden md:flex"} fixed inset-x-0 bottom-[calc(60px+env(safe-area-inset-bottom))] z-30 items-center gap-2 border-t border-line bg-surface px-4 py-2.5 shadow-[0_-6px_20px_rgba(20,16,12,0.08)] md:static md:border-0 md:bg-transparent md:p-0 md:shadow-none dark:border-white/10 dark:bg-[#201c17] md:dark:bg-transparent`}>
+          <span className="flex-1 text-[13px] font-semibold text-ink md:hidden dark:text-[#f4f1ea]">{picked.length} ticked</span>
           <button onClick={() => push("close")} disabled={!picked.length || !!busy}
-                  className="min-h-[36px] rounded-full bg-ink px-3.5 py-1.5 text-[12.5px] font-semibold text-white disabled:opacity-40 dark:bg-white dark:text-[#141414]">
+                  className="min-h-[44px] rounded-full bg-ink px-3.5 py-1.5 text-[12.5px] font-semibold text-white disabled:opacity-40 md:min-h-[36px] dark:bg-white dark:text-[#141414]">
             {busy === "close" && <Loader2 size={12} className="mr-1 inline animate-spin" />}
             Close {picked.length || ""} in Shopify
           </button>
           <button onClick={() => push("cancel")} disabled={!picked.length || !!busy}
-                  className="min-h-[36px] rounded-full border border-red-300 px-3.5 py-1.5 text-[12.5px] font-semibold text-red-700 hover:bg-red-50 disabled:opacity-40">
+                  className="min-h-[44px] rounded-full border border-red-300 bg-surface px-3.5 py-1.5 text-[12.5px] font-semibold text-red-700 hover:bg-red-50 disabled:opacity-40 md:min-h-[36px] md:bg-transparent dark:bg-transparent">
             {busy === "cancel" && <Loader2 size={12} className="mr-1 inline animate-spin" />}
             Cancel {picked.length || ""}
           </button>
@@ -308,6 +306,36 @@ export default function DisputesPage() {
         </div>
       )}
 
+      {phone ? (
+        <div className={`mt-4 space-y-2 ${picked.length ? "pb-16" : ""}`}>
+          {loading && <p className="px-4 py-8 text-center text-muted"><Loader2 size={15} className="inline animate-spin" /> Loading…</p>}
+          {!loading && !shown.length && (
+            <p className="px-4 py-10 text-center text-[13px] text-muted dark:text-[#a89f93]">{rows.length ? "Nothing matches these filters." : "No disputes. Every settled return is cancelled in Shopify too."}</p>
+          )}
+          {shown.map((r) => {
+            const on = picked.includes(r.tracking_id);
+            return (
+              <button key={r.tracking_id} type="button" onClick={() => toggle(r.tracking_id)} aria-pressed={on}
+                className={`flex w-full items-start gap-3 rounded-xl2 border px-3.5 py-3 text-left transition active:scale-[0.99] ${on ? "border-ink bg-success-soft dark:border-white/40 dark:bg-white/[0.08]" : "border-line bg-surface dark:border-white/[0.06] dark:bg-[#201c17]"}`}>
+                <span className={`mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md border-2 ${on ? "border-ink bg-ink text-white dark:border-white dark:bg-white dark:text-[#141414]" : "border-line dark:border-white/20"}`}>{on && <Check size={15} strokeWidth={3} />}</span>
+                <span className="min-w-0 flex-1">
+                  <span className="flex items-center gap-2">
+                    <span className="truncate text-[14.5px] font-bold text-ink dark:text-[#f4f1ea]">{r.order_number ?? "—"}</span>
+                    <span className="shrink-0 rounded-md bg-panel px-1.5 py-0.5 text-[10.5px] font-bold text-muted dark:bg-white/[0.06] dark:text-[#a89f93]">{r.store_code ?? ""}</span>
+                    <span className="ml-auto shrink-0 text-[14px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">{rs(r.cod_amount)}</span>
+                  </span>
+                  <span className="mt-0.5 flex items-center gap-2 text-[12px] text-muted dark:text-[#a89f93]">
+                    <span className="min-w-0 flex-1 truncate">{r.courier ?? "—"} · {r.tracking_id}</span>
+                    <span className="shrink-0 tabular-nums text-amber-700">charge {rs(r.return_charge)}</span>
+                  </span>
+                  <span className="mt-0.5 block truncate text-[12px] text-muted dark:text-[#a89f93]">{r.cpr_number ?? "—"} · settled {r.settled_on ?? "—"} · back {r.return_date ?? "—"}{r.age_days != null ? ` (${r.age_days}d)` : ""}</span>
+                  <span className="mt-0.5 block truncate text-[12px] text-ink dark:text-[#e7e2d8]">{r.courier_reason_text || r.raw_status || "—"}</span>
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      ) : (
       <div className="mt-4 overflow-x-auto rounded-card border border-line bg-surface dark:border-white/[0.06] dark:bg-white/[0.03]">
         <table className="w-full min-w-[900px] text-left text-[13px]">
           <thead className="border-b border-line text-[11.5px] uppercase tracking-wide text-muted dark:border-white/[0.06] dark:text-[#a89f93]">
@@ -370,6 +398,7 @@ export default function DisputesPage() {
           </tbody>
         </table>
       </div>
+      )}
 
       <p className="mt-3 max-w-3xl text-[11.5px] leading-relaxed text-hint dark:text-[#8a8175]">
         Tick the parcels you have actually received, then close or cancel those in

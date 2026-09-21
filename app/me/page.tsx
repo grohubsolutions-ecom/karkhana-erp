@@ -25,6 +25,10 @@ import { useRouter } from "next/navigation";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import MyWork from "@/components/MyWork";
 import HubBell from "@/components/HubBell";
+/* The Hub's phone rules (16px inputs so iPhones do not zoom, thumb-sized
+   buttons, no sideways drift) apply here too — this is the page staff open on
+   their phones. They are scoped to html.hub, switched on below. */
+import "../online/hub-mobile.css";
 
 type Me = { emp_id: string; name: string; designation: string | null; department: string | null; salary: number };
 type Pay = {
@@ -42,6 +46,11 @@ const MONTHS = ["", "January", "February", "March", "April", "May", "June",
 const rs = (v: unknown) => "Rs " + Math.round(Number(v) || 0).toLocaleString("en-PK");
 
 export default function MyPortal() {
+  useEffect(() => {
+    const html = document.documentElement;
+    html.classList.add("hub");
+    return () => html.classList.remove("hub");
+  }, []);
   const router = useRouter();
   const today = new Date();
   const [year, setYear] = useState(today.getFullYear());
@@ -126,7 +135,7 @@ export default function MyPortal() {
   }
 
   return (
-    <div className="min-h-screen bg-canvas pb-16 dark:bg-[#17140f]">
+    <div className="hub-clip min-h-screen bg-canvas pb-[calc(64px+env(safe-area-inset-bottom))] dark:bg-[#17140f]">
 
       {/* THE IDENTITY BAND.
           A wage slip opens by saying who it is for and what it is worth, and
@@ -135,7 +144,7 @@ export default function MyPortal() {
           the page. Everything below stays light and ruled, which is what makes
           this read as a document rather than a wall of cards. */}
       <header className="bg-ink text-white dark:bg-[#221d17]">
-        <div className="mx-auto max-w-5xl px-4 pb-7 pt-5 sm:px-6 sm:pb-9 sm:pt-7">
+        <div className="mx-auto max-w-5xl px-4 pb-7 pt-[calc(20px+env(safe-area-inset-top))] sm:px-6 sm:pb-9 sm:pt-7">
 
           <div className="flex items-start justify-between gap-4">
             <div className="min-w-0">
@@ -153,10 +162,10 @@ export default function MyPortal() {
                 looking when the page opens. Work assigned to them is the one
                 thing here that is time-sensitive; their wages are not. */}
             <div className="flex shrink-0 items-center gap-2">
-              <HubBell dark />
+              <HubBell dark size="lg" />
               <button onClick={signOut} aria-label="Sign out"
-                      className="rounded-full border border-white/20 p-2 text-white/70 transition hover:bg-white/10 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white">
-                <LogOut size={15} />
+                      className="flex h-11 w-11 items-center justify-center rounded-full border border-white/20 text-white/70 transition hover:bg-white/10 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white">
+                <LogOut size={17} />
               </button>
             </div>
           </div>
@@ -183,12 +192,12 @@ export default function MyPortal() {
               )}
               <label className="sr-only" htmlFor="m">Month</label>
               <select id="m" value={month} onChange={(e) => setMonth(Number(e.target.value))}
-                      className="rounded-full border border-white/20 bg-white/10 px-3 py-1.5 text-[12.5px] font-semibold text-white outline-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white">
+                      className="h-10 rounded-full border border-white/20 bg-white/10 px-3 py-1.5 text-[12.5px] font-semibold text-white outline-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white">
                 {MONTHS.slice(1).map((m, i) => <option key={m} value={i + 1} className="text-ink">{m}</option>)}
               </select>
               <label className="sr-only" htmlFor="y">Year</label>
               <select id="y" value={year} onChange={(e) => setYear(Number(e.target.value))}
-                      className="rounded-full border border-white/20 bg-white/10 px-3 py-1.5 text-[12.5px] font-semibold text-white outline-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white">
+                      className="h-10 rounded-full border border-white/20 bg-white/10 px-3 py-1.5 text-[12.5px] font-semibold text-white outline-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white">
                 {/* Built from TODAY's year, not the chosen one. Choosing last year
                     used to drop this year from the list, with no way back but a reload. */}
                 {[today.getFullYear() - 1, today.getFullYear()].map((y) => <option key={y} value={y} className="text-ink">{y}</option>)}
@@ -213,7 +222,7 @@ export default function MyPortal() {
         <div className="mb-4 flex w-full gap-1 rounded-full bg-panel p-1 dark:bg-white/[0.06] sm:w-max">
           {([["work", "My work"], ["pay", "Attendance & pay"]] as const).map(([key, label]) => (
             <button key={key} onClick={() => setTab(key)}
-              className={`flex-1 whitespace-nowrap rounded-full px-5 py-2 text-[13px] font-semibold transition sm:flex-none ${
+              className={`h-11 flex-1 whitespace-nowrap rounded-full px-5 text-[13.5px] font-semibold transition sm:h-auto sm:flex-none sm:py-2 sm:text-[13px] ${
                 tab === key ? "bg-ink text-white shadow-soft dark:bg-white dark:text-[#141414]"
                             : "text-muted hover:text-ink dark:text-[#a89f93] dark:hover:text-white"}`}>
               {label}

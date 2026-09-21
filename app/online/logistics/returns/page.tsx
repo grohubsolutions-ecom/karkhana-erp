@@ -1,10 +1,11 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { Undo2, PackageCheck, Wallet, RefreshCw, Loader2, ArrowLeft, AlertTriangle } from "lucide-react";
+import { Undo2, PackageCheck, Wallet, RefreshCw, Loader2, ArrowLeft, AlertTriangle, ChevronRight, Check } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import Modal, { Field, inputCls, btnPrimary, btnGhost } from "@/components/Modal";
-import { PRESETS, rangeDates, rs } from "@/lib/dateRange";
+import { rangeDates, rs } from "@/lib/dateRange";
+import { HubRange, PageActions, useIsPhone, Sheet, Detail } from "@/components/HubUI";
 import { useLiveTables } from "@/lib/useLiveTables";
 
 /* Returns live under Logistics, not Finance — a return is a parcel problem
@@ -58,6 +59,9 @@ const PAGE = 500;
 
 export default function ReturnsPage() {
   const [tab, setTab] = useState<Section>("pending_returns");
+  const phone = useIsPhone();
+  /* One parcel in full — every reason, the settlement, the customer. */
+  const [open, setOpen] = useState<ReturnRow | UnpaidRow | null>(null);
   // Which tab a search moved us to, so the jump is explained rather than silent.
   const [jumped, setJumped] = useState("");
   /* HOW OFTEN EACH COURIER BRINGS PARCELS BACK.
@@ -270,69 +274,68 @@ export default function ReturnsPage() {
   }
 
   return (
-    <div className="px-4 py-6 sm:px-6 md:px-10 md:py-8">
-      <Link href="/online/logistics" className="mb-1 inline-flex items-center gap-1.5 text-[12.5px] font-semibold text-muted transition hover:text-ink dark:text-[#a89f93] dark:hover:text-white">
+    <div className="px-4 py-4 sm:px-6 md:px-10 md:py-8">
+      <Link href="/online/logistics" className="mb-1 hidden items-center gap-1.5 md:inline-flex text-[12.5px] font-semibold text-muted transition hover:text-ink dark:text-[#a89f93] dark:hover:text-white">
         <ArrowLeft size={14} /> Logistics
       </Link>
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-[20px] font-extrabold tracking-tight text-ink sm:text-[22px] dark:text-[#f4f1ea]">Returns</h1>
+        <div className="hidden md:block">
+          <h1 className="text-[22px] font-extrabold tracking-tight text-ink dark:text-[#f4f1ea]">Returns</h1>
           <p className="mt-1 text-[13px] text-muted dark:text-[#a89f93]">{TABS.find((t) => t.key === tab)?.hint}</p>
         </div>
-        <button onClick={() => load()} className="flex items-center gap-2 rounded-full border border-line bg-surface px-4 py-2 text-[13px] font-semibold text-ink transition hover:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:hover:bg-white/[0.12]">
-          <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> Refresh
-        </button>
+        <PageActions>
+          <button onClick={() => load()} className="flex items-center justify-center gap-2 rounded-full border border-line bg-surface px-4 py-2 text-[13px] font-semibold text-ink transition hover:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:hover:bg-white/[0.12]">
+            <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> Refresh
+          </button>
+        </PageActions>
       </div>
 
-      {/* range */}
-      <div className="mt-5 flex flex-wrap items-center gap-2">
-        <div className="flex flex-wrap gap-1 rounded-full bg-panel p-1 dark:bg-white/[0.05]">
-          {PRESETS.map((p) => (
-            <button key={p.key} onClick={() => setPreset(p.key)}
-              className={`rounded-full px-3.5 py-1.5 text-[12.5px] font-semibold transition ${preset === p.key ? "bg-ink text-white dark:bg-white dark:text-[#141414]" : "text-muted hover:text-ink dark:text-[#a89f93] dark:hover:text-white"}`}>
-              {p.label}
-            </button>
-          ))}
-        </div>
-        {preset === "custom" && (
-          <>
-            <input type="date" value={cf} onChange={(e) => setCf(e.target.value)} className="rounded-full border border-line bg-surface px-3 py-1.5 text-[12.5px] dark:border-white/10 dark:bg-white/[0.05] dark:text-white" />
-            <input type="date" value={ct} onChange={(e) => setCt(e.target.value)} className="rounded-full border border-line bg-surface px-3 py-1.5 text-[12.5px] dark:border-white/10 dark:bg-white/[0.05] dark:text-white" />
-          </>
-        )}
-        <select value={store} onChange={(e) => setStore(e.target.value)} className="rounded-full border border-line bg-surface px-3.5 py-2 text-[13px] font-medium text-ink outline-none dark:border-white/10 dark:bg-white/[0.05] dark:text-white">
-          {["ALL", "LM", "TS", "TRZ"].map((s) => <option key={s} value={s}>{s === "ALL" ? "All stores" : s}</option>)}
-        </select>
-        <select value={courier} onChange={(e) => setCourier(e.target.value)} className="rounded-full border border-line bg-surface px-3.5 py-2 text-[13px] font-medium text-ink outline-none dark:border-white/10 dark:bg-white/[0.05] dark:text-white">
-          {["All couriers", "PostEx", "OwnEx"].map((c) => <option key={c}>{c}</option>)}
-        </select>
-        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search order or tracking — looks everywhere"
-          className="min-w-[200px] flex-1 rounded-full border border-line bg-surface px-4 py-2 text-[13px] text-ink outline-none dark:border-white/10 dark:bg-white/[0.05] dark:text-white" />
-      </div>
+      {/* range — the same control as every other Hub page: presets on a
+          desktop, one picker on a phone (the old row wrapped into three lines
+          of small chips there) */}
+      <HubRange preset={preset} setPreset={setPreset} cf={cf} setCf={setCf} ct={ct} setCt={setCt}
+        right={<>
+          <select value={store} onChange={(e) => setStore(e.target.value)} className="rounded-full border border-line bg-surface px-3.5 py-2 text-[13px] font-medium text-ink outline-none dark:border-white/10 dark:bg-white/[0.05] dark:text-white">
+            {["ALL", "LM", "TS", "TRZ"].map((s) => <option key={s} value={s}>{s === "ALL" ? "All stores" : s}</option>)}
+          </select>
+          <select value={courier} onChange={(e) => setCourier(e.target.value)} className="rounded-full border border-line bg-surface px-3.5 py-2 text-[13px] font-medium text-ink outline-none dark:border-white/10 dark:bg-white/[0.05] dark:text-white">
+            {["All couriers", "PostEx", "OwnEx"].map((c) => <option key={c}>{c}</option>)}
+          </select>
+          <div className="flex min-w-[200px] flex-1">
+            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search order or tracking — looks everywhere"
+              className="w-full rounded-full border border-line bg-surface px-4 py-2 text-[13px] text-ink outline-none dark:border-white/10 dark:bg-white/[0.05] dark:text-white" />
+          </div>
+        </>} />
 
       {/* the three sections as cards — click to switch */}
-      <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-3">
+      {/* The three sections are the tabs. Three across on a phone too — they
+          were three full-width cards stacked, a screen of scrolling before the
+          first parcel. */}
+      <div className="mt-4 grid grid-cols-3 gap-2 sm:mt-5 sm:gap-3">
         {cards.map((c) => (
-          <button key={c.key} onClick={() => setTab(c.key)}
-            className={`rounded-card p-4 text-left transition ${c.bg} ${tab === c.key ? "ring-2 ring-ink dark:ring-white/40" : "opacity-80 hover:opacity-100"} dark:bg-white/[0.05]`}>
-            <span className="flex h-8 w-8 items-center justify-center rounded-full bg-ink text-white dark:bg-white dark:text-[#141414]"><c.Icon size={15} /></span>
-            <div className="mt-3 text-[22px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">{loading ? "—" : c.n.toLocaleString()}</div>
-            <div className="text-[12.5px] font-semibold text-ink dark:text-[#f4f1ea]">{c.label}</div>
-            <div className="text-[11.5px] text-muted dark:text-[#a89f93]">{rs(c.v)}{c.sub ? ` · ${c.sub}` : ""}</div>
+          <button key={c.key} onClick={() => setTab(c.key)} aria-pressed={tab === c.key}
+            className={`min-w-0 rounded-card p-3 text-left transition active:scale-[0.98] sm:p-4 ${c.bg} ${tab === c.key ? "ring-2 ring-ink dark:ring-white/40" : "opacity-80 hover:opacity-100"} dark:bg-white/[0.05]`}>
+            <span className="hidden h-8 w-8 items-center justify-center rounded-full bg-ink text-white sm:flex dark:bg-white dark:text-[#141414]"><c.Icon size={15} /></span>
+            <div className="text-[19px] font-extrabold tabular-nums text-ink sm:mt-3 sm:text-[22px] dark:text-[#f4f1ea]">{loading ? "—" : c.n.toLocaleString()}</div>
+            <div className="text-[11.5px] font-semibold leading-tight text-ink sm:text-[12.5px] dark:text-[#f4f1ea]">{c.label}</div>
+            <div className="mt-0.5 text-[10.5px] text-muted max-sm:truncate sm:text-[11.5px] dark:text-[#a89f93]">{rs(c.v)}<span className="hidden sm:inline">{c.sub ? ` · ${c.sub}` : ""}</span></div>
           </button>
         ))}
       </div>
+      <p className="mt-2 text-[12px] leading-snug text-muted md:hidden dark:text-[#a89f93]">{TABS.find((t) => t.key === tab)?.hint}</p>
 
       {err && <p className="mt-4 flex items-center gap-2 text-[13px] font-semibold text-danger"><AlertTriangle size={15} /> {err}</p>}
 
+      {/* On a phone this rides above the tab bar, so it is in reach wherever
+          the ticked parcels are in the list. */}
       {isReturns && picked.length > 0 && (
-        <div className="mt-4 flex items-center gap-3 rounded-card border border-line bg-surface px-4 py-3 dark:border-white/10 dark:bg-white/[0.05]">
-          <span className="text-[13px] font-semibold text-ink dark:text-[#f4f1ea]">{picked.length} selected</span>
+        <div className="fixed inset-x-0 bottom-[calc(60px+env(safe-area-inset-bottom))] z-30 flex items-center gap-3 border-t border-line bg-surface px-4 py-2.5 shadow-[0_-6px_20px_rgba(20,16,12,0.08)] md:static md:mt-4 md:rounded-card md:border md:py-3 md:shadow-none dark:border-white/10 dark:bg-[#201c17] md:dark:bg-white/[0.05]">
+          <span className="flex-1 text-[13px] font-semibold text-ink md:flex-none dark:text-[#f4f1ea]">{picked.length} selected</span>
+          <button onClick={() => setPicked([])} className="h-11 px-2 text-[13px] font-semibold text-muted md:order-last md:h-auto dark:text-[#a89f93]">Clear</button>
           <button onClick={() => setShowReceive(true)} disabled={busy}
-            className="flex items-center gap-2 rounded-full bg-ink px-4 py-1.5 text-[12.5px] font-semibold text-white dark:bg-white dark:text-[#141414]">
+            className="flex h-11 items-center gap-2 rounded-full bg-ink px-4 text-[13px] font-semibold text-white md:h-auto md:py-1.5 md:text-[12.5px] dark:bg-white dark:text-[#141414]">
             {busy ? <Loader2 size={13} className="animate-spin" /> : <PackageCheck size={13} />} Mark received
           </button>
-          <button onClick={() => setPicked([])} className="text-[12.5px] font-semibold text-muted dark:text-[#a89f93]">Clear</button>
         </div>
       )}
 
@@ -350,9 +353,9 @@ export default function ReturnsPage() {
           {/* The headline sits in the button itself, so the current rate is
               readable without opening anything — only the history costs a click. */}
           <button onClick={() => setShowRates((v) => !v)}
-                  className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left transition hover:bg-panel dark:hover:bg-white/[0.04]">
+                  className="flex min-h-[48px] w-full items-center justify-between gap-3 px-4 py-3 text-left transition hover:bg-panel dark:hover:bg-white/[0.04]">
             <span className="text-[13px] font-semibold text-ink dark:text-[#f4f1ea]">
-              Return rate
+              <span className="block sm:inline">Return rate</span>
               {(() => {
                 const done = rates.filter((x) => !x.is_part_month);
                 return ["PostEx", "OwnEx"].map((cr) => {
@@ -362,7 +365,7 @@ export default function ReturnsPage() {
                   const pc = Number(now.return_pct ?? 0);
                   const d = prev ? pc - Number(prev.return_pct ?? 0) : null;
                   return (
-                    <span key={cr} className="ml-3 text-[12.5px] font-normal text-muted dark:text-[#a89f93]">
+                    <span key={cr} className="mr-3 text-[12.5px] font-normal text-muted sm:ml-3 sm:mr-0 dark:text-[#a89f93]">
                       {cr} <b className="text-ink dark:text-[#f4f1ea]">{pc.toFixed(1)}%</b>
                       {d !== null && (
                         <span className={d <= 0 ? "text-emerald-700" : "text-red-700"}>
@@ -378,7 +381,27 @@ export default function ReturnsPage() {
               {showRates ? "Hide months" : "Month by month"}
             </span>
           </button>
-          {showRates && (
+          {showRates && phone && (
+            <div className="divide-y divide-line border-t border-line dark:divide-white/[0.06] dark:border-white/10">
+              {[...new Set(rates.map((x) => x.month_label))].map((m) => (
+                <div key={m} className="px-4 py-2.5">
+                  <div className="text-[12.5px] font-bold text-ink dark:text-[#f4f1ea]">{m}{rates.find((x) => x.month_label === m)?.is_part_month && <span className="ml-2 rounded-full bg-panel px-2 py-0.5 text-[10px] font-semibold text-hint dark:bg-white/[0.06]">still running</span>}</div>
+                  {rates.filter((x) => x.month_label === m && (x.courier === "PostEx" || x.courier === "OwnEx")).map((x) => {
+                    const d = x.change_pts === null ? null : Number(x.change_pts);
+                    return (
+                      <div key={x.courier} className="mt-1 flex items-baseline gap-2 text-[12.5px]">
+                        <span className="w-14 shrink-0 text-muted dark:text-[#a89f93]">{x.courier}</span>
+                        <b className="tabular-nums text-ink dark:text-[#f4f1ea]">{Number(x.return_pct ?? 0).toFixed(1)}%</b>
+                        <span className={`tabular-nums ${d === null ? "text-hint" : d <= 0 ? "text-emerald-700" : "text-red-700"}`}>{d === null ? "" : `${d > 0 ? "+" : ""}${d.toFixed(1)}`}</span>
+                        <span className="ml-auto truncate tabular-nums text-muted dark:text-[#a89f93]">{x.returned}/{x.delivered + x.returned} · {rs(Number(x.cod_returned ?? 0))}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
+          )}
+          {showRates && !phone && (
           <div className="overflow-x-auto border-t border-line dark:border-white/10">
             <table className="w-full min-w-[560px] text-left text-[13px]">
               <thead className="border-b border-line text-[11.5px] uppercase tracking-wide text-muted dark:border-white/[0.06] dark:text-[#a89f93]">
@@ -428,6 +451,53 @@ export default function ReturnsPage() {
         </div>
       )}
 
+      {phone ? (
+        <div className={`mt-4 space-y-2 ${isReturns && picked.length > 0 ? "pb-16" : ""}`}>
+          {loading && Array.from({ length: 5 }).map((_, i) => <div key={i} className="h-[84px] animate-pulse rounded-xl2 bg-panel/70 dark:bg-white/[0.05]" />)}
+          {!loading && !filtered.length && (
+            <p className="px-4 py-12 text-center text-[13px] text-muted dark:text-[#a89f93]">
+              {q.trim() ? <>No parcel matches <b className="text-ink dark:text-[#f4f1ea]">{q.trim()}</b> in any return, on any date.<span className="mt-1 block text-[12px] text-hint">Checked every tab and the whole date range, not just this view.</span></> : "Nothing here."}
+            </p>
+          )}
+          {!loading && filtered.map((r) => {
+            const ret = r as ReturnRow; const up = r as UnpaidRow;
+            const reasons = isReturns ? allReasons(ret) : [];
+            const on = picked.includes(r.tracking_id);
+            const old = Number(r.age_days ?? 0) > 14;
+            return (
+              <div key={r.tracking_id} className={`flex items-stretch overflow-hidden rounded-xl2 border bg-surface dark:bg-[#201c17] ${on ? "border-ink dark:border-white/40" : "border-line dark:border-white/[0.06]"}`}>
+                {isReturns && (
+                  <button type="button" aria-pressed={on} aria-label={`Select ${r.order_number ?? r.tracking_id}`}
+                    onClick={() => setPicked((p) => on ? p.filter((x) => x !== r.tracking_id) : [...p, r.tracking_id])}
+                    className="flex w-12 shrink-0 items-center justify-center border-r border-line active:bg-panel dark:border-white/[0.06]">
+                    <span className={`flex h-6 w-6 items-center justify-center rounded-md border-2 ${on ? "border-ink bg-ink text-white dark:border-white dark:bg-white dark:text-[#141414]" : "border-line dark:border-white/20"}`}>{on && <Check size={15} strokeWidth={3} />}</span>
+                  </button>
+                )}
+                <button type="button" onClick={() => setOpen(r)} className="flex min-w-0 flex-1 items-center gap-2 px-3.5 py-3 text-left active:bg-panel dark:active:bg-white/[0.04]">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="truncate text-[14.5px] font-bold text-ink dark:text-[#f4f1ea]">{r.order_number ?? "—"}</span>
+                      <span className="shrink-0 rounded-md bg-panel px-1.5 py-0.5 text-[10.5px] font-bold text-muted dark:bg-white/[0.06] dark:text-[#a89f93]">{r.store_code ?? ""}</span>
+                      <span className="ml-auto shrink-0 text-[14px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">{rs(Number(r.cod_amount ?? 0))}</span>
+                    </div>
+                    <div className="mt-0.5 flex items-center gap-2 text-[12px] text-muted dark:text-[#a89f93]">
+                      <span className="min-w-0 flex-1 truncate">{r.courier ?? "—"} · {r.tracking_id}</span>
+                      <span className={`shrink-0 font-semibold tabular-nums ${old ? "text-danger" : ""}`}>{r.age_days != null ? `${r.age_days}d` : ""}</span>
+                    </div>
+                    <div className="mt-1 flex items-center gap-2 text-[12px]">
+                      {isReturns
+                        ? <><span className="shrink-0 rounded-full bg-panel px-2 py-0.5 text-[11px] font-semibold text-muted dark:bg-white/[0.08] dark:text-[#a89f93]">{ret.stage ?? "—"}</span>
+                            <span className="min-w-0 truncate text-ink dark:text-[#e7e2d8]">{reasons[0]?.text ?? <span className="text-hint">no reason recorded</span>}</span></>
+                        : <span className="truncate text-muted dark:text-[#a89f93]">Delivered {up.delivery_date ?? "—"} · {up.customer_name ?? "—"}</span>}
+                    </div>
+                  </div>
+                  <ChevronRight size={16} className="shrink-0 text-hint" />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
       <div className="mt-4 overflow-x-auto rounded-card border border-line bg-surface dark:border-white/[0.06] dark:bg-white/[0.03]">
         <table className="w-full min-w-[880px] text-left text-[13px]">
           <thead className="border-b border-line text-[11.5px] uppercase tracking-wide text-muted dark:border-white/[0.06] dark:text-[#a89f93]">
@@ -525,6 +595,37 @@ export default function ReturnsPage() {
           </tbody>
         </table>
       </div>
+      )}
+
+      <Sheet open={!!open} onClose={() => setOpen(null)}
+        title={String(open?.order_number ?? open?.tracking_id ?? "")}
+        subtitle={`${open?.store_code ?? ""} · ${open?.courier ?? ""} · ${open?.tracking_id ?? ""}`}>
+        {open && (() => {
+          const ret = open as ReturnRow; const up = open as UnpaidRow;
+          const reasons = isReturns ? allReasons(ret) : [];
+          return (
+            <div>
+              {isReturns && <Detail label="Stage">{ret.stage ?? "—"}</Detail>}
+              <Detail label="COD">{rs(Number(open.cod_amount ?? 0))}</Detail>
+              <Detail label={isReturns ? "Return date" : "Delivered"}>{(isReturns ? ret.return_date : up.delivery_date) ?? "—"}</Detail>
+              <Detail label="Age">{open.age_days != null ? `${open.age_days} days` : "—"}</Detail>
+              <Detail label="CPR / Invoice">{open.cpr_number ? String(open.cpr_number) : "not settled"}</Detail>
+              <Detail label="Customer">{open.customer_name ?? "—"}{open.city ? ` · ${open.city}` : ""}</Detail>
+              {isReturns && (
+                <div className="pt-3">
+                  <div className="text-[12px] font-bold uppercase tracking-wide text-hint dark:text-[#8a8175]">Why it came back</div>
+                  {reasons.length === 0 ? <p className="mt-1 text-[13.5px] text-hint">No reason recorded.</p> : reasons.map((x, k) => (
+                    <div key={k} className="mt-2 rounded-xl2 bg-panel px-3 py-2 dark:bg-white/[0.05]">
+                      <div className="text-[10.5px] font-semibold uppercase tracking-wide text-hint dark:text-[#8a8175]">{x.from}</div>
+                      <div className={`text-[14px] ${x.tone}`}>{x.text}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })()}
+      </Sheet>
 
       <ReceiveDialog open={showReceive} count={picked.length} busy={busy}
         onClose={() => setShowReceive(false)} onSave={receive} />

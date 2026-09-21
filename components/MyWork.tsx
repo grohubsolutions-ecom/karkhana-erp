@@ -150,9 +150,9 @@ export default function MyWork() {
           <textarea
             value={note[t.task_id] ?? ""}
             onChange={(e) => setNote((n) => ({ ...n, [t.task_id]: e.target.value }))}
-            rows={2}
+            rows={3}
             placeholder="What did you do? e.g. 6 pictures, 4 sizes, size chart added, live on Shopify"
-            className="mt-3 w-full rounded-xl2 border border-line bg-canvas px-3 py-2 text-[13px] text-ink outline-none placeholder:text-hint dark:border-white/10 dark:bg-white/[0.04] dark:text-[#f4f1ea]"
+            className="mt-3 min-h-[92px] w-full rounded-xl2 sm:min-h-0 border border-line bg-canvas px-3 py-2 text-[13px] text-ink outline-none placeholder:text-hint dark:border-white/10 dark:bg-white/[0.04] dark:text-[#f4f1ea]"
           />
 
           <div className="mt-2 flex flex-wrap items-center gap-2">

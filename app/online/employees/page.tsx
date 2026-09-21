@@ -21,10 +21,11 @@
  * The same file serves Karkhana and FS Traders later by changing one constant.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Users, Loader2, Plus, Pencil, Trash2, Search, AlertTriangle } from "lucide-react";
+import { Users, Loader2, Plus, Pencil, Trash2, Search, AlertTriangle, Phone, KeyRound } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import Modal, { btnPrimary, btnGhost, inputCls, Field } from "@/components/Modal";
 import { useConfirm } from "@/components/ConfirmDialog";
+import { PageActions, useIsPhone } from "@/components/HubUI";
 
 const BUSINESS_CODE = "HUB";
 
@@ -54,6 +55,7 @@ const blank = {
 };
 
 export default function HubEmployeesPage() {
+  const phone = useIsPhone();
   const confirm = useConfirm();
   const [rows, setRows] = useState<Emp[]>([]);
   const [deptId, setDeptId] = useState<string | null>(null);
@@ -277,15 +279,15 @@ export default function HubEmployeesPage() {
   }
 
   return (
-    <div className="px-4 py-5 sm:px-6">
+    <div className="px-4 py-4 sm:px-6 sm:py-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
+        <div className="hidden md:block">
           <h1 className="text-[22px] font-extrabold text-ink dark:text-[#f4f1ea]">Hub employees</h1>
           <p className="text-[13px] text-muted dark:text-[#a89f93]">
             Everyone working in the Hub department. Attendance and salary are calculated from here.
           </p>
         </div>
-        <button onClick={startAdd} className={btnPrimary}><Plus size={15} /> Add employee</button>
+        <PageActions><button onClick={startAdd} className={btnPrimary}><Plus size={15} /> Add employee</button></PageActions>
       </div>
 
       {err && (
@@ -301,10 +303,45 @@ export default function HubEmployeesPage() {
         <div className="relative min-w-[200px] flex-1 sm:max-w-xs">
           <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-hint" />
           <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search name, role or phone"
-                 className="w-full rounded-full border border-line bg-surface py-2 pl-9 pr-3 text-[13px] outline-none dark:border-white/10 dark:bg-white/[0.05] dark:text-white" />
+                 className="h-11 w-full rounded-full border border-line bg-surface py-2 pl-9 pr-3 text-[13px] outline-none sm:h-auto dark:border-white/10 dark:bg-white/[0.05] dark:text-white" />
         </div>
       </div>
 
+      {phone ? (
+        <div className="mt-4 space-y-2">
+          {loading ? <p className="px-4 py-10 text-center text-muted"><Loader2 size={15} className="mr-2 inline animate-spin" /> Loading…</p>
+          : shown.length === 0 ? <p className="px-4 py-12 text-center text-[13px] text-muted dark:text-[#a89f93]">{rows.length === 0 ? "No Hub employees yet. Add the first one, or import them from the old attendance app." : "Nobody matches that search."}</p>
+          : shown.map((e) => (
+            <div key={e.id} className="rounded-xl2 border border-line bg-surface px-4 py-3 dark:border-white/[0.06] dark:bg-[#201c17]">
+              <div className="flex items-start gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-[14.5px] font-bold text-ink dark:text-[#f4f1ea]">{e.name ?? "—"}</div>
+                  <div className="truncate text-[12px] text-muted dark:text-[#a89f93]">{e.designations?.name ?? "—"}{e.join_date ? ` · joined ${e.join_date}` : ""}</div>
+                </div>
+                <div className="shrink-0 text-right text-[14.5px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">{rs(e.pay_amount)}</div>
+              </div>
+              <div className="mt-2.5 flex flex-wrap items-center gap-2">
+                {e.phone && (
+                  <a href={`tel:${e.phone}`} className="flex h-10 items-center gap-1.5 rounded-full border border-line px-3.5 text-[12.5px] font-semibold text-ink active:bg-panel dark:border-white/15 dark:text-white"><Phone size={13} /> {e.phone}</a>
+                )}
+                {e.user_id ? (
+                  <span className="rounded-full bg-success-soft px-2.5 py-1 text-[11.5px] font-semibold text-emerald-800">Has login</span>
+                ) : (
+                  <button onClick={() => { setLogin(e); setEmail(""); setPw("123456"); setMade(""); setErr(""); }}
+                    className="flex h-10 items-center gap-1.5 rounded-full border border-line px-3.5 text-[12.5px] font-semibold active:bg-panel dark:border-white/15"><KeyRound size={13} /> Give login</button>
+                )}
+                <span className="ml-auto flex gap-2">
+                  <button onClick={() => startEdit(e)} className="flex h-10 items-center gap-1.5 rounded-full border border-line px-3.5 text-[12.5px] font-semibold active:bg-panel dark:border-white/15"><Pencil size={13} /> Edit</button>
+                  <button onClick={() => remove(e)} aria-label={`Remove ${e.name ?? "employee"}`} className="flex h-10 w-10 items-center justify-center rounded-full border border-line text-red-700 active:bg-red-50 dark:border-white/15"><Trash2 size={14} /></button>
+                </span>
+              </div>
+            </div>
+          ))}
+          {shown.length > 0 && (
+            <div className="flex justify-between px-1 pt-1 text-[13px] font-semibold text-ink dark:text-[#f4f1ea]"><span>{shown.length} shown</span><span className="tabular-nums">{rs(payroll)} a month</span></div>
+          )}
+        </div>
+      ) : (
       <div className="mt-4 -mx-4 overflow-x-auto px-4 sm:mx-0 sm:px-0">
         <table className="w-full min-w-[680px] text-[13px]">
           <thead className="border-b border-line text-left text-muted dark:border-white/10 dark:text-[#a89f93]">
@@ -365,6 +402,7 @@ export default function HubEmployeesPage() {
           )}
         </table>
       </div>
+      )}
 
       <Modal open={!!login} onClose={() => !busy && setLogin(null)}
              title={`Give ${login?.name ?? ""} a login`}

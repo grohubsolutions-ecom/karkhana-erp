@@ -264,13 +264,15 @@ export default function HealthCheck({ days = 7 }: { days?: number }) {
                   </summary>
                   <p className="mt-2 text-[12px] leading-snug text-muted dark:text-[#a89f93]">{c.detail}</p>
                   {!!c.rows?.length && (
-                    <div className="mt-2 max-h-[220px] space-y-1 overflow-y-auto">
+                    /* On a phone the list is not a second scrolling box inside
+                       the sheet — the sheet itself scrolls, once. */
+                    <div className="mt-2 space-y-1 sm:max-h-[220px] sm:overflow-y-auto">
                       {c.rows.map((r, i) => (
-                        <div key={i} className="flex items-center justify-between gap-2 rounded-xl2 bg-panel px-3 py-1.5 text-[12px] dark:bg-white/[0.05]">
+                        <div key={i} className="flex flex-col items-start gap-0.5 rounded-xl2 bg-panel px-3 py-2 text-[12.5px] sm:flex-row sm:items-center sm:justify-between sm:gap-2 sm:py-1.5 sm:text-[12px] dark:bg-white/[0.05]">
                           <span className="font-semibold text-ink dark:text-[#f4f1ea]">{r.label}</span>
                           <span className="flex items-center gap-2 text-muted dark:text-[#a89f93]">
                             {r.sub}
-                            {r.link && <a href={r.link} target="_blank" rel="noreferrer" className="text-ink underline dark:text-white"><ExternalLink size={12} /></a>}
+                            {r.link && <a href={r.link} target="_blank" rel="noreferrer" aria-label="Open" className="-m-2 flex h-8 w-8 items-center justify-center text-ink underline dark:text-white"><ExternalLink size={13} /></a>}
                           </span>
                         </div>
                       ))}
