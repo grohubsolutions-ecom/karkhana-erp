@@ -61,6 +61,13 @@ const when = (v: string) => new Date(v).toLocaleString();
 function WarehouseInner({ section }: { section: Tab }) {
   const { can } = usePermissions();
   const canManage = can(["khana.manage"]);
+  /* K178: what a person may RECORD is separate from full control. A
+     warehouse operator brings stock in, sends it out and returns it — he does
+     not add products, edit, rename, void or delete. The database refuses all
+     of that on its own; these only keep the screen from offering it. */
+  const canIn = can(["khana.manage", "khana.stock.in"]);
+  const canOut = can(["khana.manage", "khana.stock.out"]);
+  const canAdd = can(["khana.manage", "khana.products.add"]);
 
   /* Fixed by the route, not chosen on screen. Each warehouse job is its own
      page now, so opening Stock shows stock and nothing else — no tab bar
@@ -814,7 +821,7 @@ function WarehouseInner({ section }: { section: Tab }) {
               {showVoided ? "Hide" : "Show"} voided ({voidedCount})
             </button>
           )}
-          {tab === "materials" && canManage && (
+          {tab === "materials" && canAdd && (
             <button onClick={() => setItemOpen(true)} className="ml-auto flex items-center gap-1.5 rounded-full bg-ink px-4 py-2 text-[13px] font-semibold text-white"><Plus size={15} /> Add product</button>
           )}
         </div>
@@ -986,7 +993,7 @@ function WarehouseInner({ section }: { section: Tab }) {
         {/* ---------- IN / OUT ---------- */}
         {!loading && (tab === "in" || tab === "out") && (
           <>
-            {canManage && (
+            {(tab === "in" ? canIn : canOut) && (
               <div className="rounded-card border border-line bg-surface p-4">
                 <p className="flex items-center gap-1.5 text-[13px] font-bold text-ink">
                   {tab === "in" ? <ArrowDownToLine size={15} /> : <ArrowUpFromLine size={15} />}
@@ -1035,7 +1042,9 @@ function WarehouseInner({ section }: { section: Tab }) {
                       {branches.filter((b) => b.party_id === partyId).map((b) => <option key={b.id} value={b.id}>{b.branch}</option>)}
                     </select>
                     <input value={invNo} onChange={(e) => setInvNo(e.target.value)} placeholder="Party invoice number" className={inp} />
-                    <button onClick={() => setPOpen(true)} className="rounded-xl2 border border-line px-3 py-2 text-[12.5px] font-semibold text-ink/70 hover:bg-panel">+ Party / branch</button>
+                    {canManage && (
+                      <button onClick={() => setPOpen(true)} className="rounded-xl2 border border-line px-3 py-2 text-[12.5px] font-semibold text-ink/70 hover:bg-panel">+ Party / branch</button>
+                    )}
                   </div>
                 )}
                 {tab === "out" && lastInvoice && (
@@ -1103,7 +1112,7 @@ function WarehouseInner({ section }: { section: Tab }) {
                     {/* Add it here rather than sending someone to another screen
                         and back. An unknown barcode at the receiving bench is
                         the moment you know the product needs creating. */}
-                    {canManage && (
+                    {canAdd && (
                       <button
                         onClick={() => {
                           setItemOpen(true); setMadeCode(null);

@@ -31,7 +31,9 @@ const when = (v: string) => new Date(v).toLocaleString();
 
 export default function ReturnsPage() {
   const { can } = usePermissions();
-  const canDo = can(["khana.manage"]);
+  /* K178: GR out is its own permission — an operator can return goods to
+     the supplier without holding full control of the warehouse. */
+  const canDo = can(["khana.manage", "khana.return"]);
 
   const [rows, setRows] = useState<Row[]>([]);
   const [items, setItems] = useState<Item[]>([]);

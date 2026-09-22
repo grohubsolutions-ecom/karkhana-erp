@@ -37,7 +37,7 @@ const when = (v: string) => new Date(v).toLocaleString();
 export default function StrScreen({ side: fixed }: { side: Side }) {
   const { can } = usePermissions();
   const canFactory = can(["production.entry"]);
-  const canWarehouse = can(["khana.manage"]);
+  const canWarehouse = can(["khana.manage", "khana.stock.out"]);
 
   const [rows, setRows] = useState<Row[]>([]);
   const [ready, setReady] = useState<Ready[]>([]);

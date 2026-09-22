@@ -8,8 +8,12 @@ export const ROUTE_PERMS: Record<string, string[] | null> = {
   "/grn": ["inventory.view"],
   "/machine-process": ["production.view", "production.entry"],
   "/staff/induction": ["production.view", "production.entry"],
-  "/warehouse/staff/payroll": ["khana.view", "khana.manage"],
-  "/warehouse/staff/induction": ["khana.view", "khana.manage"],
+  /* K178 — the warehouse is split by what a person does there. Seeing the
+     warehouse (khana.view) no longer opens its staff wages or its reports:
+     a warehouse operator records stock in, stock out and GR out, and that is
+     all his screen shows. Full control (khana.manage) still opens everything. */
+  "/warehouse/staff/payroll": ["khana.manage", "payroll.view"],
+  "/warehouse/staff/induction": ["khana.manage", "process.manage"],
   "/staff/payroll": ["production.view", "production.entry"],
   "/edit-record": ["production.entry", "grn.create"],
   "/reports/factory/grn": ["inventory.view", "production.view"],
@@ -19,18 +23,18 @@ export const ROUTE_PERMS: Record<string, string[] | null> = {
   "/reports/factory/blocked": ["inventory.view", "production.view"],
   "/reports/factory/stock": ["inventory.view", "production.view"],
   "/reports/factory/graph": ["inventory.view", "production.view"],
-  "/reports/warehouse/grn": ["khana.view"],
-  "/reports/warehouse/grout": ["khana.view"],
-  "/reports/warehouse/str": ["khana.view"],
-  "/reports/warehouse/low": ["khana.view"],
-  "/reports/warehouse/blocked": ["khana.view"],
-  "/reports/warehouse/graph": ["khana.view"],
+  "/reports/warehouse/grn": ["khana.manage", "khana.reports"],
+  "/reports/warehouse/grout": ["khana.manage", "khana.reports"],
+  "/reports/warehouse/str": ["khana.manage", "khana.reports"],
+  "/reports/warehouse/low": ["khana.manage", "khana.reports"],
+  "/reports/warehouse/blocked": ["khana.manage", "khana.reports"],
+  "/reports/warehouse/graph": ["khana.manage", "khana.reports"],
   "/str/factory": ["production.view", "production.entry"],
-  "/str/warehouse": ["khana.view", "khana.manage"],
+  "/str/warehouse": ["khana.manage", "khana.stock.out"],
   "/warehouse/products": ["khana.view"],
   "/warehouse/grn-in": ["khana.view"],
   "/warehouse/grn-out": ["khana.view"],
-  "/warehouse/returns": ["khana.view", "khana.manage"],
+  "/warehouse/returns": ["khana.manage", "khana.return"],
   "/grn/out": ["inventory.view", "inventory.issue"],
   "/packing": ["production.view", "production.entry"],
   "/grn/stitching": ["production.view", "production.entry"],
@@ -56,6 +60,8 @@ export const ROUTE_PERMS: Record<string, string[] | null> = {
   "/reports": ["reports.view"],
   "/approvals": ["inventory.approve", "production.approve", "grn.approve"],
   "/administration": ["users.manage", "roles.manage"],
+  /* The Karkhana admin's own room: Karkhana logins and job roles only. */
+  "/karkhana/team": ["karkhana.admin"],
 
   /* THE HUB. Until now not one /online/* path was listed here, so every Hub
      page was open to anyone who could log in — Finance included. The
@@ -79,6 +85,30 @@ export const ROUTE_PERMS: Record<string, string[] | null> = {
   "/online/employees": ["hub.attendance.view", "hub.attendance.manage"],
   "/me": null,
 };
+
+/* WHERE A KARKHANA PERSON LANDS.
+   The Karkhana box used to open /dashboard, which needs reports or stock
+   permissions — so a warehouse operator pressing it met a locked door. He is
+   taken to the first Karkhana screen he can actually use instead. */
+const KARKHANA_LANDING = [
+  "/dashboard", "/warehouse/grn-in", "/warehouse/grn-out", "/warehouse/returns",
+  "/warehouse/products", "/add-article", "/grn", "/machine-process", "/stock",
+  "/karkhana/team",
+];
+export function karkhanaLanding(can: (req: string[] | null) => boolean): string {
+  return KARKHANA_LANDING.find((p) => can(ROUTE_PERMS[p] ?? null)) ?? "/dashboard";
+}
+
+/* Anything that opens a door OTHER than Karkhana on the home screen: the Hub,
+   FS Traders, Administration. Someone with none of these has one department
+   only, so "All departments" would lead him in a circle. Mirrors the `needs`
+   lists on the home screen (app/page.tsx). */
+export const OTHER_DEPARTMENT_PERMS = [
+  "hub.dashboard.view", "hub.orders.view", "hub.logistics.view", "hub.finance.view", "hub.attendance.view",
+  "retail.access", "retail.dashboard.view", "retail.sales.view", "retail.cashbook.view",
+  "retail.expenses.view", "retail.employees.view", "retail.payroll.view",
+  "users.manage", "roles.manage",
+];
 
 export function hasAny(perms: Set<string>, required: string[] | null): boolean {
   if (!required || required.length === 0) return true;

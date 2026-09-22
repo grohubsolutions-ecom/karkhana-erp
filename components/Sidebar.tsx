@@ -5,12 +5,12 @@ import { usePathname, useRouter } from "next/navigation";
 import {
   LayoutDashboard, Boxes, Layers, Factory, Truck, Shirt, ClipboardList,
   FileBarChart, CheckSquare, Gem, LogOut, Wallet, ArrowLeftRight,
-  Warehouse, PackageCheck,
+  Warehouse, PackageCheck, UsersRound,
   ChevronDown, ArrowLeft, type LucideIcon,
 } from "lucide-react";
 import { useProfile } from "@/lib/useProfile";
 import { usePermissions } from "@/lib/usePermissions";
-import { ROUTE_PERMS } from "@/lib/access";
+import { ROUTE_PERMS, OTHER_DEPARTMENT_PERMS } from "@/lib/access";
 import { supabase } from "@/lib/supabase";
 
 /* A child is either a link, or a heading that groups the links under it.
@@ -89,6 +89,10 @@ const NAV: NavItem[] = [
     { label: "Approvals", href: "/approvals" },
   ] },
 
+  /* ═══ TEAM ═══ the Karkhana admin's room (K178): who logs in to Karkhana
+     and what each job role may do. Karkhana people only — the Hub and
+     FS Traders are run from Administration. */
+  { label: "Team & access", href: "/karkhana/team", Icon: UsersRound },
 
 ];
 
@@ -107,6 +111,9 @@ export default function Sidebar({ open, onClose }: { open?: boolean; onClose?: (
   const router = useRouter();
   const profile = useProfile();
   const { ready, can } = usePermissions();
+  /* Someone whose only department is Karkhana has nowhere else to go — the
+     link would take him to the chooser, which sends him straight back. */
+  const hasOtherDepartments = ready && can(OTHER_DEPARTMENT_PERMS);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
   async function logout() {
@@ -140,9 +147,11 @@ export default function Sidebar({ open, onClose }: { open?: boolean; onClose?: (
     <>
       {open && <div className="fixed inset-0 z-40 bg-black/40 md:hidden" onClick={onClose} />}
       <aside className={`flex w-[248px] shrink-0 flex-col border-r border-line bg-surface fixed inset-y-0 left-0 z-50 transition-transform md:static md:z-auto md:translate-x-0 ${open ? "translate-x-0" : "-translate-x-full"}`}>
-      <Link href="/" onClick={onClose} className="flex items-center gap-2 px-6 pt-5 text-[12.5px] font-semibold text-muted transition hover:text-ink">
-        <ArrowLeft size={15} /> All departments
-      </Link>
+      {hasOtherDepartments ? (
+        <Link href="/" onClick={onClose} className="flex items-center gap-2 px-6 pt-5 text-[12.5px] font-semibold text-muted transition hover:text-ink">
+          <ArrowLeft size={15} /> All departments
+        </Link>
+      ) : <div className="pt-5" />}
       <div className="flex items-center gap-2.5 px-6 pb-5 pt-4">
         <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-ink text-white"><Gem size={18} /></span>
         <div className="leading-tight">

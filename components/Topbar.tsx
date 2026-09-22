@@ -1,7 +1,8 @@
 "use client";
-import { Search, Bell, Plus } from "lucide-react";
+import { Search, Plus } from "lucide-react";
 import Link from "next/link";
 import Clock from "./Clock";
+import KarkhanaBell from "./KarkhanaBell";
 
 export default function Topbar({
   title,
@@ -27,10 +28,10 @@ export default function Topbar({
             className="w-40 bg-transparent text-[13px] outline-none placeholder:text-hint lg:w-56"
           />
         </div>
-        <button className="relative flex h-10 w-10 items-center justify-center rounded-full border border-line bg-surface text-ink">
-          <Bell size={17} />
-          <span className="absolute right-2.5 top-2.5 h-2 w-2 rounded-full bg-salmon-strong" />
-        </button>
+        {/* Was a picture of a bell with a red dot that never changed. It is a
+            real one now (K178). On a phone the bell lives in the sticky phone
+            header instead, where it cannot scroll away. */}
+        <div className="hidden md:block"><KarkhanaBell /></div>
         {action && (
           <Link href={action.href} className="flex items-center gap-1.5 rounded-full bg-ink px-4 py-2.5 text-[13px] font-semibold text-white">
             <Plus size={16} /> {action.label}

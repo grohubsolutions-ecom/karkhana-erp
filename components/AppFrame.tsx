@@ -5,6 +5,7 @@ import { Lock } from "lucide-react";
 import Link from "next/link";
 import Sidebar from "./Sidebar";
 import MobileBar from "./MobileBar";
+import KarkhanaBell from "./KarkhanaBell";
 import SetPassword from "./SetPassword";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { PermissionsProvider, usePermissions } from "@/lib/usePermissions";
@@ -47,7 +48,7 @@ function FrameContent({ children }: { children: React.ReactNode }) {
     <div className="flex h-[100dvh] overflow-hidden bg-canvas">
       <Sidebar open={navOpen} onClose={() => setNavOpen(false)} />
       <div className="flex min-w-0 flex-1 flex-col">
-        <MobileBar title="Karkhana" onOpen={() => setNavOpen(true)} />
+        <MobileBar title="Karkhana" onOpen={() => setNavOpen(true)} right={<KarkhanaBell />} />
         <main className="min-w-0 flex-1 overflow-y-auto overflow-x-hidden">
           {!ready ? null : allowed ? children : <AccessRestricted />}
         </main>

@@ -6,6 +6,7 @@ import { Factory, ShoppingBag, Store, ShieldCheck, ChevronRight, LogOut } from "
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import ThemeToggle from "@/components/ThemeToggle";
 import { usePermissions } from "@/lib/usePermissions";
+import { karkhanaLanding } from "@/lib/access";
 
 const DEPARTMENTS = [
   /* EVERY BOX NEEDS A PERMISSION, not just Administration.
@@ -17,7 +18,10 @@ const DEPARTMENTS = [
 
      A box now appears only if the person can reach something behind it. */
   { href: "/dashboard", title: "Karkhana", subtitle: "Production, materials, inventory & payroll", icon: Factory, light: "bg-amber-soft", chip: "dark:bg-amber",
-    needs: ["inventory.view", "production.view", "reports.view", "employees.manage", "payments.manage"] },
+    /* khana.view and karkhana.admin (K178): a warehouse operator and a
+       Karkhana admin are Karkhana people, and neither needs reports. */
+    needs: ["inventory.view", "production.view", "reports.view", "employees.manage", "payments.manage",
+            "khana.view", "karkhana.admin"] },
   { href: "/online", title: "Hub Department", subtitle: "Online orders · Little Minors, TopShop, Trenzee", icon: ShoppingBag, light: "bg-periwinkle-soft", chip: "dark:bg-periwinkle",
     needs: ["hub.dashboard.view", "hub.orders.view", "hub.logistics.view", "hub.finance.view", "hub.attendance.view"] },
   /* These two permissions never existed. The table has retail.access and, since
@@ -55,10 +59,24 @@ export default function DepartmentChooser() {
     if (ready && visible.length === 0) router.replace("/me");
   }, [ready, visible.length, router]);
 
+  /* ONE DOOR, NO LOBBY — for Karkhana people.
+     A Karkhana employee (or the Karkhana admin) has exactly one box here. A
+     chooser with a single choice is a click that tells him nothing, so he is
+     taken straight to his first Karkhana screen. Only Karkhana: the Hub and
+     FS Traders decide their own front doors. */
+  const onlyKarkhana = ready && visible.length === 1 && visible[0].title === "Karkhana";
+  const landing = ready ? karkhanaLanding(can) : "/dashboard";
+  useEffect(() => {
+    if (onlyKarkhana) router.replace(landing);
+  }, [onlyKarkhana, landing, router]);
+
   useEffect(() => {
     if (!isSupabaseConfigured || !supabase) return;
     supabase.auth.getSession().then(({ data }) => setEmail(data.session?.user?.email ?? ""));
   }, []);
+
+  /* Nothing to choose — do not flash a one-box chooser on the way through. */
+  if (onlyKarkhana) return <div className="min-h-screen bg-canvas dark:bg-[#17140f]" />;
 
   async function signOut() {
     if (supabase) await supabase.auth.signOut();
@@ -96,7 +114,7 @@ export default function DepartmentChooser() {
             {visible.map(({ href, title, subtitle, icon: Icon, light, chip }) => (
               <Link
                 key={href}
-                href={href}
+                href={title === "Karkhana" ? landing : href}
                 className={`reveal group flex items-center gap-4 rounded-card border border-line ${light} px-5 py-[18px] shadow-soft transition-all duration-200 hover:-translate-y-0.5 hover:shadow-card dark:border-white/[0.06] dark:bg-[#201c17] dark:shadow-none dark:hover:bg-[#26221b]`}
               >
                 <span className={`flex h-12 w-12 flex-none items-center justify-center rounded-[15px] bg-ink text-white dark:text-[#141414] ${chip}`}>
