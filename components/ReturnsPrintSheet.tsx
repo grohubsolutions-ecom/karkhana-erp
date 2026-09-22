@@ -24,10 +24,12 @@
  *   because phones block a window opened after an await.
  */
 import { useState } from "react";
-import { Printer, Loader2 } from "lucide-react";
+import { Printer, Loader2, FileSpreadsheet, FileDown } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { rangeDates } from "@/lib/dateRange";
 import Modal, { btnPrimary, btnGhost, inputCls, Field } from "@/components/Modal";
+import { exportExcel, exportPDF, type ExportTable } from "@/lib/export";
+import { downloadBoardExcel, downloadBoardPdf } from "@/lib/returnsBoardExport";
 
 type R = {
   tracking_id: string; order_number: string | null; store_code: string | null;
@@ -71,7 +73,7 @@ export default function ReturnsPrintButton({ store = "ALL" }: { store?: string }
   const [period, setPeriod] = useState("7d");
   const [courier, setCourier] = useState("Both");
   const [st, setSt] = useState(store);
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState<"" | "print" | "xlsx" | "pdf">("");
   const [err, setErr] = useState("");
 
   async function fetchRows(from: string | null, to: string | null): Promise<R[]> {
@@ -114,7 +116,7 @@ export default function ReturnsPrintButton({ store = "ALL" }: { store?: string }
     const w = window.open("", "_blank");
     if (!w) { setErr("The browser blocked the print window. Allow pop-ups for this site and press Print again."); return; }
     w.document.write("<p style='font:14px system-ui;padding:24px'>Preparing the returns sheet…</p>");
-    setBusy(true);
+    setBusy("print");
     try {
       const [from, to] = scope === "pending" ? [null, null] : rangeDates(period);
       const rows = await fetchRows(from, to);
@@ -128,7 +130,39 @@ export default function ReturnsPrintButton({ store = "ALL" }: { store?: string }
     } catch (e) {
       w.close();
       setErr(e instanceof Error ? e.message : String(e));
-    } finally { setBusy(false); }
+    } finally { setBusy(""); }
+  }
+
+  /* DOWNLOADS — the same rows as the printout, as a file to keep or send.
+     The board comes out as the board (merged courier and store headings,
+     order and date in every column). The detailed list goes through the
+     app's standard exporter, which already writes ruled Excel and PDF tables. */
+  async function download(kind: "xlsx" | "pdf") {
+    if (!supabase) return;
+    setErr(""); setBusy(kind);
+    try {
+      const [from, to] = scope === "pending" ? [null, null] : rangeDates(period);
+      const rows = await fetchRows(from, to);
+      const o: Opts = { scope, from, to, courier, store: st };
+      if (layout === "board") {
+        if (kind === "xlsx") downloadBoardExcel(rows, o); else downloadBoardPdf(rows, o);
+      } else {
+        const sorted = rows.slice().sort((a, b) =>
+          String(a.courier ?? "").localeCompare(String(b.courier ?? ""))
+          || String(b.return_date ?? "").localeCompare(String(a.return_date ?? "")));
+        const table: ExportTable = {
+          title: scope === "pending" ? "Pending returns" : "Returns",
+          headers: ["#", "Courier", "Store", "Order", "Returned", "Tracking", "Customer", "City", "Phone", "COD"],
+          rows: sorted.map((r, i) => [i + 1, r.courier ?? "", r.store_code ?? "", r.order_number ?? "",
+            r.return_date ?? "", r.tracking_id, r.customer_name ?? "", r.city ?? "", r.phone ?? "",
+            Number(r.cod_amount) || 0]),
+        };
+        if (kind === "xlsx") exportExcel(table); else exportPDF(table);
+      }
+      setOpen(false);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally { setBusy(""); }
   }
 
   const chip = (on: boolean) =>
@@ -140,7 +174,7 @@ export default function ReturnsPrintButton({ store = "ALL" }: { store?: string }
     <>
       <button onClick={() => { setSt(store); setErr(""); setOpen(true); }}
         className="flex items-center justify-center gap-2 rounded-full border border-line bg-surface px-4 py-2 text-[13px] font-semibold text-ink transition hover:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:hover:bg-white/[0.12]">
-        <Printer size={14} /> Print sheet
+        <Printer size={14} /> Print / download
       </button>
 
       <Modal open={open} onClose={() => !busy && setOpen(false)}
@@ -184,10 +218,16 @@ export default function ReturnsPrintButton({ store = "ALL" }: { store?: string }
 
         {err && <div className="mt-3 rounded-card border border-red-300 bg-red-50 p-3 text-[13px] text-red-800">{err}</div>}
 
-        <div className="mt-5 flex justify-end gap-2">
-          <button className={btnGhost} disabled={busy} onClick={() => setOpen(false)}>Cancel</button>
-          <button className={btnPrimary} disabled={busy} onClick={print}>
-            {busy ? <Loader2 size={14} className="animate-spin" /> : <Printer size={14} />} Print
+        <div className="mt-5 flex flex-wrap justify-end gap-2">
+          <button className={btnGhost} disabled={!!busy} onClick={() => setOpen(false)}>Cancel</button>
+          <button className={btnGhost} disabled={!!busy} onClick={() => download("xlsx")}>
+            {busy === "xlsx" ? <Loader2 size={14} className="animate-spin" /> : <FileSpreadsheet size={14} />} Excel
+          </button>
+          <button className={btnGhost} disabled={!!busy} onClick={() => download("pdf")}>
+            {busy === "pdf" ? <Loader2 size={14} className="animate-spin" /> : <FileDown size={14} />} PDF
+          </button>
+          <button className={btnPrimary} disabled={!!busy} onClick={print}>
+            {busy === "print" ? <Loader2 size={14} className="animate-spin" /> : <Printer size={14} />} Print
           </button>
         </div>
       </Modal>
