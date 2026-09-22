@@ -7,6 +7,7 @@ import Modal, { Field, inputCls, btnPrimary, btnGhost } from "@/components/Modal
 import { rangeDates, rs } from "@/lib/dateRange";
 import { HubRange, PageActions, useIsPhone, Sheet, Detail } from "@/components/HubUI";
 import { useLiveTables } from "@/lib/useLiveTables";
+import ReturnsPrintButton from "@/components/ReturnsPrintSheet";
 
 /* Returns live under Logistics, not Finance — a return is a parcel problem
    first and a money problem second, and the people chasing them are the
@@ -284,6 +285,7 @@ export default function ReturnsPage() {
           <p className="mt-1 text-[13px] text-muted dark:text-[#a89f93]">{TABS.find((t) => t.key === tab)?.hint}</p>
         </div>
         <PageActions>
+          <ReturnsPrintButton store={store} />
           <button onClick={() => load()} className="flex items-center justify-center gap-2 rounded-full border border-line bg-surface px-4 py-2 text-[13px] font-semibold text-ink transition hover:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:hover:bg-white/[0.12]">
             <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> Refresh
           </button>
