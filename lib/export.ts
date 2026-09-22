@@ -19,6 +19,20 @@
  */
 export type ExportTable = { title: string; headers: string[]; rows: (string | number | null | undefined)[][] };
 
+/* TWO LAYOUTS.
+ *
+ * KARKHANA (the default): every cell centred, every column only as wide as
+ * what is in it, the table centred on the page, and — in print — fitted to
+ * ONE sheet whenever that still leaves it readable. Asked for by the owner
+ * (22 Sep): "single sheet, centre aligned, columns not too large".
+ *
+ * CLASSIC: the layout as it was — left-aligned text, numbers on the right,
+ * the table stretched across the page. FS Traders' pages (/retail) keep it:
+ * they share this file but are not Karkhana's to change, so their printouts
+ * stay exactly as that team left them.
+ */
+const classic = () => typeof window !== "undefined" && window.location.pathname.startsWith("/retail");
+
 const cell = (v: unknown) => (v == null ? "" : String(v));
 
 /* A quantity, a price, a percentage — but not a barcode. A long run of digits
@@ -119,8 +133,15 @@ export function exportExcel({ title, headers, rows }: ExportTable) {
     return `<c r="${ref}" t="inlineStr" s="${style}"><is><t xml:space="preserve">${xml(t)}</t></is></c>`;
   };
 
-  const widths = headers.map((h, ci) => Math.min(60, Math.max(8,
+  const compact = !classic();
+  /* Compact: a column is as wide as its longest entry and no wider than 42
+     characters — past that a name wraps inside its cell instead of pushing
+     every other column off the sheet. */
+  const widths = headers.map((h, ci) => Math.min(compact ? 42 : 60, Math.max(compact ? 6 : 8,
     String(h).length + 2, ...rows.map((r) => cell(r[ci]).length + 2))));
+  const narrow = widths.reduce((a, b) => a + b, 0) <= 95;
+  const al = compact ? `<alignment horizontal="center" vertical="center" wrapText="1"/>` : `<alignment vertical="top"/>`;
+  const alHead = compact ? `<alignment horizontal="center" vertical="center" wrapText="1"/>` : `<alignment vertical="center"/>`;
   const sheetName = (title.replace(/[\[\]:*?/\\']/g, " ").trim() || "Sheet").slice(0, 31);
   const last = `${colName(headers.length - 1)}${rows.length + 1}`;
 
@@ -138,8 +159,12 @@ export function exportExcel({ title, headers, rows }: ExportTable) {
     rows.map((r, ri) => `<row r="${ri + 2}">${headers.map((_, ci) => cellXml(r[ci], `${colName(ci)}${ri + 2}`, ci)).join("")}</row>`).join("") +
     `</sheetData>` +
     `<autoFilter ref="A1:${last}"/>` +
+    /* printOptions must come before pageMargins — Excel refuses the file otherwise. */
+    (compact ? `<printOptions horizontalCentered="1"/>` : "") +
     `<pageMargins left="0.3" right="0.3" top="0.4" bottom="0.4" header="0.2" footer="0.2"/>` +
-    `<pageSetup orientation="landscape" paperSize="9" fitToWidth="1" fitToHeight="0"/>` +
+    /* Compact: portrait when the columns fit it, and one sheet tall when the
+       list is short enough to stay readable on one. */
+    `<pageSetup orientation="${compact && narrow ? "portrait" : "landscape"}" paperSize="9" fitToWidth="1" fitToHeight="${compact && rows.length <= 60 ? 1 : 0}"/>` +
     `</worksheet>`;
 
   const styles =
@@ -156,15 +181,15 @@ export function exportExcel({ title, headers, rows }: ExportTable) {
     `<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>` +
     `<cellXfs count="10">` +
     `<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>` +
-    `<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1"><alignment vertical="top"/></xf>` +
-    `<xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1"><alignment vertical="center"/></xf>` +
-    `<xf numFmtId="49" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1"><alignment vertical="top"/></xf>` +
-    `<xf numFmtId="3" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1"><alignment vertical="top"/></xf>` +
-    `<xf numFmtId="4" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1"><alignment vertical="top"/></xf>` +
-    `<xf numFmtId="164" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1"><alignment vertical="top"/></xf>` +
-    `<xf numFmtId="165" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1"><alignment vertical="top"/></xf>` +
-    `<xf numFmtId="9" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1"><alignment vertical="top"/></xf>` +
-    `<xf numFmtId="10" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1"><alignment vertical="top"/></xf>` +
+    `<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1">${al}</xf>` +
+    `<xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1">${alHead}</xf>` +
+    `<xf numFmtId="49" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1" applyAlignment="1">${al}</xf>` +
+    `<xf numFmtId="3" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1" applyAlignment="1">${al}</xf>` +
+    `<xf numFmtId="4" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1" applyAlignment="1">${al}</xf>` +
+    `<xf numFmtId="164" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1" applyAlignment="1">${al}</xf>` +
+    `<xf numFmtId="165" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1" applyAlignment="1">${al}</xf>` +
+    `<xf numFmtId="9" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1" applyAlignment="1">${al}</xf>` +
+    `<xf numFmtId="10" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1" applyAlignment="1">${al}</xf>` +
     `</cellXfs>` +
     `<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>` +
     `</styleSheet>`;
@@ -283,11 +308,11 @@ export function exportPDF({ title, headers, rows }: ExportTable) {
      a line under every row, a line between every column, a box round it all.
      No library: a PDF dependency for one table is a lot of weight to carry.
   */
-  const W = 842, H = 595, M = 28;            // A4 landscape, points
-  const PAD = 3.5;                            // text inset inside each cell
+  const compact = !classic();
+  const M = 28;                               // page margin, points
+  const PAD = compact ? 5 : 3.5;              // text inset inside each cell
   const RH = 13, HH = 15;                     // row and header heights
   const FS = 8;                               // font size, body and header
-  const usable = W - M * 2;
   const right = numericColumns(headers, rows);
 
   /* PDF base fonts carry Latin-1 only. The marks this app uses most become
@@ -303,7 +328,7 @@ export function exportPDF({ title, headers, rows }: ExportTable) {
   const pdfStr = (t: string) => t.replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
   /* Trim to fit its box, measured, with a full stop to show it was trimmed. */
   const fit = (t: string, w: number, font: "F1" | "F2", size = FS) => {
-    if (textW(t, font, size) <= w) return t;
+    if (textW(t, font, size) <= w + 0.01) return t;   /* + a hair: a width measured to fit exactly must not lose its last letter to rounding */
     let v = t;
     while (v.length > 1 && textW(v + ".", font, size) > w) v = v.slice(0, -1);
     return v + ".";
@@ -319,9 +344,17 @@ export function exportPDF({ title, headers, rows }: ExportTable) {
     textW(hdr[ci], "F2", FS) + PAD * 2,
     ...body.map((r) => textW(r[ci], "F1", FS) + PAD * 2)));
   const total = natural.reduce((a, b) => a + b, 0);
+  /* Compact: portrait when the table fits across it — more rows to a sheet,
+     so a normal invoice or day's list is one page — landscape otherwise. */
+  const portrait = compact && total <= 595 - M * 2;
+  const W = portrait ? 595 : 842, H = portrait ? 842 : 595;   // A4, points
+  const usable = W - M * 2;
   let cw: number[];
   if (total <= usable) {
-    cw = natural.map((w) => w * (usable / total));
+    /* Classic stretched every column to fill the page, which made a
+       two-digit quantity column as wide as a product name. Compact keeps
+       each column its own width and centres the table instead. */
+    cw = compact ? natural.slice() : natural.map((w) => w * (usable / total));
   } else {
     const FLOOR = 90;
     const give = natural.map((w) => Math.max(0, w - FLOOR));
@@ -331,7 +364,10 @@ export function exportPDF({ title, headers, rows }: ExportTable) {
       ? natural.map((w, ci) => w - give[ci] * (excess / giveTotal))
       : natural.map((w) => w * (usable / total));
   }
-  const edge = cw.reduce<number[]>((acc, w, i) => { acc.push(acc[i] + w); return acc; }, [M]);
+  const tableW = cw.reduce((a, b) => a + b, 0);
+  const x0 = compact ? M + Math.max(0, (usable - tableW) / 2) : M;
+  const x1 = x0 + tableW;
+  const edge = cw.reduce<number[]>((acc, w, i) => { acc.push(acc[i] + w); return acc; }, [x0]);
 
   const top0 = H - M - 30;                    // below the title and the meta line
   const perPage = Math.max(1, Math.floor((top0 - M - HH) / RH));
@@ -344,20 +380,23 @@ export function exportPDF({ title, headers, rows }: ExportTable) {
   const put = (v: string, ci: number, rowTop: number, h: number, font: "F1" | "F2") => {
     const s = fit(v, cw[ci] - PAD * 2, font);
     const y = rowTop - h / 2 - FS * 0.35;     // vertically centred in the row
-    const x = right[ci] ? edge[ci + 1] - PAD - textW(s, font, FS) : edge[ci] + PAD;
+    const x = compact ? edge[ci] + (cw[ci] - textW(s, font, FS)) / 2
+            : right[ci] ? edge[ci + 1] - PAD - textW(s, font, FS) : edge[ci] + PAD;
     return text(x, y, font, FS, s);
   };
 
   const streams = pages.map((pageRows, pi) => {
-    let t = text(M, H - M, "F2", 13, fit(ascii(title), usable, "F2", 13));
-    t += text(M, H - M - 14, "F1", 8,
-      ascii(`${new Date().toLocaleString()} - page ${pi + 1} of ${pages.length} - ${rows.length} row(s)`));
+    const ttl = fit(ascii(title), usable, "F2", 13);
+    const meta = ascii(`${new Date().toLocaleString()} - page ${pi + 1} of ${pages.length} - ${rows.length} row(s)`);
+    /* Compact: title and meta centred over the table, like the cells. */
+    let t = text(compact ? (W - textW(ttl, "F2", 13)) / 2 : M, H - M, "F2", 13, ttl);
+    t += text(compact ? (W - textW(meta, "F1", 8)) / 2 : M, H - M - 14, "F1", 8, meta);
 
     const top = top0;
     const bottom = top - HH - pageRows.length * RH;
 
     /* Header band first, so its text and the grid sit on top of it. */
-    t += `0.88 g ${M} ${(top - HH).toFixed(2)} ${usable.toFixed(2)} ${HH} re f 0 g\n`;
+    t += `0.88 g ${x0.toFixed(2)} ${(top - HH).toFixed(2)} ${tableW.toFixed(2)} ${HH} re f 0 g\n`;
     hdr.forEach((h, ci) => { t += put(h, ci, top, HH, "F2"); });
     pageRows.forEach((r, ri) => {
       const rowTop = top - HH - ri * RH;
@@ -368,14 +407,14 @@ export function exportPDF({ title, headers, rows }: ExportTable) {
     t += "0.3 G 0.5 w\n";
     for (let ri = 1; ri < pageRows.length; ri++) {
       const y = (top - HH - ri * RH).toFixed(2);
-      t += `${M} ${y} m ${W - M} ${y} l S\n`;
+      t += `${x0.toFixed(2)} ${y} m ${x1.toFixed(2)} ${y} l S\n`;
     }
     edge.slice(1, -1).forEach((x) => {
       t += `${x.toFixed(2)} ${top} m ${x.toFixed(2)} ${bottom.toFixed(2)} l S\n`;
     });
     /* Heavier: the box round the table and the line under the header. */
-    t += `0.1 G 1 w ${M} ${bottom.toFixed(2)} ${usable.toFixed(2)} ${(top - bottom).toFixed(2)} re S\n`;
-    t += `${M} ${(top - HH).toFixed(2)} m ${W - M} ${(top - HH).toFixed(2)} l S\n`;
+    t += `0.1 G 1 w ${x0.toFixed(2)} ${bottom.toFixed(2)} ${tableW.toFixed(2)} ${(top - bottom).toFixed(2)} re S\n`;
+    t += `${x0.toFixed(2)} ${(top - HH).toFixed(2)} m ${x1.toFixed(2)} ${(top - HH).toFixed(2)} l S\n`;
     return t;
   });
 
@@ -412,7 +451,92 @@ export function exportPDF({ title, headers, rows }: ExportTable) {
  * on screen come out faint or not at all on an office printer. The header
  * shading is told to print — browsers drop backgrounds on paper otherwise.
  */
-export function printTable({ title, headers, rows }: ExportTable) {
+export function printTable(t: ExportTable) {
+  if (classic()) { printClassic(t); return; }
+  const { title, headers, rows } = t;
+  const codes = codeColumns(headers, rows);
+  const shown = rows.map((r) => headers.map((_, ci) => display(r[ci], codes[ci])));
+  /* A column whose longest entry is long (a product name) may wrap inside its
+     cell; every other column stays on one line at its own width. That is
+     what keeps the columns from being "too large": none is stretched to fill
+     the page, and none is widened by one long name in another. */
+  const wraps = headers.map((_, ci) => Math.max(0, ...shown.map((r) => r[ci].length)) > 34);
+  const strong = (r: string[]) => /^(sub)?total\b/i.test(r.find((v) => v.trim() !== "") ?? "");
+  const td = (v: string, ci: number) =>
+    `<td>${wraps[ci] ? `<span class="w">${escapeHtml(v)}</span>` : escapeHtml(v)}</td>`;
+  printSheet(title,
+    `<div class="head"><h1>${escapeHtml(title)}</h1>` +
+    `<p class="meta">${escapeHtml(new Date().toLocaleString())} &middot; ${rows.length} row(s)</p></div>` +
+    `<table><thead><tr>${headers.map((h) => `<th>${escapeHtml(h)}</th>`).join("")}</tr></thead>` +
+    `<tbody>${shown.map((r) => `<tr${strong(r) ? ` class="tot"` : ""}>${r.map(td).join("")}</tr>`).join("")}</tbody></table>`);
+}
+
+/* PRINT ONE SHEET — shared by the table print above and the invoice print.
+ *
+ * The page is laid out at its natural size first, then measured. If it fits
+ * on one A4 sheet — portrait or landscape, whichever needs less shrinking —
+ * at 60% or more, it is scaled to exactly one sheet. Only when that would
+ * make the text too small to read does it run over several pages; then it is
+ * fitted to the page WIDTH, so no column is ever cut off the edge, and the
+ * column headings repeat on every page.
+ * Everything is centred: the title, the table on the page, the text in each
+ * cell. The grid is near-black so it survives an office printer.
+ */
+export function printSheet(title: string, bodyHtml: string) {
+  const w = window.open("", "_blank", "width=1000,height=760");
+  if (!w) return;   /* pop-up blocked — nothing else to do about it here */
+  w.document.write(
+    `<html><head><title>${escapeHtml(title)}</title><style>
+      *{-webkit-print-color-adjust:exact;print-color-adjust:exact;box-sizing:border-box}
+      html,body{margin:0;padding:0}
+      body{font-family:Arial,Helvetica,sans-serif;color:#111;text-align:center}
+      #sheet{display:inline-block;text-align:center;padding:0}
+      .head{margin:0 0 8px}
+      h1{font-size:15px;margin:0 0 2px}
+      .meta{font-size:10px;color:#57534e;margin:0}
+      table{border-collapse:collapse;margin:0 auto;font-size:10px;border:1.3px solid #111}
+      th,td{border:1px solid #444;padding:3px 8px;text-align:center;vertical-align:middle;white-space:nowrap;line-height:1.3}
+      th{background:#e7e5e4;font-size:9px;text-transform:uppercase;letter-spacing:.03em;border-bottom:1.3px solid #111}
+      td .w{display:inline-block;max-width:62mm;white-space:normal}
+      tr.tot td{font-weight:bold;background:#f5f5f4}
+      thead{display:table-header-group}
+      tr{break-inside:avoid}
+      .box{border:1.3px solid #111;padding:6px 10px;margin:0 auto 8px;display:inline-block}
+      .grid{display:grid;grid-template-columns:auto auto auto auto;gap:3px 14px;font-size:10.5px;text-align:left}
+      .grid b{font-weight:bold}
+      .sign{display:flex;justify-content:space-between;gap:40px;margin-top:34px;font-size:10px}
+      .sign span{border-top:1px solid #111;padding-top:3px;min-width:150px;text-align:center}
+      .foot{font-size:9px;color:#57534e;margin-top:8px}
+    </style></head><body><div id="sheet">${bodyHtml}</div>
+    <script>
+      (function(){
+        var mm=96/25.4, m=8, sheet=document.getElementById('sheet');
+        var w=sheet.scrollWidth, h=sheet.scrollHeight;
+        var P={w:(210-2*m)*mm,h:(297-2*m)*mm}, L={w:(297-2*m)*mm,h:(210-2*m)*mm};
+        var oneP=Math.min(1,P.w/w,P.h/h), oneL=Math.min(1,L.w/w,L.h/h);
+        var o, s;
+        if (Math.max(oneP,oneL) >= 0.6) { o = oneP >= oneL ? 'portrait' : 'landscape'; s = Math.max(oneP,oneL); }
+        else if (w <= P.w) { o='portrait'; s=1; }
+        else { o='landscape'; s=Math.min(1,L.w/w); }
+        /* Several pages: the wrapper becomes an ordinary block. Measured as an
+           inline block it gives the table's true width, but left that way the
+           browser stops repeating the column headings on each new page. */
+        if (!(Math.max(oneP,oneL) >= 0.6)) sheet.style.display='block';
+        var st=document.createElement('style');
+        st.textContent='@page{size:A4 '+o+';margin:'+m+'mm}';
+        document.head.appendChild(st);
+        if (s<1) document.body.style.zoom=s;
+        document.body.setAttribute('data-fit', o+' '+s.toFixed(3));
+        setTimeout(function(){window.print()},60);
+      })();
+    </script>
+    </body></html>`
+  );
+  w.document.close();
+}
+
+/* The layout as it was, for FS Traders (see `classic` above). */
+function printClassic({ title, headers, rows }: ExportTable) {
   const w = window.open("", "_blank", "width=1000,height=760");
   if (!w) return;   /* pop-up blocked — nothing else to do about it here */
   const right = numericColumns(headers, rows);

@@ -12,13 +12,14 @@
  */
 import { Fragment, useCallback, useEffect, useMemo, useState, Suspense } from "react";
 
-import { Boxes, Plus, Loader2, Download, Undo2, Pencil, Trash2, ArrowDownToLine, ArrowUpFromLine , Printer } from "lucide-react";
+import { Boxes, Plus, Loader2, Download, Undo2, Pencil, Trash2, ArrowDownToLine, ArrowUpFromLine , Printer, BookOpen } from "lucide-react";
 import Topbar from "@/components/Topbar";
 import ItemHistory from "@/components/ItemHistory";
 import Modal, { Field } from "@/components/Modal";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { usePermissions } from "@/lib/usePermissions";
 import { exportCSV, exportExcel, exportPDF, type ExportTable, printTable } from "@/lib/export";
+import InvoiceBook, { MissingInvoices, scopeKey, type RegRow } from "@/components/warehouse/InvoiceBook";
 
 type Item = { item_id: string; barcode: string; name: string; description: string | null;
               raw_material_reference: string | null; category: string | null; is_active: boolean;
@@ -34,7 +35,9 @@ type Move = { id: string; movement_no: string | null; movement_type: "IN" | "OUT
               /* Already in v_khana_movements (K174) — the printed barcode and
                  the money, used by the New GRN list, filters and totals. */
               manual_code: string | null; cost_total: number | null; retail_total: number | null };
-type Party = { id: string; name: string };
+/* sequence_mode: whose invoice numbers run in one line — the whole party
+   (Carrefour: per_party) or each branch on its own (TopShop: per_branch). */
+type Party = { id: string; name: string; sequence_mode?: string };
 /* How many recent movements the lists hold. When a list reaches it, the
    screen says so — an older entry missing from a filter would otherwise look
    like it never happened. Each product's own history has no such cap. */
@@ -218,7 +221,7 @@ function WarehouseInner({ section }: { section: Tab }) {
     const [i, m, pa, br] = await Promise.all([
       supabase.from("v_khana_stock").select("*").order("name"),
       supabase.from("v_khana_movements").select("*").order("created_at", { ascending: false }).limit(LIST_CAP),
-      supabase.from("khana_parties").select("id,name").eq("is_active", true).order("name"),
+      supabase.from("khana_parties").select("id,name,sequence_mode").eq("is_active", true).order("name"),
       supabase.from("v_khana_branches").select("id,party_id,party,branch,deliveries").eq("is_active", true).order("branch"),
     ]);
     setParties((pa.data as Party[]) ?? []);
@@ -227,8 +230,54 @@ function WarehouseInner({ section }: { section: Tab }) {
     setItems((i.data as Item[]) ?? []);
     setMoves((m.data as Move[]) ?? []);
     setLoading(false);
+    loadRegister();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   useEffect(() => { load(); }, [load]);
+
+  /* THE INVOICE BOOK (K179): every invoice number of every party, in order,
+     with the missing ones. Asked of the database, not worked out from the
+     movement list — that list is capped, the sequence must not be. */
+  const [register, setRegister] = useState<RegRow[]>([]);
+  const [regErr, setRegErr] = useState("");
+  const loadRegister = useCallback(async () => {
+    if (!supabase || section !== "out") return;
+    const { data, error } = await supabase.rpc("khana_invoice_register");
+    if (error) {
+      setRegErr(/function .* does not exist|could not find the function/i.test(error.message)
+        ? "The invoice book needs the K179 database update. Run K179_invoice_book.sql in Supabase, then refresh."
+        : error.message);
+      return;
+    }
+    setRegErr("");
+    setRegister((data as RegRow[]) ?? []);
+  }, [section]);
+  const [bookOpen, setBookOpen] = useState(false);
+  const [bookFocus, setBookFocus] = useState<{ scope: string; invoice?: string } | null>(null);
+  const [missOpen, setMissOpen] = useState(false);
+  const missingCount = register.filter((r) => r.status === "missing").length;
+  /* The pop-up opens by itself when the sequence has holes nobody has
+     explained — once per sitting for the same holes; a new hole brings it
+     back. */
+  const missingKeys = register.filter((r) => r.status === "missing").map((r) => `${scopeKey(r)}:${r.invoice_no}`);
+  const readSeen = () => {
+    try { return new Set((sessionStorage.getItem("kk-missing-invoices") ?? "").split(",").filter(Boolean)); }
+    catch { return new Set<string>(); }   /* private window: it just asks again */
+  };
+  useEffect(() => {
+    if (section !== "out" || missingKeys.length === 0) return;
+    const seen = readSeen();
+    /* Only a hole not already put off this sitting brings it back. */
+    if (missingKeys.some((k) => !seen.has(k))) setMissOpen(true);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [register, section]);
+  function closeMissing() {
+    const seen = readSeen();
+    missingKeys.forEach((k) => seen.add(k));
+    try { sessionStorage.setItem("kk-missing-invoices", [...seen].join(",")); } catch { /* private window */ }
+    setMissOpen(false);
+  }
+  const openBook = (focus: { scope: string; invoice?: string } | null) => { setBookFocus(focus); setBookOpen(true); };
 
   const inRange = (iso: string | null) => {
     if (!iso) return !days && !dFrom && !dTo;   // never moved: only in "All time"
@@ -281,11 +330,17 @@ function WarehouseInner({ section }: { section: Tab }) {
     if (nums.length) return nums.reduce((hi, v) => (BigInt(v) > BigInt(hi) ? v : hi));
     return rows.find((r) => r.invoice_no)?.invoice_no ?? null;
   };
+  /* WHOSE SEQUENCE. Carrefour numbers its invoices across all its branches,
+     so its next number is the highest given to ANY Carrefour branch — asking
+     per branch offered GUGRANWALA 12619 when Islamabad WTC already had it.
+     TopShop and Online number each branch on its own. */
+  const perParty = parties.find((p) => p.id === partyId)?.sequence_mode === "per_party";
+  const inScope = (m: { party_id: string | null; branch_id: string | null }) =>
+    m.party_id === partyId && (perParty || (branchId ? m.branch_id === branchId : !m.branch_id));
   const localInvoice = useMemo(() => topOf(
-    moves.filter((m) => m.movement_type === "OUT" && !m.voided_at
-      && m.invoice_no && m.party_id === partyId
-      && (branchId ? m.branch_id === branchId : !m.branch_id))
-  ), [moves, partyId, branchId]);
+    moves.filter((m) => m.movement_type === "OUT" && !m.voided_at && m.invoice_no && inScope(m))
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  ), [moves, partyId, branchId, perParty]);
 
   /* The movement list is capped, so on a busy branch the highest invoice can
      fall off the end of it and never be seen here. One narrow query per
@@ -299,13 +354,13 @@ function WarehouseInner({ section }: { section: Tab }) {
       let qy = supabase.from("v_khana_movements").select("invoice_no")
         .eq("movement_type", "OUT").eq("party_id", partyId)
         .is("voided_at", null).not("invoice_no", "is", null);
-      qy = branchId ? qy.eq("branch_id", branchId) : qy.is("branch_id", null);
+      if (!perParty) qy = branchId ? qy.eq("branch_id", branchId) : qy.is("branch_id", null);
       const { data, error } = await qy;
       if (dead) return;
       setBranchTop(error ? null : topOf((data as { invoice_no: string | null }[]) ?? []));
     })();
     return () => { dead = true; };
-  }, [partyId, branchId, moves]);
+  }, [partyId, branchId, moves, perParty]);
 
   const lastInvoice = useMemo(() => {
     const both = [branchTop, localInvoice].filter((v): v is string => !!v);
@@ -315,18 +370,32 @@ function WarehouseInner({ section }: { section: Tab }) {
     if (!lastInvoice || !/^\d+$/.test(lastInvoice)) return null;
     return String(BigInt(lastInvoice) + BigInt(1)).padStart(lastInvoice.length, "0");
   }, [lastInvoice]);
-  const invoiceGap = !!(expectedInvoice && invNo.trim() && invNo.trim() !== expectedInvoice);
+  /* The sequence this form is writing into, from the invoice book. */
+  const scopeNow = partyId ? `${partyId}|${perParty ? "" : (branchId || "")}` : "";
+  const bookRows = useMemo(() => register.filter((r) => scopeKey(r) === scopeNow), [register, scopeNow]);
+  /* A number the book already lists as missing is being FILLED, not skipped. */
+  const fillsGap = !!invNo.trim() && bookRows.some((r) => r.status === "missing" && r.invoice_no === invNo.trim());
+  const invoiceGap = !!(expectedInvoice && invNo.trim() && invNo.trim() !== expectedInvoice) && !fillsGap;
   /* A number this branch has already been given is a mistake, not a gap —
      two deliveries under one invoice cannot be told apart afterwards. Had
      this check existed, the suggestion bug above would have been caught the
      moment it offered a used number instead of going through silently. */
-  const invoiceUsed = useMemo(() => {
+  /* An invoice already on record under this number. It used to be a flat
+     refusal; now it can be deliberately ADDED TO — the item forgotten from
+     yesterday's invoice goes on yesterday's invoice. */
+  const existingInvoice = useMemo(() => {
     const v = invNo.trim();
-    if (!v) return false;
-    return moves.some((m) => m.movement_type === "OUT" && !m.voided_at
-      && m.invoice_no === v && m.party_id === partyId
-      && (branchId ? m.branch_id === branchId : !m.branch_id));
-  }, [moves, invNo, partyId, branchId]);
+    if (!v || !partyId) return null;
+    const fromBook = bookRows.find((r) => r.invoice_no === v && (r.status === "used" || r.status === "voided"));
+    if (fromBook) return fromBook;
+    const m = moves.find((x) => x.movement_type === "OUT" && x.invoice_no === v && inScope(x));
+    return m ? { invoice_no: v, on_date: m.created_at, branch_id: m.branch_id, branches: m.branch,
+                 lines: moves.filter((x) => x.movement_type === "OUT" && !x.voided_at && x.invoice_no === v && inScope(x)).length } : null;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bookRows, moves, invNo, partyId, branchId, perParty]);
+  const invoiceUsed = !!existingInvoice;
+  const [addToExisting, setAddToExisting] = useState(false);
+  useEffect(() => { setAddToExisting(false); }, [invNo, partyId, branchId]);
 
   const catOf = (bc: string) => items.find((i) => i.barcode === bc)?.category ?? null;
   /* One key per kind of entry. Factory transfers each carry their own STR
@@ -451,12 +520,31 @@ function WarehouseInner({ section }: { section: Tab }) {
     }
     if (lines.length === 0) { setMErr("Nothing to record — add at least one item."); return; }
     if (type === "OUT" && !partyId) { setMErr("Which party is this going to?"); return; }
-    if (type === "OUT" && invoiceUsed) {
-      setMErr(`Invoice ${invNo.trim()} has already been used for this branch.`); return;
+    if (type === "OUT" && invoiceUsed && !addToExisting) {
+      setMErr(`Invoice ${invNo.trim()} is already on record. Tick "add these items to it" if that is what you mean.`); return;
     }
+    const joining = type === "OUT" && invoiceUsed && addToExisting && existingInvoice;
 
     setBusy(true);
-    const stamp = onDate ? new Date(onDate + "T12:00:00").toISOString() : undefined;
+    /* Added to an old invoice: it takes that invoice's date (unless a date
+       was picked) and, for a party numbered across branches, that invoice's
+       branch — the items belong to that delivery. */
+    const stamp = onDate ? new Date(onDate + "T12:00:00").toISOString()
+      : joining && existingInvoice.on_date ? existingInvoice.on_date : undefined;
+    const lineBranch = joining && perParty ? (existingInvoice.branch_id ?? null) : (branchId || null);
+    /* Numbers skipped by this invoice, explained by the reason typed for the
+       jump — saved into the invoice book so the sequence has no silent hole. */
+    const skipped: string[] = [];
+    const typed = invNo.trim();
+    if (type === "OUT" && invoiceGap && gapWhy.trim() && expectedInvoice && /^\d+$/.test(typed)) {
+      const from = BigInt(expectedInvoice), to = BigInt(typed);
+      if (to > from && to - from <= BigInt(200)) {
+        for (let k = from; k < to; k++) {
+          const v = String(k).padStart(expectedInvoice.length, "0");
+          if (!bookRows.some((r) => r.invoice_no === v && r.status !== "missing")) skipped.push(v);
+        }
+      }
+    }
     /* Every line carries the SAME invoice and party, which is what makes it
        one delivery rather than several that happen to share a date. */
     const { error } = await supabase.from("khana_stock_movements").insert(
@@ -468,12 +556,20 @@ function WarehouseInner({ section }: { section: Tab }) {
            epoch, not a date anybody picked. */
         ...(stamp ? { created_at: stamp } : {}),
         party_id: type === "OUT" ? partyId : null,
-        branch_id: type === "OUT" && branchId ? branchId : null,
+        branch_id: type === "OUT" ? lineBranch : null,
         invoice_no: type === "OUT" ? (invNo.trim() || null) : null,
-        invoice_gap_reason: type === "OUT" && invoiceGap ? (gapWhy.trim() || null) : null,
+        invoice_gap_reason: type === "OUT" && invoiceGap && !joining ? (gapWhy.trim() || null) : null,
       })));
+    if (error) { setBusy(false); setMErr(error.message); return; }
+    if (skipped.length) {
+      const r = await supabase.rpc("khana_note_invoices", {
+        p_party: partyId, p_branch: branchId || null,
+        p_items: skipped.map((v) => ({ invoice_no: v, reason: gapWhy.trim() })),
+      });
+      /* The delivery is saved either way; say so if the note was not. */
+      if (r.error) setErr(`Saved the delivery, but not the note for the skipped number(s): ${r.error.message}`);
+    }
     setBusy(false);
-    if (error) { setMErr(error.message); return; }
     setScan(""); setFound(null); setQty(""); setNote(""); setInvNo(""); setGapWhy("");
     setOnDate(""); setBasket([]); load();
   }
@@ -647,11 +743,28 @@ function WarehouseInner({ section }: { section: Tab }) {
           });
           return out;
         })() }
-    : { title: `Warehouse ${tab === "in" ? "New GRN" : tab === "out" ? "STR" : "Movements"}`,
-        headers: ["Number", "Date", "Barcode", ...(tab === "in" ? ["Printed barcode"] : []), "Item", "Type", "Quantity", "Party", "Branch", "Delivery #", "Invoice", "Note", "Voided"],
-        rows: (tab === "in" ? inMoves : outMoves).map((m) => [m.movement_no ?? "", when(m.created_at),
-          m.barcode, ...(tab === "in" ? [m.manual_code ?? ""] : []), m.name, m.movement_type, m.quantity, m.party ?? "", m.branch ?? "",
-          m.delivery_no ?? "", m.invoice_no ?? "", m.note ?? "", m.voided_at ? "yes" : ""]) };
+    /* Only the columns that carry something. Number (mostly blank), Type
+       (always the same on this screen) and a Party/Branch/Invoice set that is
+       empty on every GRN line made the sheet twice as wide as its content —
+       which is what pushed it onto a second page. A total closes the list. */
+    : (() => {
+        const list = tab === "in" ? inMoves : outMoves;
+        const anyVoid = list.some((m) => m.voided_at);
+        const d = (iso: string) => new Date(iso).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
+        const pcs = list.filter((m) => !m.voided_at).reduce((a, m) => a + Number(m.quantity || 0), 0);
+        if (tab === "in") {
+          const headers = ["Date", "Item code", "Printed", "Item description", "Qty", "Note", ...(anyVoid ? ["Voided"] : [])];
+          return { title: "Warehouse New GRN", headers,
+            rows: [...list.map((m) => [d(m.created_at), m.barcode, m.manual_code ?? "", m.name, m.quantity, m.note ?? "",
+                     ...(anyVoid ? [m.voided_at ? "voided" : ""] : [])]),
+                   ["", "", "", "Total", pcs, "", ...(anyVoid ? [""] : [])]] };
+        }
+        const headers = ["Invoice", "Date", "Party", "Branch", "Del #", "Item code", "Printed", "Item description", "Qty", ...(anyVoid ? ["Voided"] : [])];
+        return { title: "Warehouse STR", headers,
+          rows: [...list.map((m) => [m.invoice_no ?? "", d(m.created_at), m.party ?? "", m.branch ?? "", m.delivery_no ?? "",
+                   m.barcode, m.manual_code ?? "", m.name, m.quantity, ...(anyVoid ? [m.voided_at ? "voided" : ""] : [])]),
+                 ["", "", "", "", "", "", "", "Total", pcs, ...(anyVoid ? [""] : [])]] };
+      })();
 
   /* In and Out ARE the warehouse's GRNs — goods arriving and goods leaving.
      Naming them so makes the whole system speak one language. */
@@ -819,6 +932,15 @@ function WarehouseInner({ section }: { section: Tab }) {
             <button onClick={() => setShowVoided((v) => !v)}
               className={`rounded-full px-3 py-2 text-[12px] font-semibold transition ${showVoided ? "bg-ink text-white" : "border border-line text-ink/65 hover:bg-panel"}`}>
               {showVoided ? "Hide" : "Show"} voided ({voidedCount})
+            </button>
+          )}
+          {tab === "out" && (
+            <button onClick={() => openBook(null)}
+              className="ml-auto flex items-center gap-1.5 rounded-full bg-ink px-4 py-2 text-[13px] font-semibold text-white">
+              <BookOpen size={15} /> Invoice book
+              {missingCount > 0 && (
+                <span className="rounded-full bg-amber px-1.5 py-0.5 text-[10.5px] font-bold text-ink">{missingCount} missing</span>
+              )}
             </button>
           )}
           {tab === "materials" && canAdd && (
@@ -1029,7 +1151,7 @@ function WarehouseInner({ section }: { section: Tab }) {
                     </button>
                   )}
                   <button onClick={() => record(tab === "in" ? "IN" : "OUT")}
-                    disabled={busy || (!found && basket.length === 0) || (tab === "out" && invoiceUsed)}
+                    disabled={busy || (!found && basket.length === 0) || (tab === "out" && invoiceUsed && !addToExisting)}
                     className="flex items-center justify-center gap-1.5 rounded-xl2 bg-ink px-4 py-2 text-[13px] font-semibold text-white disabled:opacity-40">
                     {busy && <Loader2 size={14} className="animate-spin" />}
                     Record {tab === "in" ? "in" : "out"}
@@ -1049,13 +1171,31 @@ function WarehouseInner({ section }: { section: Tab }) {
                 )}
                 {tab === "out" && lastInvoice && (
                   <p className="mt-2 text-[12px] text-ink/70">
-                    Last invoice for {branches.find((b) => b.id === branchId)?.branch ?? parties.find((p) => p.id === partyId)?.name}: <b className="tnum">{lastInvoice}</b>
+                    Last invoice for {perParty
+                      ? `${parties.find((p) => p.id === partyId)?.name ?? ""} (all branches — one sequence)`
+                      : branches.find((b) => b.id === branchId)?.branch ?? parties.find((p) => p.id === partyId)?.name}: <b className="tnum">{lastInvoice}</b>
                     {expectedInvoice && <> · next expected <b className="tnum">{expectedInvoice}</b></>}
                   </p>
                 )}
-                {tab === "out" && invoiceUsed && (
-                  <p className="mt-2 rounded-xl2 border border-danger/30 bg-danger-soft p-2.5 text-[12.5px] font-semibold text-danger">
-                    Invoice {invNo.trim()} has already been used for this branch. Pick another number.
+                {tab === "out" && invoiceUsed && existingInvoice && (
+                  <div className={`mt-2 rounded-xl2 border p-2.5 text-[12.5px] ${addToExisting ? "border-success/50 bg-success-soft/60" : "border-danger/30 bg-danger-soft"}`}>
+                    <p className="font-semibold text-ink">
+                      Invoice {invNo.trim()} is already on record
+                      {existingInvoice.branches ? ` for ${existingInvoice.branches}` : ""}
+                      {" "}— {existingInvoice.lines} item{existingInvoice.lines === 1 ? "" : "s"}
+                      {existingInvoice.on_date ? `, ${new Date(existingInvoice.on_date).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}` : ""}.
+                    </p>
+                    <label className="mt-1.5 flex cursor-pointer items-center gap-2 text-ink/85">
+                      <input type="checkbox" checked={addToExisting} onChange={(e) => setAddToExisting(e.target.checked)} className="h-4 w-4 accent-[#141414]" />
+                      Add these items to invoice {invNo.trim()}
+                      {!onDate && existingInvoice.on_date ? " (they take its date)" : ""}
+                    </label>
+                    {!addToExisting && <p className="mt-1 text-[12px] text-danger">Or type a different number.</p>}
+                  </div>
+                )}
+                {tab === "out" && fillsGap && !invoiceUsed && (
+                  <p className="mt-2 rounded-xl2 border border-success/40 bg-success-soft/60 p-2.5 text-[12.5px] font-semibold text-ink">
+                    Invoice {invNo.trim()} was missing from the sequence — recording it fills the gap.
                   </p>
                 )}
                 {tab === "out" && invoiceGap && !invoiceUsed && (
@@ -1064,7 +1204,7 @@ function WarehouseInner({ section }: { section: Tab }) {
                       Expected {expectedInvoice}, you entered {invNo.trim()}.
                     </p>
                     <input value={gapWhy} onChange={(e) => setGapWhy(e.target.value)}
-                      placeholder="why the gap? (optional — e.g. bulk book, cancelled pad)"
+                      placeholder="why the gap? e.g. cancelled pad — saved against the skipped numbers in the invoice book"
                       className={`${inp} mt-2`} />
                   </div>
                 )}
@@ -1214,10 +1354,30 @@ function WarehouseInner({ section }: { section: Tab }) {
                       <td className="px-4 py-2.5 font-semibold text-ink">{m.name}</td>
                       <td className="px-4 py-2.5 text-right tnum font-bold text-ink">{n(m.quantity)}</td>
                       <td className="px-4 py-2.5 text-[12px] text-hint">
-                        {m.edited_at && !m.voided_at ? `edited · was ${n(Number(m.original_quantity ?? 0))} · ` : ""}
+                        {/* Only when the QUANTITY changed — an invoice moved to a new
+                            number or date is not "edited · was 0". */}
+                        {m.edited_at && !m.voided_at && m.original_quantity != null && Number(m.original_quantity) !== Number(m.quantity)
+                          ? `edited · was ${n(Number(m.original_quantity))} · ` : ""}
                         {m.voided_at ? `voided — ${m.void_reason ?? ""}`
                           : m.movement_type === "OUT"
-                            ? `${m.party ?? ""}${m.branch ? " · " + m.branch : ""}${m.invoice_no ? " · inv " + m.invoice_no : ""}`
+                            ? <>
+                                {`${m.party ?? ""}${m.branch ? " · " + m.branch : ""}`}
+                                {m.invoice_no && (
+                                  <>
+                                    {" · "}
+                                    {/* The invoice opens as a whole: every item on it,
+                                        print it, add to it, change it. */}
+                                    <button onClick={() => {
+                                        const r = register.find((x) => x.party_id === m.party_id && x.invoice_no === m.invoice_no
+                                          && (x.sequence_mode === "per_party" || x.scope_branch_id === m.branch_id));
+                                        openBook({ scope: r ? scopeKey(r) : `${m.party_id}|${m.branch_id ?? ""}`, invoice: m.invoice_no! });
+                                      }}
+                                      className="font-semibold text-ink/75 underline decoration-line underline-offset-2 hover:text-ink hover:decoration-ink">
+                                      inv {m.invoice_no}
+                                    </button>
+                                  </>
+                                )}
+                              </>
                             : (m.note ?? "")}
                       </td>
                       <td className="px-4 py-2.5 text-right">
@@ -1303,6 +1463,18 @@ function WarehouseInner({ section }: { section: Tab }) {
           </>
         )}
       </div>
+
+      {tab === "out" && (
+        <>
+          <InvoiceBook open={bookOpen} onClose={() => setBookOpen(false)} register={register} focus={bookFocus}
+            branches={branches} items={items} manualOf={(bc) => money[bc]?.manual ?? null}
+            canOut={canOut} canManage={canManage} error={regErr}
+            onChanged={async () => { await Promise.all([load(), loadRegister()]); }} />
+          <MissingInvoices open={missOpen && !bookOpen} onClose={closeMissing} register={register} canOut={canOut}
+            onSaved={loadRegister}
+            onOpenBook={(scope) => { closeMissing(); openBook({ scope }); }} />
+        </>
+      )}
 
       <Modal open={!!histItem} onClose={() => setHistItem(null)} title="Stock in and out" wide>
         {histItem && (
