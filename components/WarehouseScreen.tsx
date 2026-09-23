@@ -12,7 +12,7 @@
  */
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, Suspense } from "react";
 
-import { Boxes, Plus, Loader2, Download, Undo2, Pencil, Trash2, ArrowDownToLine, ArrowUpFromLine , Printer, BookOpen } from "lucide-react";
+import { Boxes, Plus, Loader2, Download, Undo2, Pencil, Trash2, ArrowDownToLine, ArrowUpFromLine , Printer, BookOpen, ChevronDown } from "lucide-react";
 import Topbar from "@/components/Topbar";
 import ItemHistory from "@/components/ItemHistory";
 import Modal, { Field } from "@/components/Modal";
@@ -121,6 +121,7 @@ function WarehouseInner({ section }: { section: Tab }) {
      note means printing the whole day. */
   const [invFilter, setInvFilter] = useState("all");
   const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [pickOpen, setPickOpen] = useState(false);
   const [basket, setBasket] = useState<{ item_id: string; barcode: string;
     name: string; qty: number }[]>([]);
   const [pOpen, setPOpen] = useState(false);
@@ -241,6 +242,12 @@ function WarehouseInner({ section }: { section: Tab }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   useEffect(() => { load(); }, [load]);
+
+  useEffect(() => {
+    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") setPickOpen(false); };
+    window.addEventListener("keydown", esc);
+    return () => window.removeEventListener("keydown", esc);
+  }, []);
 
   /* THE INVOICE BOOK (K179): every invoice number of every party, in order,
      with the missing ones. Asked of the database, not worked out from the
@@ -883,31 +890,19 @@ function WarehouseInner({ section }: { section: Tab }) {
                   {invoices.map((v) => <option key={v} value={v}>Invoice {v}</option>)}
                 </select>
               )}
+              {/* PICK INVOICES TO PRINT — the button only. The list opens
+                  BELOW this row, pushing the page down instead of floating
+                  over it. The old one was a <details> holding a panel with no
+                  positioned parent: it was thrown to the top of the page and
+                  sat on top of the record form, hiding the party, the invoice
+                  box and the Record button. */}
               {tab === "out" && invoices.length > 0 && (
-                <details className="rounded-full border border-line bg-surface px-3 py-1.5 text-[12px]">
-                  <summary className="cursor-pointer font-semibold text-ink/70">
-                    {picked.size ? `${picked.size} invoice(s) picked` : "Pick invoices"}
-                  </summary>
-                  <div className="absolute z-20 mt-2 max-h-56 w-56 overflow-y-auto rounded-xl2 border border-line bg-surface p-2 shadow-card">
-                    {invoices.map((v) => (
-                      <label key={v} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 hover:bg-panel">
-                        <input type="checkbox" checked={picked.has(v)}
-                          onChange={() => setPicked((p) => {
-                            const nx = new Set(p);
-                            if (nx.has(v)) nx.delete(v); else nx.add(v);
-                            return nx;
-                          })} />
-                        <span className="text-[12.5px] text-ink">Invoice {v}</span>
-                      </label>
-                    ))}
-                    {picked.size > 0 && (
-                      <button onClick={() => setPicked(new Set())}
-                        className="mt-1 w-full rounded-lg bg-panel px-2 py-1.5 text-[12px] font-semibold text-ink/70">
-                        Clear all
-                      </button>
-                    )}
-                  </div>
-                </details>
+                <button onClick={() => setPickOpen((o) => !o)}
+                  className={`flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-[12px] font-semibold transition ${
+                    picked.size ? "border-ink bg-ink text-white" : "border-line bg-surface text-ink/70 hover:bg-panel"}`}>
+                  {picked.size ? `${picked.size} invoice${picked.size === 1 ? "" : "s"} picked` : "Pick invoices"}
+                  <ChevronDown size={13} className={pickOpen ? "rotate-180 transition" : "transition"} />
+                </button>
               )}
             <select value={fItem} onChange={(e) => setFItem(e.target.value)}
               className="max-w-[15rem] rounded-xl2 border border-line bg-surface px-3 py-2 text-[12.5px] outline-none focus:border-ink/30">
@@ -919,6 +914,35 @@ function WarehouseInner({ section }: { section: Tab }) {
               <button onClick={() => { setFParty(""); setFBranch(""); setFItem(""); setFCat(""); setFNote(""); setQ(""); setDFrom(""); setDTo(""); }}
                 className="rounded-full border border-line px-3 py-1.5 text-[12px] font-semibold text-ink/60 hover:bg-panel">Clear</button>
             )}
+          </div>
+        )}
+
+        {/* Opens IN the page, never over it: nothing on the form below is
+            covered, on a phone or on a desktop. */}
+        {tab === "out" && pickOpen && invoices.length > 0 && (
+          <div className="rounded-card border border-line bg-surface p-3">
+            <div className="mb-2 flex flex-wrap items-center gap-2">
+              <p className="text-[12px] font-bold text-ink">Print only these invoices</p>
+              <p className="text-[11.5px] text-muted">Tap the ones you want. Nothing picked prints whatever the filters show.</p>
+              <span className="ml-auto flex gap-1.5">
+                {picked.size > 0 && (
+                  <button onClick={() => setPicked(new Set())}
+                    className="rounded-full border border-line px-3 py-1.5 text-[12px] font-semibold text-ink/70 hover:bg-panel">Clear</button>
+                )}
+                <button onClick={() => setPickOpen(false)}
+                  className="rounded-full bg-ink px-4 py-1.5 text-[12px] font-semibold text-white">Done</button>
+              </span>
+            </div>
+            <div className="flex max-h-44 flex-wrap gap-1.5 overflow-y-auto">
+              {invoices.map((v) => (
+                <button key={v}
+                  onClick={() => setPicked((pk) => { const nx = new Set(pk); if (nx.has(v)) nx.delete(v); else nx.add(v); return nx; })}
+                  className={`rounded-full px-3 py-1.5 text-[12px] font-semibold transition ${
+                    picked.has(v) ? "bg-ink text-white" : "border border-line text-ink/70 hover:bg-panel"}`}>
+                  {v}
+                </button>
+              ))}
+            </div>
           </div>
         )}
 
