@@ -10,7 +10,7 @@
  * the box, the item resolves, type the quantity, done. A scanner types the
  * code then presses Enter — so Enter is the trigger everywhere.
  */
-import { Fragment, useCallback, useEffect, useMemo, useState, Suspense } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, Suspense } from "react";
 
 import { Boxes, Plus, Loader2, Download, Undo2, Pencil, Trash2, ArrowDownToLine, ArrowUpFromLine , Printer, BookOpen } from "lucide-react";
 import Topbar from "@/components/Topbar";
@@ -95,6 +95,7 @@ function WarehouseInner({ section }: { section: Tab }) {
 
   /* record a movement */
   const [scan, setScan] = useState("");
+  const scanBox = useRef<HTMLInputElement | null>(null);
   const [found, setFound] = useState<Item | null>(null);
   const [qty, setQty] = useState("");
   const [note, setNote] = useState("");
@@ -492,19 +493,26 @@ function WarehouseInner({ section }: { section: Tab }) {
     load();
   }
 
+  /* ONE ENTRY, AS MANY BARCODES AS THE DELIVERY HAS.
+     On both tabs now: scan, quantity, Enter — and the next scan goes into the
+     same list. A GRN of thirty products used to mean thirty separate
+     entries, each one its own trip through the form. */
   function addLine() {
     if (!found) return;
     setMErr("");
     const q = parseFloat(qty);
     if (!(q > 0)) { setMErr("Enter a quantity."); return; }
-    if (q > Number(found.quantity)) { setMErr(`Only ${n(found.quantity)} in stock.`); return; }
+    /* Only what LEAVES is limited by what is there. Goods arriving are not. */
+    if (tab === "out" && q > Number(found.quantity)) { setMErr(`Only ${n(found.quantity)} in stock.`); return; }
     setBasket((b) => {
-      /* Same item twice on one invoice is one line, not two. */
+      /* The same item scanned twice is one line, not two. */
       const at = b.findIndex((x) => x.item_id === found.item_id);
       if (at >= 0) return b.map((x, i) => i === at ? { ...x, qty: x.qty + q } : x);
       return [...b, { item_id: found.item_id, barcode: found.barcode, name: found.name, qty: q }];
     });
     setScan(""); setFound(null); setQty("");
+    /* Straight back to the scan box, so the scanner can keep going. */
+    setTimeout(() => scanBox.current?.focus(), 0);
   }
 
   async function record(type: "IN" | "OUT") {
@@ -1122,12 +1130,16 @@ function WarehouseInner({ section }: { section: Tab }) {
                   {tab === "in" ? "New GRN — bring stock in" : "STR — send stock out"}
                 </p>
                 <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-4">
-                  <input value={scan} autoFocus
+                  <input value={scan} autoFocus ref={scanBox}
                     onChange={(e) => { setScan(e.target.value); setFound(null); }}
-                    onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); resolve(); } }}
+                    /* Enter on a resolved item adds it to the list and comes
+                       back here — one hand on the scanner, one on the keypad. */
+                    onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); if (found && parseFloat(qty) > 0) addLine(); else resolve(); } }}
                     onBlur={resolve}
                     placeholder="Scan, or type a barcode or product name" className={inp} />
-                  <input type="number" value={qty} onChange={(e) => setQty(e.target.value)} placeholder="Quantity" className={inp} />
+                  <input type="number" value={qty} onChange={(e) => setQty(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addLine(); } }}
+                    placeholder="Quantity" className={inp} />
                   {/* No else branch: the party picker belongs to Out only, and
                       the date box below now shows on both. */}
                   {tab === "out" && (
@@ -1144,12 +1156,11 @@ function WarehouseInner({ section }: { section: Tab }) {
                                         : "Date it went out - blank means today"}
                     className={inp} />
                   <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Note (optional)" className={inp} />
-                  {tab === "out" && (
-                    <button onClick={addLine} disabled={!found || !(parseFloat(qty) > 0)}
-                      className="rounded-xl2 border border-line px-4 py-2 text-[13px] font-semibold text-ink/75 hover:bg-panel disabled:opacity-40">
-                      + Add item
-                    </button>
-                  )}
+                  <button onClick={addLine} disabled={!found || !(parseFloat(qty) > 0)}
+                    title="Add this one and scan the next (or press Enter)"
+                    className="rounded-xl2 border border-line px-4 py-2 text-[13px] font-semibold text-ink/75 hover:bg-panel disabled:opacity-40">
+                    + Add item
+                  </button>
                   <button onClick={() => record(tab === "in" ? "IN" : "OUT")}
                     disabled={busy || (!found && basket.length === 0) || (tab === "out" && invoiceUsed && !addToExisting)}
                     className="flex items-center justify-center gap-1.5 rounded-xl2 bg-ink px-4 py-2 text-[13px] font-semibold text-white disabled:opacity-40">
@@ -1239,7 +1250,8 @@ function WarehouseInner({ section }: { section: Tab }) {
                     form can be in. Say which of the two things is missing. */}
                 {!found && !scan.trim() && (
                   <p className="mt-2 text-[12.5px] text-muted">
-                    Scan a barcode, or type it and press Enter. Either code works — ours ({tab === "in" ? "44-000012" : "44-000012"}) or the printed one.
+                    Scan a barcode, or type it and press Enter. Either code works — ours (44-000012) or the printed one.
+                    Then a quantity and Enter again to add it, and scan the next: everything in the list is recorded together.
                   </p>
                 )}
                 {/* Only when NOTHING matched. Saying "no product" while a list
@@ -1271,7 +1283,10 @@ function WarehouseInner({ section }: { section: Tab }) {
                 {basket.length > 0 && (
                   <div className="mt-3 overflow-hidden rounded-xl2 border border-line">
                     <p className="border-b border-line bg-panel/50 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-hint">
-                      {basket.length} item(s) on this invoice · {n(basket.reduce((a, x) => a + x.qty, 0))} pieces
+                      <span className="flex items-center justify-between gap-2">
+                        <span>{basket.length} item(s) {tab === "in" ? "in this GRN" : "on this invoice"} · {n(basket.reduce((a, x) => a + x.qty, 0))} pieces</span>
+                        <button onClick={() => setBasket([])} className="text-[11px] font-semibold text-danger/70 hover:text-danger">clear all</button>
+                      </span>
                     </p>
                     {basket.map((l) => (
                       <div key={l.item_id} className="flex items-center justify-between gap-3 border-b border-line/60 px-3 py-2 last:border-0">
