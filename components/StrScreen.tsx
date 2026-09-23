@@ -15,6 +15,7 @@ import Topbar from "@/components/Topbar";
 import Modal, { Field } from "@/components/Modal";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { usePermissions } from "@/lib/usePermissions";
+import { timeNow } from "@/lib/whenStamp";
 import { exportCSV, exportExcel, exportPDF, type ExportTable, printTable } from "@/lib/export";
 
 type Row = { id: string; str_number: string; from_side: string; to_side: string;
@@ -58,6 +59,8 @@ export default function StrScreen({ side: fixed }: { side: Side }) {
   const [note, setNote] = useState("");
   const [lines, setLines] = useState<Line[]>([{ id: "", qty: "" }]);
   const [onDate, setOnDate] = useState("");
+  /* K180: a picked date carries the real clock time, not noon. */
+  const [onTime, setOnTime] = useState("");
   const [busy, setBusy] = useState(false);
   const [fErr, setFErr] = useState("");
   const [made, setMade] = useState<Record<string, unknown> | null>(null);
@@ -101,7 +104,7 @@ export default function StrScreen({ side: fixed }: { side: Side }) {
     : wItems.map((x) => ({ id: x.id, label: `${x.barcode} — ${x.name} (${n(x.in_stock)} in stock)`, max: Number(x.in_stock) }));
 
   function openForm(_d: Side) {
-    setOpen(true); setDest(""); setNote(""); setOnDate("");
+    setOpen(true); setDest(""); setNote(""); setOnDate(""); setOnTime("");
     setLines([{ id: "", qty: "" }]); setFErr(""); setMade(null);
   }
 
@@ -120,6 +123,9 @@ export default function StrScreen({ side: fixed }: { side: Side }) {
       /* Blank means today: the function reads null as "stamp it now", so an
          empty box behaves exactly as this form did before the date existed. */
       p_on_date: onDate || null,
+      /* Blank time on a picked date: the function stamps the clock time it
+         is being recorded at. */
+      p_on_time: onDate ? (onTime || timeNow()) : null,
     });
     setBusy(false);
     if (error) { setFErr(error.message); return; }
@@ -305,9 +311,16 @@ export default function StrScreen({ side: fixed }: { side: Side }) {
                   exception, so the date is part of the form rather than
                   something that has to be corrected afterwards. */}
               <Field label="Date it moved">
-                <input type="date" value={onDate} max={today}
-                  onChange={(e) => setOnDate(e.target.value)} className={inp} />
-                <p className="mt-1 text-[11px] text-hint">Leave blank for today.</p>
+                <div className="flex gap-2">
+                  <input type="date" value={onDate} max={today}
+                    onChange={(e) => { setOnDate(e.target.value); if (e.target.value && !onTime) setOnTime(timeNow()); }}
+                    className={inp} />
+                  {onDate && (
+                    <input type="time" value={onTime} onChange={(e) => setOnTime(e.target.value)}
+                      title="Time it moved" className={`${inp} max-w-[8.5rem]`} />
+                  )}
+                </div>
+                <p className="mt-1 text-[11px] text-hint">Leave blank for right now. With a date, the time starts at the time now.</p>
               </Field>
             </div>
 

@@ -14,6 +14,7 @@ import Topbar from "@/components/Topbar";
 import Modal, { Field } from "@/components/Modal";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { usePermissions } from "@/lib/usePermissions";
+import { stampAt, timeNow } from "@/lib/whenStamp";
 import { exportCSV, exportExcel, exportPDF, printTable, type ExportTable } from "@/lib/export";
 
 type Row = { id: string; movement_no: string; created_at: string; quantity: number;
@@ -49,6 +50,8 @@ export default function ReturnsPage() {
   const [why, setWhy] = useState("");
   const [supplier, setSupplier] = useState("");
   const [onDate, setOnDate] = useState("");
+  /* K180: the time of day goes with the date, instead of a made-up noon. */
+  const [onTime, setOnTime] = useState("");
   const [busy, setBusy] = useState(false);
   const [fErr, setFErr] = useState("");
 
@@ -109,7 +112,7 @@ export default function ReturnsPage() {
     }
     if (!why.trim()) { setFErr("Why is it going back? The supplier will ask."); return; }
     setBusy(true);
-    const stamp = onDate ? new Date(onDate + "T12:00:00").toISOString() : undefined;
+    const stamp = stampAt(onDate, onTime);
     /* Only send created_at when a date was actually picked. Passing undefined
        arrives at the database as an explicit null, which the column now
        refuses outright — and before that refusal existed it read back as
@@ -121,7 +124,7 @@ export default function ReturnsPage() {
     });
     setBusy(false);
     if (error) { setFErr(error.message); return; }
-    setOpen(false); setScan(""); setQty(""); setWhy(""); setSupplier(""); setOnDate(""); load();
+    setOpen(false); setScan(""); setQty(""); setWhy(""); setSupplier(""); setOnDate(""); setOnTime(""); load();
   }
 
   const table = (): ExportTable => ({
@@ -253,8 +256,15 @@ export default function ReturnsPage() {
             <input type="number" value={qty} onChange={(e) => setQty(e.target.value)} className={inp} />
           </Field>
           <Field label="Date">
-            <input type="date" value={onDate} onChange={(e) => setOnDate(e.target.value)} className={inp} />
+            <input type="date" value={onDate} max={new Date().toLocaleDateString("en-CA")}
+              onChange={(e) => { setOnDate(e.target.value); if (e.target.value && !onTime) setOnTime(timeNow()); }}
+              className={inp} />
           </Field>
+          {onDate && (
+            <Field label="Time">
+              <input type="time" value={onTime} onChange={(e) => setOnTime(e.target.value)} className={inp} />
+            </Field>
+          )}
         </div>
         <div className="mt-3"><Field label="Back to (supplier)">
           <input value={supplier} onChange={(e) => setSupplier(e.target.value)} placeholder="e.g. F S Traders" className={inp} />

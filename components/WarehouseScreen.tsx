@@ -18,6 +18,7 @@ import ItemHistory from "@/components/ItemHistory";
 import Modal, { Field } from "@/components/Modal";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { usePermissions } from "@/lib/usePermissions";
+import { stampAt, timeNow } from "@/lib/whenStamp";
 import { exportCSV, exportExcel, exportPDF, type ExportTable, printTable } from "@/lib/export";
 import InvoiceBook, { MissingInvoices, scopeKey, type RegRow } from "@/components/warehouse/InvoiceBook";
 
@@ -109,6 +110,11 @@ function WarehouseInner({ section }: { section: Tab }) {
   const [invNo, setInvNo] = useState("");
   const [gapWhy, setGapWhy] = useState("");
   const [onDate, setOnDate] = useState("");
+  /* The clock time that goes with a picked date (K180). Entries used to be
+     stamped 12:00 noon whenever a date was chosen — a time nobody set and
+     nothing happened at. It fills itself with the time now and can be
+     changed to the time the goods actually moved. */
+  const [onTime, setOnTime] = useState("");
   /* A basket. One invoice usually carries several items, and a form that
      clears after each line makes that impossible to enter. */
   /* Pick specific invoices to print. Without this, printing one delivery
@@ -537,7 +543,7 @@ function WarehouseInner({ section }: { section: Tab }) {
     /* Added to an old invoice: it takes that invoice's date (unless a date
        was picked) and, for a party numbered across branches, that invoice's
        branch — the items belong to that delivery. */
-    const stamp = onDate ? new Date(onDate + "T12:00:00").toISOString()
+    const stamp = onDate ? stampAt(onDate, onTime)
       : joining && existingInvoice.on_date ? existingInvoice.on_date : undefined;
     const lineBranch = joining && perParty ? (existingInvoice.branch_id ?? null) : (branchId || null);
     /* Numbers skipped by this invoice, explained by the reason typed for the
@@ -579,7 +585,7 @@ function WarehouseInner({ section }: { section: Tab }) {
     }
     setBusy(false);
     setScan(""); setFound(null); setQty(""); setNote(""); setInvNo(""); setGapWhy("");
-    setOnDate(""); setBasket([]); load();
+    setOnDate(""); setOnTime(""); setBasket([]); load();
   }
 
   async function addParty() {
@@ -1151,10 +1157,17 @@ function WarehouseInner({ section }: { section: Tab }) {
                   {/* On both tabs: stock that left on Tuesday should read
                       Tuesday, and an invoice entered late is the normal case,
                       not the exception. */}
-                  <input type="date" value={onDate} onChange={(e) => setOnDate(e.target.value)}
-                    title={tab === "in" ? "Date it arrived - blank means today"
-                                        : "Date it went out - blank means today"}
+                  <input type="date" value={onDate} max={new Date().toLocaleDateString("en-CA")}
+                    onChange={(e) => { setOnDate(e.target.value); if (e.target.value && !onTime) setOnTime(timeNow()); }}
+                    title={tab === "in" ? "Date it arrived - blank means now"
+                                        : "Date it went out - blank means now"}
                     className={inp} />
+                  {/* Only once a date is chosen: with no date the entry is
+                      stamped at this moment anyway. */}
+                  {onDate && (
+                    <input type="time" value={onTime} onChange={(e) => setOnTime(e.target.value)}
+                      title="Time it moved - the time now unless you change it" className={inp} />
+                  )}
                   <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Note (optional)" className={inp} />
                   <button onClick={addLine} disabled={!found || !(parseFloat(qty) > 0)}
                     title="Add this one and scan the next (or press Enter)"
