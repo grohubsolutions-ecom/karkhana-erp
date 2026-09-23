@@ -24,6 +24,7 @@ import { CalendarDays, HandCoins, Wallet, Loader2, AlertTriangle, LogOut } from 
 import { useRouter } from "next/navigation";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import MyWork from "@/components/MyWork";
+import MyPendingReturns from "@/components/MyPendingReturns";
 import HubBell from "@/components/HubBell";
 /* The Hub's phone rules (16px inputs so iPhones do not zoom, thumb-sized
    buttons, no sideways drift) apply here too — this is the page staff open on
@@ -69,7 +70,19 @@ export default function MyPortal() {
   const [err, setErr] = useState("");
   /* Work first. It is the half that changes during the day; the wage figure
      has not moved since last night. */
-  const [tab, setTab] = useState<"work" | "pay">("work");
+  const [tab, setTab] = useState<"work" | "pay" | "returns">("work");
+  /* THE THIRD TAB IS NOT FOR EVERYONE.
+     Chasing returns is one person's job, so the tab appears only for whoever
+     holds 'returns.print'. The permission opens no page of its own — the
+     database function behind the tab is the only thing it unlocks — so a
+     portal without it is exactly the portal it was before. */
+  const [canReturns, setCanReturns] = useState(false);
+
+  useEffect(() => {
+    if (!isSupabaseConfigured || !supabase) return;
+    supabase.rpc("has_permission", { p_permission_code: "returns.print" })
+      .then(({ data }) => setCanReturns(data === true));
+  }, []);
 
   const load = useCallback(async () => {
     if (!isSupabaseConfigured || !supabase) { setLoading(false); return; }
@@ -220,7 +233,8 @@ export default function MyPortal() {
           layout to keep in step. */}
       <div className="mx-auto -mt-4 max-w-5xl px-4 sm:px-6">
         <div className="mb-4 flex w-full gap-1 rounded-full bg-panel p-1 dark:bg-white/[0.06] sm:w-max">
-          {([["work", "My work"], ["pay", "Attendance & pay"]] as const).map(([key, label]) => (
+          {([["work", "My work"], ["pay", "Attendance & pay"],
+             ...(canReturns ? [["returns", "Pending returns"] as const] : [])] as const).map(([key, label]) => (
             <button key={key} onClick={() => setTab(key)}
               className={`h-11 flex-1 whitespace-nowrap rounded-full px-5 text-[13.5px] font-semibold transition sm:h-auto sm:flex-none sm:py-2 sm:text-[13px] ${
                 tab === key ? "bg-ink text-white shadow-soft dark:bg-white dark:text-[#141414]"
@@ -231,6 +245,8 @@ export default function MyPortal() {
         </div>
 
         {tab === "work" && <MyWork />}
+
+        {tab === "returns" && canReturns && <MyPendingReturns />}
 
         <div className={`grid gap-4 lg:grid-cols-[1fr_1.05fr] lg:items-start ${tab === "pay" ? "" : "hidden"}`}>
 

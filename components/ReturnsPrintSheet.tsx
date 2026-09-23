@@ -29,7 +29,7 @@ import { supabase } from "@/lib/supabase";
 import { rangeDates } from "@/lib/dateRange";
 import Modal, { btnPrimary, btnGhost, inputCls, Field } from "@/components/Modal";
 import { exportExcel, exportPDF, type ExportTable } from "@/lib/export";
-import { downloadBoardExcel, downloadBoardPdf } from "@/lib/returnsBoardExport";
+import { downloadBoardExcel, downloadBoardPdf, boardHtml, boardHead, BASE_CSS } from "@/lib/returnsBoardExport";
 
 type R = {
   tracking_id: string; order_number: string | null; store_code: string | null;
@@ -236,125 +236,6 @@ export default function ReturnsPrintButton({ store = "ALL" }: { store?: string }
 }
 
 /* ------------------------------------------------------------ shared bits */
-const BASE_CSS = `
-  @page { size: A4 landscape; margin: 9mm 8mm 11mm; }
-  * { box-sizing: border-box; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-  body { font: 10px/1.35 Arial, Helvetica, sans-serif; color: #111; margin: 0; padding: 10px; background: #fff; }
-  @media screen { body { max-width: 1140px; margin: 0 auto; } }
-  .head { display: flex; justify-content: space-between; align-items: stretch; gap: 10px; margin-bottom: 9px; }
-  .head h1 { font-size: 18px; margin: 0; }
-  .head .sub { font-size: 10.5px; color: #444; margin-top: 3px; }
-  .card { border: 1px solid #5F5E5A; background: #F1EFE8; border-radius: 7px; padding: 5px 14px; text-align: center; min-width: 150px; }
-  .card .k { font-size: 10px; font-weight: 700; color: #444441; }
-  .card .v { font-size: 17px; font-weight: 800; line-height: 1.2; }
-  .card.pend { background: #EEEDFE; border-color: #534AB7; color: #3C3489; }
-  .card.pend .k { color: #3C3489; }
-  table { width: 100%; border-collapse: collapse; }
-  thead { display: table-header-group; }
-  tr { page-break-inside: avoid; break-inside: avoid; }
-  .sign { display: flex; gap: 26px; margin-top: 14px; font-size: 10.5px; }
-  .sign div { flex: 1; border-top: 1px solid #000; padding-top: 4px; }
-  .key { font-size: 9.5px; color: #333; margin-top: 7px; }
-`;
-
-function head(rows: R[], o: Opts) {
-  const printed = new Date().toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
-  const time = new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
-  const title = o.scope === "pending" ? "Pending returns" : "Returns";
-  const what = o.scope === "pending"
-    ? "Not yet received or cancelled — the same list as the Pending tab"
-    : `Returned ${o.from && o.to ? `${long(o.from)} – ${long(o.to)}` : "at any time"}`;
-  const scope = `${STORE_NAME[o.store] ?? o.store} · ${o.courier === "Both" ? "PostEx & OwnEx" : o.courier}`;
-  const count = o.scope === "pending" ? rows.length : rows.filter((r) => !r.person_received).length;
-  return `
-  <div class="head">
-    <div><h1>${esc(title)}</h1><div class="sub">Grohub Solutions · ${esc(scope)}</div><div class="sub">${esc(what)}</div></div>
-    <div style="display:flex;gap:10px">
-      <div class="card pend"><div class="k">${o.scope === "pending" ? "PENDING" : "PENDING OF " + rows.length}</div><div class="v">${count}</div></div>
-      <div class="card"><div class="k">PRINTED ON</div><div class="v" style="font-size:13px">${esc(printed)}</div><div class="k" style="font-weight:400">${esc(time)}</div></div>
-    </div>
-  </div>`;
-}
-
-/* -------------------------------------------------------------- the board */
-function boardHtml(rows: R[], o: Opts) {
-  const couriers = o.courier === "Both" ? ["PostEx", "OwnEx"] : [o.courier];
-  // A courier or store outside the usual set is still printed, never dropped.
-  for (const r of rows) { const c = r.courier || "Other"; if (!couriers.includes(c)) couriers.push(c); }
-  const stores = o.store === "ALL" ? [...STORES] : [o.store];
-  for (const r of rows) { const s = r.store_code || "—"; if (!stores.includes(s)) stores.push(s); }
-
-  type Col = { courier: string; store: string; list: R[] };
-  const cols: Col[] = [];
-  for (const c of couriers) for (const s of stores) {
-    cols.push({
-      courier: c, store: s,
-      list: rows.filter((r) => (r.courier || "Other") === c && (r.store_code || "—") === s)
-        .sort((a, b) => String(b.return_date ?? "").localeCompare(String(a.return_date ?? ""))
-                     || String(b.order_number ?? "").localeCompare(String(a.order_number ?? ""))),
-    });
-  }
-  const depth = Math.max(0, ...cols.map((c) => c.list.length));
-  const tone = (c: string) => TONE[c] ?? TONE.Other;
-  const isPend = (r: R) => o.scope === "pending" || !r.person_received;
-
-  const courierRow = `<th rowspan="2" class="seq">#</th>` + couriers.map((c) => {
-    const inC = rows.filter((r) => (r.courier || "Other") === c);
-    const t = tone(c);
-    return `<th colspan="${stores.length}" class="courier split" style="background:${t.fill};border-color:${t.line};color:${t.ink}">
-      ${esc(c)} <span class="cnt">· ${inC.filter(isPend).length}${o.scope === "period" ? ` pending of ${inC.length}` : " pending"}</span></th>`;
-  }).join("");
-
-  const storeRow = cols.map((col, i) => {
-    const t = tone(col.courier);
-    const first = i % stores.length === 0;
-    return `<th class="store${first ? " split" : ""}" style="background:${t.fill};color:${t.ink}">
-      <div class="sn">${esc(STORE_NAME[col.store] ?? col.store)}</div><div class="sc">${col.list.filter(isPend).length}</div></th>`;
-  }).join("");
-
-  let body = "";
-  for (let i = 0; i < depth; i++) {
-    body += `<tr><td class="seq">${i + 1}</td>` + cols.map((col, ci) => {
-      const r = col.list[i];
-      const split = ci % stores.length === 0 ? " split" : "";
-      if (!r) return `<td class="cell${split}"></td>`;
-      const got = !isPend(r);
-      return `<td class="cell${got ? " got" : ""}${split}">
-        <span class="bx">${got ? "&#10003;" : ""}</span><span class="on">${esc(r.order_number ?? r.tracking_id)}</span><span class="dt">${esc(dd(r.return_date))}</span>
-      </td>`;
-    }).join("") + "</tr>";
-  }
-  if (!depth) body = `<tr><td class="cell" colspan="${cols.length + 1}" style="text-align:center;padding:24px">No pending returns. Nothing to chase.</td></tr>`;
-
-  return `<!doctype html><html><head><meta charset="utf-8"><title>${o.scope === "pending" ? "Pending returns" : "Returns"}</title>
-<style>${BASE_CSS}
-  table.board { table-layout: fixed; }
-  th, td { border: 1px solid #9a9892; }
-  th.seq, td.seq { width: 30px; text-align: center; background: #F1EFE8; font-weight: 700; color: #444; }
-  th.courier { font-size: 14px; padding: 6px 8px; text-align: center; border-width: 1.5px; }
-  th.courier .cnt { font-size: 11px; font-weight: 600; }
-  th.store { padding: 4px 6px; text-align: center; }
-  th.store .sn { font-size: 11.5px; font-weight: 800; }
-  th.store .sc { font-size: 10px; font-weight: 600; }
-  td.cell { padding: 4px 6px; height: 24px; white-space: nowrap; overflow: hidden; vertical-align: middle; }
-  td.cell .bx { display: inline-block; width: 11px; height: 11px; border: 1px solid #222; margin-right: 6px; vertical-align: -1px; font-size: 9px; line-height: 10px; text-align: center; }
-  td.cell .on { font-weight: 700; font-size: 11.5px; }
-  td.cell .dt { color: #555; font-size: 9.5px; margin-left: 6px; }
-  td.cell.got { background: #EAF3DE; }
-  td.cell.got .on { text-decoration: line-through; color: #27500A; }
-  .split { border-left: 2.5px solid #333 !important; }
-</style></head><body>
-  ${head(rows, o)}
-  <table class="board">
-    <thead><tr>${courierRow}</tr><tr>${storeRow}</tr></thead>
-    <tbody>${body}</tbody>
-  </table>
-  <div class="key"><b>&#9744;</b> tick when the parcel arrives &nbsp;·&nbsp; strike the order through once it is in hand and cancelled in Shopify
-    &nbsp;·&nbsp; each column newest first &nbsp;·&nbsp; date = the day the courier returned it</div>
-  <div class="sign"><div>Prepared by</div><div>Received by</div><div>Cancelled in Shopify by</div></div>
-</body></html>`;
-}
-
 /* ----------------------------------------------------- the detailed list */
 function listHtml(rows: R[], o: Opts) {
   const order = ["PostEx", "OwnEx"];
@@ -390,7 +271,7 @@ function listHtml(rows: R[], o: Opts) {
   td.grp { padding: 5px 7px; font-size: 11px; border-width: 1.5px; }
   tr.got td { background: #EAF3DE; color: #3B6D11; } tr.got .on { text-decoration: line-through; }
 </style></head><body>
-  ${head(rows, o)}
+  ${boardHead(rows, o)}
   <table>
     <thead><tr><th>#</th><th class="bx">&#9744;</th><th>Order</th><th>Store</th><th>Returned</th><th>Tracking</th><th>Customer</th>
       <th>City</th><th>Phone</th><th>COD</th></tr></thead>
