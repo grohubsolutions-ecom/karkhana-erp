@@ -515,8 +515,10 @@ function WarehouseInner({ section }: { section: Tab }) {
     setMErr("");
     const q = parseFloat(qty);
     if (!(q > 0)) { setMErr("Enter a quantity."); return; }
-    /* Only what LEAVES is limited by what is there. Goods arriving are not. */
-    if (tab === "out" && q > Number(found.quantity)) { setMErr(`Only ${n(found.quantity)} in stock.`); return; }
+    /* K181: what went out went out. If the balance on hand does not cover it
+       — a GRN not entered yet, an opening balance never loaded — the line is
+       taken anyway and the stock goes below zero until the arrival catches
+       up. The lines below say where it lands. Nothing is refused. */
     setBasket((b) => {
       /* The same item scanned twice is one line, not two. */
       const at = b.findIndex((x) => x.item_id === found.item_id);
@@ -1325,11 +1327,23 @@ function WarehouseInner({ section }: { section: Tab }) {
                         <button onClick={() => setBasket([])} className="text-[11px] font-semibold text-danger/70 hover:text-danger">clear all</button>
                       </span>
                     </p>
-                    {basket.map((l) => (
+                    {basket.map((l) => {
+                      /* K181: the warning has to live on the line, not on the
+                         scan box — that clears the moment the line is added,
+                         and this is still here when Record is pressed. */
+                      const after = tab === "out"
+                        ? Number(items.find((i) => i.item_id === l.item_id)?.quantity ?? 0) - l.qty
+                        : 0;
+                      return (
                       <div key={l.item_id} className="flex items-center justify-between gap-3 border-b border-line/60 px-3 py-2 last:border-0">
                         <span>
                           <span className="text-[13px] font-semibold text-ink">{l.name}</span>
                           <span className="block font-mono text-[11px] text-hint">{l.barcode}</span>
+                          {after < 0 && (
+                            <span className="block text-[11px] font-semibold text-danger">
+                              stock goes to {n(after)} — nothing came in for these yet
+                            </span>
+                          )}
                         </span>
                         <span className="flex items-center gap-3">
                           <span className="tnum text-[13px] font-bold text-ink">{n(l.qty)}</span>
@@ -1337,21 +1351,31 @@ function WarehouseInner({ section }: { section: Tab }) {
                             className="text-[11px] font-semibold text-danger/70">remove</button>
                         </span>
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
-                {found && (
-                  <p className="mt-2 text-[12.5px] text-ink/80">
-                    <b>{found.name}</b>
-                    <span className="ml-1.5 font-mono text-[12px] text-ink/60">{found.barcode}</span>
-                    {money[found.barcode]?.manual && (
-                      <span className="ml-1.5 font-mono text-[12px] text-muted">printed {money[found.barcode]!.manual}</span>
-                    )}
-                    {" "}· holding {n(found.quantity)}
-                    {tab === "out" && parseFloat(qty) > found.quantity && (
-                      <span className="text-danger"> — more than is there</span>)}
-                  </p>
-                )}
+                {found && (() => {
+                  /* K181: where the balance lands if this goes on — counting
+                     what is already in the basket for the same item. Below
+                     zero is said out loud, never refused: it means the goods
+                     left before their arrival was written down. */
+                  const held = Number(found.quantity);
+                  const already = basket.find((x) => x.item_id === found.item_id)?.qty ?? 0;
+                  const after = held - already - (parseFloat(qty) || 0);
+                  return (
+                    <p className="mt-2 text-[12.5px] text-ink/80">
+                      <b>{found.name}</b>
+                      <span className="ml-1.5 font-mono text-[12px] text-ink/60">{found.barcode}</span>
+                      {money[found.barcode]?.manual && (
+                        <span className="ml-1.5 font-mono text-[12px] text-muted">printed {money[found.barcode]!.manual}</span>
+                      )}
+                      {" "}· holding {n(held)}
+                      {tab === "out" && after < 0 && (
+                        <span className="font-semibold text-danger"> — this takes it to {n(after)}</span>)}
+                    </p>
+                  );
+                })()}
                 {mErr && <p className="mt-2 text-[12.5px] font-medium text-danger">{mErr}</p>}
               </div>
             )}

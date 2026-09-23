@@ -78,7 +78,12 @@ export default function StrScreen({ side: fixed }: { side: Side }) {
     setReady(((r.data as Ready[]) ?? []).filter((x) => Number(x.in_hand) > 0));
     setWItems(((w.data as unknown as { item_id: string; quantity: number;
         khana_final_items: { id: string; barcode: string; name: string } | null }[]) ?? [])
-      .filter((x) => Number(x.quantity) > 0 && x.khana_final_items)
+      /* K181: everything the warehouse knows about, not only what has stock
+         left. A delivery whose GRN has not been entered yet still has to be
+         sent out and invoiced — the balance goes below zero and comes back
+         when the arrival is entered. Only the factory side, which really is
+         a count of packed pieces in a room, stays filtered. */
+      .filter((x) => x.khana_final_items)
       .map((x) => ({ id: x.khana_final_items!.id, barcode: x.khana_final_items!.barcode,
                      name: x.khana_final_items!.name, in_stock: Number(x.quantity) })));
     setLoading(false);
@@ -282,13 +287,23 @@ export default function StrScreen({ side: fixed }: { side: Side }) {
                     className="mt-1 rounded-xl2 p-2 text-muted transition hover:bg-panel hover:text-danger disabled:opacity-30">
                     <Trash2 size={15} />
                   </button>
-                  {over && <p className="text-[12px] text-danger sm:col-span-3">Only {n(c!.max)} available.</p>}
+                  {over && (
+                    /* K181: the factory truly cannot send what is not packed,
+                       so that stays a refusal. Out of the warehouse it is a
+                       warning — the goods left, the balance goes to minus,
+                       and entering the missing GRN lifts it back. */
+                    <p className="text-[12px] text-danger sm:col-span-3">
+                      {dir === "factory"
+                        ? `Only ${n(c!.max)} packed — this will be refused.`
+                        : `Only ${n(c!.max)} in stock — this takes it to ${n(c!.max - parseFloat(l.qty))}.`}
+                    </p>
+                  )}
                 </div>
               );
             })}
             {choices.length === 0 && (
               <p className="mt-2 text-[12.5px] text-muted">
-                {dir === "factory" ? "Nothing is packed and waiting in the factory." : "The warehouse holds no stock."}
+                {dir === "factory" ? "Nothing is packed and waiting in the factory." : "The warehouse has no products yet."}
               </p>
             )}
 

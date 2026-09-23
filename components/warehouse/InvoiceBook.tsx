@@ -347,7 +347,9 @@ function InvoiceDetail({ inv, onBack, branches, items, manualOf, canOut, canMana
     const q = parseFloat(qty);
     setErr("");
     if (!(q > 0)) { setErr("How many pieces?"); return; }
-    if (q > Number(pick.quantity)) { setErr(`Only ${n(pick.quantity)} of ${pick.name} in stock.`); return; }
+    /* K181: the item is on the invoice, so it goes on the invoice. If the
+       balance does not cover it the stock drops below zero and stays there
+       until the arrival is entered — see the line under the picker. */
     setBusy(true);
     /* Same party, branch, number and DATE as the invoice — so the item lands
        on it, not on today. The database gives it the invoice's delivery
@@ -455,7 +457,16 @@ function InvoiceDetail({ inv, onBack, branches, items, manualOf, canOut, canMana
               {busy && <Loader2 size={14} className="animate-spin" />} Add to invoice
             </button>
           </div>
-          {pick && <p className="mt-1.5 text-[12.5px] text-ink/80"><b>{pick.name}</b> <span className="font-mono text-[12px] text-muted">{pick.barcode}</span> · holding {n(pick.quantity)}</p>}
+          {pick && (() => {
+            /* K181: what this leaves behind. Shown, not enforced. */
+            const after = Number(pick.quantity) - (parseFloat(qty) || 0);
+            return (
+              <p className="mt-1.5 text-[12.5px] text-ink/80">
+                <b>{pick.name}</b> <span className="font-mono text-[12px] text-muted">{pick.barcode}</span> · holding {n(pick.quantity)}
+                {after < 0 && <span className="font-semibold text-danger"> — this takes it to {n(after)}</span>}
+              </p>
+            );
+          })()}
           {matches.length > 0 && (
             <div className="mt-2 max-h-44 overflow-y-auto rounded-xl2 border border-line">
               {matches.map((x) => (

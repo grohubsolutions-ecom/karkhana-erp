@@ -107,9 +107,9 @@ export default function ReturnsPage() {
     if (!supabase || !found) return;
     setFErr("");
     if (!(parseFloat(qty) > 0)) { setFErr("How many pieces are going back?"); return; }
-    if (parseFloat(qty) > Number(found.quantity)) {
-      setFErr(`Only ${n(found.quantity)} in stock.`); return;
-    }
+    /* K181: goods on their way back to the supplier have already left the
+       shelf. If the balance does not cover them it goes below zero — the
+       line under the box says so before this is pressed. */
     if (!why.trim()) { setFErr("Why is it going back? The supplier will ask."); return; }
     setBusy(true);
     const stamp = stampAt(onDate, onTime);
@@ -247,9 +247,17 @@ export default function ReturnsPage() {
             ))}
           </div>
         )}
-        {found && (
-          <p className="mt-2 text-[12.5px] text-ink/80"><b>{found.name}</b> · holding {n(found.quantity)}</p>
-        )}
+        {found && (() => {
+          /* K181: what goes back to the supplier is recorded whether or not
+             the balance covers it. Below zero is shown here, not refused. */
+          const after = Number(found.quantity) - (parseFloat(qty) || 0);
+          return (
+            <p className="mt-2 text-[12.5px] text-ink/80">
+              <b>{found.name}</b> · holding {n(found.quantity)}
+              {after < 0 && <span className="font-semibold text-danger"> — this takes it to {n(after)}</span>}
+            </p>
+          );
+        })()}
 
         <div className="mt-3 grid grid-cols-2 gap-3">
           <Field label="How many *">
