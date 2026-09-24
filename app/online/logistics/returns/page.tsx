@@ -31,14 +31,14 @@ const TABS: { key: Section; label: string; hint: string }[] = [
      and a return past its courier's window moves on by itself: PostEx after
      30 days, OwnEx after 60. A CPR settlement or the old 9-day rule no longer
      closes anything — they hid parcels nobody had received. */
-  { key: "pending_returns",  label: "Pending returns",   hint: "Unpaid in Shopify and the courier says it is coming back — so it is not in the office yet. Cancel it in Shopify (tag RTS) when it arrives. PostEx returns move on by themselves after 30 days, OwnEx after 60." },
+  { key: "pending_returns",  label: "Pending returns",   hint: "Unpaid in Shopify and the courier says it is coming back — so it is not in the office yet. When it arrives, cancel it in Shopify (tag RTS) or press Mark received. PostEx returns move on by themselves after 30 days, OwnEx after 60." },
   /* A CLOSED RETURN HAD NOWHERE TO LIVE.
      Pending filters needs_chasing, and a return closed by the nightly job or by
      a settlement no longer needs chasing. The other tab is delivered parcels.
      So a real parcel — #4715, returned in May 2025, closed correctly — could not
      be seen anywhere in this screen, and searching for it said "Nothing here."
      which reads as "this does not exist". */
-  { key: "closed_returns",   label: "Returns delivered", hint: "Cancelled in Shopify (back in the office), paid in Shopify, or past the courier's window — PostEx 30 days, OwnEx 60. The reason is on each row." },
+  { key: "closed_returns",   label: "Returns delivered", hint: "Cancelled in Shopify or marked received (back in the office), paid in Shopify, or past the courier's window — PostEx 30 days, OwnEx 60. The reason is on each row." },
   { key: "delivered_unpaid", label: "Awaiting CPR", hint: "Delivered to the customer, but the COD has not reached you yet. The CPR confirms it. This is the receivable." },
 ];
 
@@ -240,7 +240,7 @@ export default function ReturnsPage() {
        The count comes from the same figures the RPC already returns: everything
        that came back, less what is still chased. */
     { key: "closed_returns" as Section, label: "Returns delivered", Icon: PackageCheck, bg: "bg-periwinkle-soft",
-      n: closedCount, v: closedValue, sub: "cancelled · paid · aged out" },
+      n: closedCount, v: closedValue, sub: "received · cancelled · paid · aged out" },
     { key: "delivered_unpaid" as Section, label: "Awaiting CPR", Icon: Wallet, bg: "bg-success-soft",
       n: find("delivered_unpaid")?.n ?? 0, v: find("delivered_unpaid")?.value ?? 0,
       sub: find("delivered_unpaid")?.oldest_days ? `oldest ${find("delivered_unpaid")?.oldest_days}d` : undefined },
@@ -269,7 +269,7 @@ export default function ReturnsPage() {
        deciding whether a parcel is still chased should not rely on the other
        side catching it. */
     setBusy(true);
-    const { error } = await supabase.rpc("mark_return_received", {
+    const { data, error } = await supabase.rpc("mark_return_received", {
       p_tracking_ids: picked,
       p_received_at: f.date || new Date().toISOString().slice(0, 10),
       p_received_by: f.by || null,
@@ -278,7 +278,21 @@ export default function ReturnsPage() {
     });
     setBusy(false);
     if (error) { setErr(error.message); return; }
-    setShowReceive(false); setPicked([]); load();
+    /* THE COUNT IS READ, NOT IGNORED.
+       The function returns how many parcels it changed. This page used to throw
+       that away and close as if it had worked, so a press that changed nothing
+       — 62 of 67 pending returns on 24 Sep, because a CPR had already stamped
+       them — looked exactly like a success while the rows stayed put. */
+    const changed = Number(data) || 0;
+    const asked = picked.length;
+    setShowReceive(false); setPicked([]);
+    // load() clears the banner on its way in, so the message goes up after it.
+    await load();
+    if (changed < asked) {
+      setErr(changed === 0
+        ? "Nothing was marked received — the selected returns are already marked received, or are no longer returns."
+        : `${changed} of ${asked} marked received. The rest were already marked received, or are no longer returns.`);
+    }
   }
 
   return (
