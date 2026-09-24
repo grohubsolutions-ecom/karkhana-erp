@@ -66,11 +66,16 @@ export function HubTopBar() {
               {group.children!.map((c) => {
                 const on = c.href === child?.href;
                 return (
+                  /* min-w-0 and truncate, because People now has three
+                     children: without them the third label is cut off by the
+                     page's own clip rather than shortened. The icon steps
+                     aside once there are three, to leave the words room. */
                   <Link key={c.href} href={c.href} aria-current={on ? "page" : undefined}
-                    className={`flex h-10 items-center justify-center gap-1.5 rounded-full text-[13px] font-semibold transition ${on
+                    className={`flex h-10 min-w-0 items-center justify-center gap-1.5 rounded-full px-1 text-[13px] font-semibold transition ${on
                       ? "bg-ink text-white shadow-soft dark:bg-white dark:text-[#141414]"
                       : "text-muted active:bg-black/5 dark:text-[#a89f93] dark:active:bg-white/10"}`}>
-                    <c.Icon size={15} /> {c.label}
+                    {group.children!.length < 3 && <c.Icon size={15} className="shrink-0" />}
+                    <span className="truncate">{c.label}</span>
                   </Link>
                 );
               })}

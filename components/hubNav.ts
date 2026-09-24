@@ -1,4 +1,4 @@
-import { LayoutDashboard, ClipboardList, Truck, Wallet, CalendarCheck, Users, Undo2, AlertTriangle, PackageSearch, type LucideIcon } from "lucide-react";
+import { LayoutDashboard, ClipboardList, Truck, Wallet, CalendarCheck, Users, Undo2, AlertTriangle, PackageSearch, Gauge, type LucideIcon } from "lucide-react";
 import { requiredFor } from "@/lib/access";
 
 /* ONE LIST OF HUB PLACES, READ BY BOTH THE DESKTOP SIDEBAR AND THE PHONE BARS.
@@ -33,6 +33,11 @@ export const HUB_NAV: HubNavItem[] = [
   { label: "People", short: "People", href: "/online/attendance", Icon: CalendarCheck, children: [
       { label: "Attendance", href: "/online/attendance", Icon: CalendarCheck },
       { label: "Employees",  href: "/online/employees",  Icon: Users },
+      /* Performance reads the same roster and the same pipeline, so it belongs
+         beside them rather than on a page of its own. It is locked tighter than
+         its neighbours: seeing how everyone is doing is a manager's business,
+         not something a colleague should reach by typing the address. */
+      { label: "Performance", href: "/online/performance", Icon: Gauge },
   ] },
 ];
 

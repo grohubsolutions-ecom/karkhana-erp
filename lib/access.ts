@@ -83,6 +83,13 @@ export const ROUTE_PERMS: Record<string, string[] | null> = {
   "/online/finance": ["hub.finance.view", "hub.finance.manage"],
   "/online/attendance": ["hub.attendance.view", "hub.attendance.manage"],
   "/online/employees": ["hub.attendance.view", "hub.attendance.manage"],
+  /* H273 — Performance. `.manage` ONLY, with no `.view` beside it: the pages
+     above are the roster, which a supervisor may read; this one ranks his
+     colleagues against each other. The database refuses it to the same people
+     regardless (hub_performance checks hub.attendance.manage itself); this
+     line is what keeps the page out of their menu and out of their address
+     bar. */
+  "/online/performance": ["hub.attendance.manage"],
   "/me": null,
 };
 
