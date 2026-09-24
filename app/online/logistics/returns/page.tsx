@@ -24,19 +24,21 @@ import ReturnsPrintButton from "@/components/ReturnsPrintSheet";
 type Section = "pending_returns" | "closed_returns" | "delivered_unpaid";
 
 const TABS: { key: Section; label: string; hint: string }[] = [
-  /* THE OWNER'S RULE (H241): a return is pending until it is cancelled in
-     Shopify, and nothing else closes it. The team cancels an order in Shopify
-     (and tags it RTS) when the parcel is physically in the office, so the
-     cancel IS the receipt. A CPR settlement or the 9-day rule used to close
-     returns here too, hiding parcels nobody had received. */
-  { key: "pending_returns",  label: "Pending returns",   hint: "The courier says it is coming back, and it is not cancelled in Shopify — so it is not in the office yet. Cancel it in Shopify (tag RTS) when it arrives and it moves to Returns delivered." },
+  /* THE OWNER'S RULE (H241, H242): Shopify first.
+       cancelled in Shopify        -> back in the office -> Returns delivered
+       paid / refunded in Shopify  -> CPR side, not a pending return
+       unpaid + courier returning  -> Pending returns
+     and a return past its courier's window moves on by itself: PostEx after
+     30 days, OwnEx after 60. A CPR settlement or the old 9-day rule no longer
+     closes anything — they hid parcels nobody had received. */
+  { key: "pending_returns",  label: "Pending returns",   hint: "Unpaid in Shopify and the courier says it is coming back — so it is not in the office yet. Cancel it in Shopify (tag RTS) when it arrives. PostEx returns move on by themselves after 30 days, OwnEx after 60." },
   /* A CLOSED RETURN HAD NOWHERE TO LIVE.
      Pending filters needs_chasing, and a return closed by the nightly job or by
      a settlement no longer needs chasing. The other tab is delivered parcels.
      So a real parcel — #4715, returned in May 2025, closed correctly — could not
      be seen anywhere in this screen, and searching for it said "Nothing here."
      which reads as "this does not exist". */
-  { key: "closed_returns",   label: "Returns delivered", hint: "Back in the office — cancelled in Shopify. This is the only way a return gets here." },
+  { key: "closed_returns",   label: "Returns delivered", hint: "Cancelled in Shopify (back in the office), paid in Shopify, or past the courier's window — PostEx 30 days, OwnEx 60. The reason is on each row." },
   { key: "delivered_unpaid", label: "Awaiting CPR", hint: "Delivered to the customer, but the COD has not reached you yet. The CPR confirms it. This is the receivable." },
 ];
 
@@ -238,7 +240,7 @@ export default function ReturnsPage() {
        The count comes from the same figures the RPC already returns: everything
        that came back, less what is still chased. */
     { key: "closed_returns" as Section, label: "Returns delivered", Icon: PackageCheck, bg: "bg-periwinkle-soft",
-      n: closedCount, v: closedValue, sub: "cancelled in Shopify" },
+      n: closedCount, v: closedValue, sub: "cancelled · paid · aged out" },
     { key: "delivered_unpaid" as Section, label: "Awaiting CPR", Icon: Wallet, bg: "bg-success-soft",
       n: find("delivered_unpaid")?.n ?? 0, v: find("delivered_unpaid")?.value ?? 0,
       sub: find("delivered_unpaid")?.oldest_days ? `oldest ${find("delivered_unpaid")?.oldest_days}d` : undefined },
