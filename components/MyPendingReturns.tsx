@@ -86,7 +86,7 @@ export default function MyPendingReturns() {
               <Undo2 size={15} /> Pending returns
             </h2>
             <p className="mt-0.5 text-[12px] text-muted dark:text-[#a89f93]">
-              Parcels on their way back that nobody has confirmed yet. Print the sheet and tick them off.
+              Coming back from the courier and not yet cancelled in Shopify. When a parcel arrives, cancel it in Shopify and tag it RTS — it leaves this list by itself.
             </p>
           </div>
           <div className="flex items-baseline gap-2">

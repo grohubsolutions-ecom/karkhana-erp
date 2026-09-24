@@ -24,15 +24,20 @@ import ReturnsPrintButton from "@/components/ReturnsPrintSheet";
 type Section = "pending_returns" | "closed_returns" | "delivered_unpaid";
 
 const TABS: { key: Section; label: string; hint: string }[] = [
-  { key: "pending_returns",  label: "Pending returns",   hint: "Still needs chasing — not confirmed received, and not yet cancelled in Shopify. Newest first; the AGE column flags the ones going stale." },
+  /* THE OWNER'S RULE (H241): a return is pending until it is cancelled in
+     Shopify, and nothing else closes it. The team cancels an order in Shopify
+     (and tags it RTS) when the parcel is physically in the office, so the
+     cancel IS the receipt. A CPR settlement or the 9-day rule used to close
+     returns here too, hiding parcels nobody had received. */
+  { key: "pending_returns",  label: "Pending returns",   hint: "The courier says it is coming back, and it is not cancelled in Shopify — so it is not in the office yet. Cancel it in Shopify (tag RTS) when it arrives and it moves to Returns delivered." },
   /* A CLOSED RETURN HAD NOWHERE TO LIVE.
      Pending filters needs_chasing, and a return closed by the nightly job or by
      a settlement no longer needs chasing. The other tab is delivered parcels.
      So a real parcel — #4715, returned in May 2025, closed correctly — could not
      be seen anywhere in this screen, and searching for it said "Nothing here."
      which reads as "this does not exist". */
-  { key: "closed_returns",   label: "Closed returns",   hint: "Came back and no longer being chased — received, settled by a CPR, or closed automatically after nine days. The reason is on each row." },
-  { key: "delivered_unpaid", label: "Returns Delivered", hint: "Delivered to the customer, but the COD has not reached you. This is the receivable." },
+  { key: "closed_returns",   label: "Returns delivered", hint: "Back in the office — cancelled in Shopify. This is the only way a return gets here." },
+  { key: "delivered_unpaid", label: "Awaiting CPR", hint: "Delivered to the customer, but the COD has not reached you yet. The CPR confirms it. This is the receivable." },
 ];
 
 type ReturnRow = {
@@ -155,7 +160,7 @@ export default function ReturnsPage() {
       if (hits.length && tab !== "delivered_unpaid") {
         const allClosed  = hits.every((x) => x.needs_chasing === false);
         const allChasing = hits.every((x) => x.needs_chasing === true);
-        if (tab === "pending_returns" && allClosed)  { setJumped("Closed returns");  setTab("closed_returns"); }
+        if (tab === "pending_returns" && allClosed)  { setJumped("Returns delivered");  setTab("closed_returns"); }
         if (tab === "closed_returns"  && allChasing) { setJumped("Pending returns"); setTab("pending_returns"); }
       }
       return;
@@ -232,9 +237,9 @@ export default function ReturnsPage() {
 
        The count comes from the same figures the RPC already returns: everything
        that came back, less what is still chased. */
-    { key: "closed_returns" as Section, label: "Closed returns", Icon: PackageCheck, bg: "bg-periwinkle-soft",
-      n: closedCount, v: closedValue, sub: "no longer chased" },
-    { key: "delivered_unpaid" as Section, label: "Returns Delivered", Icon: Wallet, bg: "bg-success-soft",
+    { key: "closed_returns" as Section, label: "Returns delivered", Icon: PackageCheck, bg: "bg-periwinkle-soft",
+      n: closedCount, v: closedValue, sub: "cancelled in Shopify" },
+    { key: "delivered_unpaid" as Section, label: "Awaiting CPR", Icon: Wallet, bg: "bg-success-soft",
       n: find("delivered_unpaid")?.n ?? 0, v: find("delivered_unpaid")?.value ?? 0,
       sub: find("delivered_unpaid")?.oldest_days ? `oldest ${find("delivered_unpaid")?.oldest_days}d` : undefined },
   ];
