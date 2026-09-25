@@ -25,6 +25,7 @@ import { useRouter } from "next/navigation";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import MyWork from "@/components/MyWork";
 import MyPendingReturns from "@/components/MyPendingReturns";
+import FirstAttemptDesk from "@/components/FirstAttemptDesk";
 import HubBell from "@/components/HubBell";
 /* The Hub's phone rules (16px inputs so iPhones do not zoom, thumb-sized
    buttons, no sideways drift) apply here too — this is the page staff open on
@@ -70,18 +71,24 @@ export default function MyPortal() {
   const [err, setErr] = useState("");
   /* Work first. It is the half that changes during the day; the wage figure
      has not moved since last night. */
-  const [tab, setTab] = useState<"work" | "pay" | "returns">("work");
-  /* THE THIRD TAB IS NOT FOR EVERYONE.
-     Chasing returns is one person's job, so the tab appears only for whoever
-     holds 'returns.print'. The permission opens no page of its own — the
-     database function behind the tab is the only thing it unlocks — so a
-     portal without it is exactly the portal it was before. */
+  const [tab, setTab] = useState<"work" | "pay" | "returns" | "attempt">("work");
+  /* THE LAST TWO TABS ARE NOT FOR EVERYONE.
+     Each is one person's job and appears only for whoever holds its key:
+     'returns.print' is Abdul Rehman's printed returns sheet, 'returns.rescue'
+     is Abdullah's first-attempt desk. They are separate keys on purpose — the
+     two jobs are different, and neither man should inherit the other's screen.
+     Neither permission opens a page of its own; the database functions behind
+     the tabs are the only things they unlock, so a portal without them is
+     exactly the portal it was before. */
   const [canReturns, setCanReturns] = useState(false);
+  const [canRescue, setCanRescue] = useState(false);
 
   useEffect(() => {
     if (!isSupabaseConfigured || !supabase) return;
     supabase.rpc("has_permission", { p_permission_code: "returns.print" })
       .then(({ data }) => setCanReturns(data === true));
+    supabase.rpc("has_permission", { p_permission_code: "returns.rescue" })
+      .then(({ data }) => setCanRescue(data === true));
   }, []);
 
   const load = useCallback(async () => {
@@ -232,11 +239,15 @@ export default function MyPortal() {
           The same two tabs on a phone and on a desktop — there is no third
           layout to keep in step. */}
       <div className="mx-auto -mt-4 max-w-5xl px-4 sm:px-6">
-        <div className="mb-4 flex w-full gap-1 rounded-full bg-panel p-1 dark:bg-white/[0.06] sm:w-max">
+        {/* Two to a row on a phone. With four tabs a single row ran 170px past
+            the edge of a 390px screen and the last two could not be reached;
+            a lone last tab takes the whole width rather than sitting half-empty. */}
+        <div className="mb-4 grid w-full grid-cols-2 gap-1 rounded-[24px] bg-panel p-1 [&>button:last-child:nth-child(odd)]:col-span-2 dark:bg-white/[0.06] sm:flex sm:w-max sm:rounded-full">
           {([["work", "My work"], ["pay", "Attendance & pay"],
-             ...(canReturns ? [["returns", "Pending returns"] as const] : [])] as const).map(([key, label]) => (
+             ...(canReturns ? [["returns", "Pending returns"] as const] : []),
+             ...(canRescue ? [["attempt", "First attempt"] as const] : [])] as const).map(([key, label]) => (
             <button key={key} onClick={() => setTab(key)}
-              className={`h-11 flex-1 whitespace-nowrap rounded-full px-5 text-[13.5px] font-semibold transition sm:h-auto sm:flex-none sm:py-2 sm:text-[13px] ${
+              className={`h-11 min-w-0 flex-1 truncate rounded-full px-3 text-[13.5px] font-semibold transition sm:h-auto sm:flex-none sm:whitespace-nowrap sm:px-5 sm:py-2 sm:text-[13px] ${
                 tab === key ? "bg-ink text-white shadow-soft dark:bg-white dark:text-[#141414]"
                             : "text-muted hover:text-ink dark:text-[#a89f93] dark:hover:text-white"}`}>
               {label}
@@ -247,6 +258,10 @@ export default function MyPortal() {
         {tab === "work" && <MyWork />}
 
         {tab === "returns" && canReturns && <MyPendingReturns />}
+
+        {/* The same desk the office sees under Logistics — one component, one
+            pair of functions, so the two lists cannot drift apart. */}
+        {tab === "attempt" && canRescue && <FirstAttemptDesk compact />}
 
         <div className={`grid gap-4 lg:grid-cols-[1fr_1.05fr] lg:items-start ${tab === "pay" ? "" : "hidden"}`}>
 

@@ -80,6 +80,11 @@ export const ROUTE_PERMS: Record<string, string[] | null> = {
   "/online/orders": ["hub.orders.view", "hub.orders.manage"],
   "/online/logistics": ["hub.logistics.view", "hub.logistics.manage"],
   "/online/logistics/returns": ["hub.logistics.view", "hub.logistics.manage"],
+  /* H276 — the first-attempt desk. returns.rescue is Abdullah's own key:
+     it opens this page and nothing else, and it is not the key that opens
+     Abdul Rehman's returns print sheet. The logistics permissions are
+     listed too so the office can see the same worklist. */
+  "/online/logistics/first-attempt": ["returns.rescue", "hub.logistics.view", "hub.logistics.manage"],
   "/online/finance": ["hub.finance.view", "hub.finance.manage"],
   "/online/attendance": ["hub.attendance.view", "hub.attendance.manage"],
   "/online/employees": ["hub.attendance.view", "hub.attendance.manage"],

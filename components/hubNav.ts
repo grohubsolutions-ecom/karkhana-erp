@@ -1,4 +1,4 @@
-import { LayoutDashboard, ClipboardList, Truck, Wallet, CalendarCheck, Users, Undo2, AlertTriangle, PackageSearch, Gauge, type LucideIcon } from "lucide-react";
+import { LayoutDashboard, ClipboardList, Truck, Wallet, CalendarCheck, Users, Undo2, AlertTriangle, PackageSearch, Gauge, PhoneCall, type LucideIcon } from "lucide-react";
 import { requiredFor } from "@/lib/access";
 
 /* ONE LIST OF HUB PLACES, READ BY BOTH THE DESKTOP SIDEBAR AND THE PHONE BARS.
@@ -21,6 +21,10 @@ export const HUB_NAV: HubNavItem[] = [
   { label: "Logistics", short: "Shipping", href: "/online/logistics", Icon: Truck, children: [
       { label: "Shipments", href: "/online/logistics", Icon: Truck },
       { label: "Returns", href: "/online/logistics/returns", Icon: Undo2 },
+      /* A parcel that failed its first attempt is not a return yet — it is the
+         last chance to stop one. It sits beside Returns because it is the same
+         team and the same parcel, one step earlier. */
+      { label: "First attempt", href: "/online/logistics/first-attempt", Icon: PhoneCall },
   ] },
   /* Disputes are a separate job with its own worklist, not a tab inside the
      settlements screen. */
