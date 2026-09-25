@@ -119,23 +119,28 @@ export default function ReportsScreen({ side, report }: { side: Side; report: Re
     { k: "gst_amount", h: "GST", align: "r" as const, fmt: rs },
   ];
   const IDENT = [
-    { k: "system_code", h: "Code" },
-    { k: "manual_code", h: "Manual" },
+    { k: "manual_code", h: "Barcode" },
     { k: "item_name", h: "Item" },
     { k: "section", h: "Cat" },
   ];
 
   const COLS: Record<Rep, { k: string; h: string; align?: "r"; fmt?: (v: unknown) => string }[]> = {
-    /* One shape everywhere: code, manual barcode, item, category, quantity,
-       then the money. A report that drops columns is a different report
-       wearing the same name. */
+    /* One shape everywhere: barcode, item, category, quantity, then the
+       money. A report that drops columns is a different report wearing the
+       same name.
+
+       The barcode here is the PRINTED one — the label the shops and the
+       parties scan. Our own generated code (44-000001) is an internal key
+       and is deliberately not on any report, printout or export; it lives on
+       the Products list, where it is made and edited. Search still finds a
+       row by it: the filter reads every field, not only the shown columns. */
     grn: side === "factory"
       ? [{ k: "grn_number", h: "GRN" }, { k: "categories", h: "Catgry" },
          { k: "supplier", h: "Supplier" },
          { k: "quantity", h: "Qty", align: "r", fmt: n },
          { k: "total", h: "Value", align: "r", fmt: rs },
          { k: "received_at", h: "Received", fmt: when }]
-      : [{ k: "movement_no", h: "GRN" }, { k: "barcode", h: "Item code" },
+      : [{ k: "movement_no", h: "GRN" },
          { k: "manual_code", h: "Barcode" }, { k: "name", h: "Item description" },
          { k: "section", h: "Catgry" },
          { k: "quantity", h: "Qty", align: "r", fmt: n },
@@ -149,14 +154,14 @@ export default function ReportsScreen({ side, report }: { side: Side; report: Re
          { k: "what", h: "Item description" },
          { k: "quantity", h: "Qty", align: "r", fmt: n },
          { k: "went_to", h: "Went to" }, { k: "moved_at", h: "Date", fmt: when }]
-      : [{ k: "movement_no", h: "GRO" }, { k: "barcode", h: "Item code" },
+      : [{ k: "movement_no", h: "GRO" },
          { k: "manual_code", h: "Barcode" }, { k: "name", h: "Item description" },
          { k: "section", h: "Catgry" },
          { k: "quantity", h: "Qty", align: "r", fmt: n },
          { k: "retail_price", h: "Retail", align: "r", fmt: rs },
          { k: "retail_total", h: "Retail total", align: "r", fmt: rs },
          { k: "party", h: "Party" }, { k: "created_at", h: "Date", fmt: when }],
-    str: [{ k: "str_number", h: "STR" }, { k: "system_code", h: "Item code" },
+    str: [{ k: "str_number", h: "STR" },
           { k: "manual_code", h: "Barcode" }, { k: "item_name", h: "Item description" },
           { k: "section", h: "Catgry" },
           { k: "quantity", h: "Qty", align: "r", fmt: n },
@@ -175,7 +180,7 @@ export default function ReportsScreen({ side, report }: { side: Side; report: Re
          { k: "unit", h: "Unit" }, { k: "last_rate", h: "Cost", align: "r", fmt: rs },
          { k: "stock_value", h: "Cost total", align: "r", fmt: rs },
          { k: "last_supplier", h: "Supplier" }]
-      : [{ k: "system_code", h: "Item code" }, { k: "manual_code", h: "Barcode" },
+      : [{ k: "manual_code", h: "Barcode" },
          { k: "item_name", h: "Item description" }, { k: "section", h: "Catgry" },
          { k: "quantity", h: "Qty", align: "r", fmt: n },
          { k: "cost_price", h: "Cost", align: "r", fmt: rs },
@@ -183,8 +188,11 @@ export default function ReportsScreen({ side, report }: { side: Side; report: Re
          { k: "cost_total", h: "Cost total", align: "r", fmt: rs },
          { k: "retail_total", h: "Retail total", align: "r", fmt: rs },
          { k: "gst_amount", h: "GST%", align: "r", fmt: rs }],
+    /* "Item code" here is the article code — MTS-001, CTP-6-14 — not a
+       barcode. The barcode column that used to sit beside it held the
+       generated one, so it is gone with the rest. */
     blocked: [{ k: "kind", h: "Type" }, { k: "code", h: "Item code" },
-              { k: "name", h: "Item description" }, { k: "barcode", h: "Barcode" },
+              { k: "name", h: "Item description" },
               { k: "division", h: "Belongs to" },
               { k: "updated_at", h: "Blocked", fmt: when }],
   };

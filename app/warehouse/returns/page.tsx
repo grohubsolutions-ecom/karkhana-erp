@@ -129,9 +129,10 @@ export default function ReturnsPage() {
 
   const table = (): ExportTable => ({
     title: "Warehouse GR out - supplier returns",
-    headers: ["GRO", "Date", "Item code", "Barcode", "Item description", "Catgry",
+    /* The printed barcode only — ours is internal and stays off the sheet. */
+    headers: ["GRO", "Date", "Barcode", "Item description", "Catgry",
               "Qty", "Cost", "Cost total", "Reason"],
-    rows: view.map((r) => [r.movement_no, when(r.created_at), r.barcode,
+    rows: view.map((r) => [r.movement_no, when(r.created_at),
       r.manual_code ?? "", r.name, r.section ?? "", r.quantity,
       r.cost_price ?? "", r.cost_total ?? "", r.note ?? ""]),
   });

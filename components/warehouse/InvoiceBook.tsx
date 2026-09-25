@@ -68,13 +68,13 @@ export function printInvoice(inv: RegRow, lines: Line[]) {
     `<span>Delivery #</span><b>${esc(inv.delivery_no ?? "—")}</b><span>Items / pieces</span><b>${live.length} / ${esc(n(pcs))}</b>` +
     `</div></div>`;
   const table =
-    `<table><thead><tr><th>#</th><th>Item code</th><th>Printed barcode</th><th>Item description</th>` +
+    `<table><thead><tr><th>#</th><th>Barcode</th><th>Item description</th>` +
     `<th>Qty</th><th>Retail</th><th>Amount</th></tr></thead><tbody>` +
-    live.map((l, i) => `<tr><td>${i + 1}</td><td>${esc(l.barcode)}</td><td>${esc(l.manual_code ?? "")}</td>` +
+    live.map((l, i) => `<tr><td>${i + 1}</td><td>${esc(l.manual_code ?? "")}</td>` +
       `<td>${String(l.name ?? "").length > 34 ? `<span class="w">${esc(l.name)}</span>` : esc(l.name)}</td>` +
       `<td>${esc(n(l.quantity))}</td><td>${l.retail_price == null ? "" : esc(n(l.retail_price))}</td>` +
       `<td>${l.retail_total ? esc(n(l.retail_total)) : ""}</td></tr>`).join("") +
-    `<tr class="tot"><td></td><td></td><td></td><td>Total</td><td>${esc(n(pcs))}</td><td></td><td>${amt ? esc(n(amt)) : ""}</td></tr>` +
+    `<tr class="tot"><td></td><td></td><td>Total</td><td>${esc(n(pcs))}</td><td></td><td>${amt ? esc(n(amt)) : ""}</td></tr>` +
     `</tbody></table>`;
   const foot =
     `<div class="sign"><span>Prepared by</span><span>Checked by</span><span>Received by</span></div>` +
@@ -486,16 +486,15 @@ function InvoiceDetail({ inv, onBack, branches, items, manualOf, canOut, canMana
       <div className="mt-3 overflow-x-auto rounded-xl2 border border-line">
         <table className="w-full text-center text-[12.5px]">
           <thead className="bg-panel text-[10.5px] uppercase tracking-wide text-hint">
-            <tr><th className="px-3 py-2">Item code</th><th className="px-3 py-2">Printed</th><th className="px-3 py-2">Item</th>
+            <tr><th className="px-3 py-2">Barcode</th><th className="px-3 py-2">Item</th>
               <th className="px-3 py-2">Qty</th><th className="px-3 py-2">Retail</th><th className="px-3 py-2">Amount</th></tr>
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={6} className="py-6 text-muted">Loading…</td></tr>
+              <tr><td colSpan={5} className="py-6 text-muted">Loading…</td></tr>
             ) : lines.map((l) => (
               <tr key={l.id} className={`border-t border-line/70 ${l.voided_at ? "opacity-45 line-through" : ""}`}>
-                <td className="px-3 py-2 font-mono text-[12px]">{l.barcode}</td>
-                <td className="px-3 py-2 font-mono text-[12px] text-muted">{l.manual_code ?? "—"}</td>
+                <td className="px-3 py-2 font-mono text-[12px]">{l.manual_code ?? "—"}</td>
                 <td className="px-3 py-2 font-semibold text-ink">{l.name}{l.voided_at && <span className="ml-1 text-[11px] font-normal no-underline">(voided)</span>}</td>
                 <td className="px-3 py-2 tnum font-bold">{n(l.quantity)}</td>
                 <td className="px-3 py-2 tnum text-muted">{l.retail_price == null ? "—" : n(l.retail_price)}</td>
@@ -504,7 +503,7 @@ function InvoiceDetail({ inv, onBack, branches, items, manualOf, canOut, canMana
             ))}
             {!loading && (
               <tr className="border-t-2 border-line bg-panel/40 font-extrabold">
-                <td className="px-3 py-2" colSpan={3}>Total — {live.length} item{live.length === 1 ? "" : "s"}</td>
+                <td className="px-3 py-2" colSpan={2}>Total — {live.length} item{live.length === 1 ? "" : "s"}</td>
                 <td className="px-3 py-2 tnum">{n(pcs)}</td><td></td><td className="px-3 py-2 tnum">{amt ? n(amt) : "—"}</td>
               </tr>
             )}

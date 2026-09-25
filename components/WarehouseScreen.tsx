@@ -136,12 +136,21 @@ function WarehouseInner({ section }: { section: Tab }) {
   const [voidRow, setVoidRow] = useState<string | null>(null);
   const [voidWhy, setVoidWhy] = useState("");
   /* Editing a movement moves stock by the DIFFERENCE (K143) — the database
-     does that arithmetic, never the screen. */
-  const [editMv, setEditMv] = useState<string | null>(null);
+     does that arithmetic, never the screen. K182 opens it as a proper form:
+     the product, the quantity, the day and time, the note — and on the out
+     side the branch and invoice number too. Moving a line onto a different
+     product is not a difference, so the database takes the whole original
+     off the one it was on and puts the whole new quantity on the other. */
+  const [editMv, setEditMv] = useState<Move | null>(null);
+  const [eItem, setEItem] = useState("");
   const [eQty, setEQty] = useState("");
+  const [eDate, setEDate] = useState("");
+  const [eTime, setETime] = useState("");
   const [eInv, setEInv] = useState("");
   const [eBranch, setEBranch] = useState("");
   const [eNote, setENote] = useState("");
+  const [eBusy, setEBusy] = useState(false);
+  const [eErr, setEErr] = useState("");
   /* Voided rows stay out of the way by default — they are corrections, not
      work. The toggle keeps them one click away rather than gone. */
   const [showVoided, setShowVoided] = useState(false);
@@ -661,19 +670,42 @@ function WarehouseInner({ section }: { section: Tab }) {
   }
 
   function startEdit(m: Move) {
-    setEditMv(m.id); setVoidRow(null);
-    setEQty(String(m.quantity)); setEInv(m.invoice_no ?? "");
-    setEBranch(m.branch_id ?? ""); setENote(m.note ?? "");
+    setVoidRow(null); setEditMv(m); setEErr("");
+    /* The day and time it is recorded as, read off the saved moment in the
+       browser's own clock — the same clock the boxes write back with. */
+    const d = new Date(m.created_at);
+    const p2 = (x: number) => String(x).padStart(2, "0");
+    setEItem(items.find((i) => i.barcode === m.barcode)?.item_id ?? "");
+    setEQty(String(m.quantity));
+    setEDate(`${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`);
+    setETime(`${p2(d.getHours())}:${p2(d.getMinutes())}`);
+    setEInv(m.invoice_no ?? ""); setEBranch(m.branch_id ?? ""); setENote(m.note ?? "");
   }
-  async function saveEdit(m: Move) {
-    if (!supabase) return;
+
+  async function saveEdit() {
+    if (!supabase || !editMv) return;
+    const m = editMv;
+    setEErr("");
+    const q = parseFloat(eQty);
+    if (!(q > 0)) { setEErr("Quantity must be above zero."); return; }
+    if (!eItem) { setEErr("Choose the product this line is against."); return; }
+    setEBusy(true);
     const { error } = await supabase.rpc("khana_edit_movement", {
-      p_id: m.id, p_quantity: parseFloat(eQty),
-      p_note: eNote || null, p_invoice_no: eInv || null,
-      p_branch_id: eBranch || null,
+      p_id: m.id, p_quantity: q,
+      p_note: eNote.trim() || null,
+      /* An invoice number and a branch belong to a delivery going out. The
+         database ignores them on an arrival, but there is no reason to send
+         them at all. */
+      p_invoice_no: m.movement_type === "OUT" ? (eInv.trim() || null) : null,
+      p_branch_id: m.movement_type === "OUT" ? (eBranch || null) : null,
+      p_item_id: eItem,
+      p_at: stampAt(eDate, eTime) ?? null,
     });
-    if (error) { setErr(error.message); return; }
-    setEditMv(null); load();
+    setEBusy(false);
+    /* The database's own words, on the form the person is looking at — not at
+       the top of a page they have scrolled past. */
+    if (error) { setEErr(error.message); return; }
+    setEditMv(null); load(); loadMoney();
   }
 
   async function deleteMove(id: string) {
@@ -731,7 +763,9 @@ function WarehouseInner({ section }: { section: Tab }) {
            purpose — they are for the screen, not for the sheet that goes round
            the warehouse. Every row below is built to these seven columns;
            the headings and the rows must stay the same width. */
-        headers: ["Item code", "Barcode", "Item description", "Catgry", "Qty",
+        /* The printed barcode only. Ours is an internal key and does not go
+           out on a sheet — it stays on the Products list where it is made. */
+        headers: ["Barcode", "Item description", "Catgry", "Qty",
                   "Retail", "Retail total"],
         /* Grouped by section, highest quantity first inside each, with a
            subtotal under every group. A flat list mixes Kids and Men on the
@@ -752,17 +786,17 @@ function WarehouseInner({ section }: { section: Tab }) {
             const list = (groups.get(sec) ?? [])
               .sort((a, b) => Number(b.quantity) - Number(a.quantity) || a.name.localeCompare(b.name));
             const label = SECTION_NAME[sec] ?? "Other";
-            if (gi > 0) out.push(["", "", "", "", "", "", ""]);
-            out.push([`${sec} ${label}`.trim(), "", `${list.length} item(s)`, "", "", "", ""]);
+            if (gi > 0) out.push(["", "", "", "", "", ""]);
+            out.push([`${sec} ${label}`.trim(), `${list.length} item(s)`, "", "", "", ""]);
             let q = 0, rt = 0;
             list.forEach((i) => {
               const m = money[i.barcode];
               const r = m?.retail == null ? null : i.quantity * m.retail;
               q += Number(i.quantity || 0); rt += r ?? 0;
-              out.push([i.barcode, m?.manual ?? "", i.name, i.category ?? "",
+              out.push([m?.manual ?? "", i.name, i.category ?? "",
                 blank(i.quantity), blank(m?.retail), blank(r)]);
             });
-            out.push(["", "", `Subtotal ${label}`, "", blank(q), "", blank(rt)]);
+            out.push(["", `Subtotal ${label}`, "", blank(q), "", blank(rt)]);
           });
           return out;
         })() }
@@ -776,17 +810,17 @@ function WarehouseInner({ section }: { section: Tab }) {
         const d = (iso: string) => new Date(iso).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
         const pcs = list.filter((m) => !m.voided_at).reduce((a, m) => a + Number(m.quantity || 0), 0);
         if (tab === "in") {
-          const headers = ["Date", "Item code", "Printed", "Item description", "Qty", "Note", ...(anyVoid ? ["Voided"] : [])];
+          const headers = ["Date", "Barcode", "Item description", "Qty", "Note", ...(anyVoid ? ["Voided"] : [])];
           return { title: "Warehouse New GRN", headers,
-            rows: [...list.map((m) => [d(m.created_at), m.barcode, m.manual_code ?? "", m.name, m.quantity, m.note ?? "",
+            rows: [...list.map((m) => [d(m.created_at), m.manual_code ?? "", m.name, m.quantity, m.note ?? "",
                      ...(anyVoid ? [m.voided_at ? "voided" : ""] : [])]),
-                   ["", "", "", "Total", pcs, "", ...(anyVoid ? [""] : [])]] };
+                   ["", "", "Total", pcs, "", ...(anyVoid ? [""] : [])]] };
         }
-        const headers = ["Invoice", "Date", "Party", "Branch", "Del #", "Item code", "Printed", "Item description", "Qty", ...(anyVoid ? ["Voided"] : [])];
+        const headers = ["Invoice", "Date", "Party", "Branch", "Del #", "Barcode", "Item description", "Qty", ...(anyVoid ? ["Voided"] : [])];
         return { title: "Warehouse STR", headers,
           rows: [...list.map((m) => [m.invoice_no ?? "", d(m.created_at), m.party ?? "", m.branch ?? "", m.delivery_no ?? "",
-                   m.barcode, m.manual_code ?? "", m.name, m.quantity, ...(anyVoid ? [m.voided_at ? "voided" : ""] : [])]),
-                 ["", "", "", "", "", "", "", "Total", pcs, ...(anyVoid ? [""] : [])]] };
+                   m.manual_code ?? "", m.name, m.quantity, ...(anyVoid ? [m.voided_at ? "voided" : ""] : [])]),
+                 ["", "", "", "", "", "", "Total", pcs, ...(anyVoid ? [""] : [])]] };
       })();
 
   /* In and Out ARE the warehouse's GRNs — goods arriving and goods leaving.
@@ -1002,8 +1036,11 @@ function WarehouseInner({ section }: { section: Tab }) {
             <div className="overflow-hidden rounded-card border border-line bg-surface">
               <div className="overflow-x-auto"><table className="w-full text-left text-[13px]">
                 <thead><tr className="border-b border-line text-[11px] uppercase tracking-wide text-hint">
+                  {/* The printed barcode — the label the shops scan. Our own
+                      generated code is not a column here: this screen is what
+                      Reports → Stock report opens, and it gets printed. It is
+                      still editable, inside the row's edit form. */}
                   <th className="px-4 py-2.5 font-bold">Barcode</th>
-                  <th className="px-4 py-2.5 font-bold">Manual</th>
                   <th className="px-4 py-2.5 font-bold">Item</th>
                   <th className="px-4 py-2.5 font-bold">Category</th>
                   <th className="px-4 py-2.5 text-right font-bold">In stock</th>
@@ -1018,16 +1055,7 @@ function WarehouseInner({ section }: { section: Tab }) {
                   {fItems.map((i, ix) => (
                     <tr key={i.item_id} className={`border-b border-line/60 last:border-0 ${ix % 2 ? "bg-panel/25" : ""}`}>
                       <td className="px-4 py-2.5 font-mono text-[12px] text-ink">
-                        {editItem === i.item_id
-                          ? <input value={eBar} onChange={(e) => setEBar(e.target.value)}
-                              onKeyDown={(e) => { if (e.key === "Enter") saveItem(i); if (e.key === "Escape") setEditItem(null); }}
-                              className="w-36 rounded-lg border border-ink/30 px-2 py-1 font-mono text-[12px] outline-none" />
-                          : i.barcode}
-                      </td>
-                      {/* Theirs, beside ours. Both are printed on real
-                          labels, so both have to be readable here. */}
-                      <td className="px-4 py-2.5 font-mono text-[12px] text-muted">
-                        {money[i.barcode]?.manual ?? "—"}
+                        {money[i.barcode]?.manual ?? <span className="text-hint">no printed barcode</span>}
                       </td>
                       <td className="px-4 py-2.5 font-semibold text-ink">
                         {editItem === i.item_id ? (
@@ -1040,8 +1068,12 @@ function WarehouseInner({ section }: { section: Tab }) {
                               <option value="">no category</option>
                               {["Kids", "Child", "Ladies", "Men"].map((c) => <option key={c} value={c}>{c}</option>)}
                             </select>
+                            <input value={eBar} onChange={(e) => setEBar(e.target.value)}
+                              placeholder="our code"
+                              title="The code this system generated. Changing it changes what the warehouse matches deliveries against."
+                              className="w-28 rounded-lg border border-ink/30 px-2 py-1 font-mono text-[11.5px] font-normal outline-none" />
                             <input value={eManual} onChange={(e) => setEManual(e.target.value)}
-                              placeholder="manual barcode"
+                              placeholder="printed barcode"
                               className="w-36 rounded-lg border border-ink/30 px-2 py-1 font-mono text-[11.5px] font-normal outline-none" />
                             <input type="number" value={eCost} onChange={(e) => setECost(e.target.value)}
                               placeholder="cost"
@@ -1135,7 +1167,7 @@ function WarehouseInner({ section }: { section: Tab }) {
                 </tbody>
                 <tfoot>
                   <tr className="border-t-2 border-line bg-panel/40 text-[13px] font-extrabold text-ink">
-                    <td className="px-4 py-3" colSpan={4}>Total &mdash; {fItems.length} item(s)</td>
+                    <td className="px-4 py-3" colSpan={3}>Total &mdash; {fItems.length} item(s)</td>
                     <td className="px-4 py-3 text-right tnum">{n(fItems.reduce((a, i) => a + Number(i.quantity || 0), 0))}</td>
                     <td className="px-4 py-3" colSpan={3}></td>
                     <td className="px-4 py-3 text-right tnum">
@@ -1393,8 +1425,10 @@ function WarehouseInner({ section }: { section: Tab }) {
               <div className="overflow-x-auto"><table className="w-full text-left text-[13px]">
                 <thead><tr className="border-b border-line text-[11px] uppercase tracking-wide text-hint">
                   {tab === "out" && <th className="px-4 py-2.5 font-bold">#</th>}
+                  {/* The printed barcode, on both tabs — the same column the
+                      export and the printout carry, so the sheet and the
+                      screen say the same thing. */}
                   <th className="px-4 py-2.5 font-bold">Date</th><th className="px-4 py-2.5 font-bold">Barcode</th>
-                  {tab === "in" && <th className="px-4 py-2.5 font-bold">Printed</th>}
                   <th className="px-4 py-2.5 font-bold">Item</th>
                   <th className="px-4 py-2.5 text-right font-bold">Qty</th>
                   <th className="px-4 py-2.5 font-bold">{tab === "out" ? "Went to" : "Note"}</th><th className="px-4 py-2.5"></th>
@@ -1423,10 +1457,7 @@ function WarehouseInner({ section }: { section: Tab }) {
                         </td>
                       )}
                       <td className="px-4 py-2.5 text-[12px] text-muted">{when(m.created_at)}</td>
-                      <td className="px-4 py-2.5 font-mono text-[12px] text-ink">{m.barcode}</td>
-                      {tab === "in" && (
-                        <td className="px-4 py-2.5 font-mono text-[12px] text-muted">{m.manual_code ?? "—"}</td>
-                      )}
+                      <td className="px-4 py-2.5 font-mono text-[12px] text-ink">{m.manual_code ?? "—"}</td>
                       <td className="px-4 py-2.5 font-semibold text-ink">{m.name}</td>
                       <td className="px-4 py-2.5 text-right tnum font-bold text-ink">{n(m.quantity)}</td>
                       <td className="px-4 py-2.5 text-[12px] text-hint">
@@ -1468,25 +1499,6 @@ function WarehouseInner({ section }: { section: Tab }) {
                             <button onClick={() => setDelRow(m.id)} title="Delete this voided movement"
                               className="rounded-full p-1.5 text-muted transition hover:bg-panel hover:text-danger"><Trash2 size={14} /></button>
                           )
-                        ) : canManage && !m.voided_at && editMv === m.id ? (
-                          <span className="flex flex-wrap items-center justify-end gap-1.5">
-                            <input value={eQty} autoFocus onChange={(e) => setEQty(e.target.value)}
-                              type="number" placeholder="qty"
-                              className="w-20 rounded-lg border border-ink/30 px-2 py-1 text-[12px] outline-none" />
-                            {m.movement_type === "OUT" && (
-                              <>
-                                <select value={eBranch} onChange={(e) => setEBranch(e.target.value)}
-                                  className="w-28 rounded-lg border border-ink/30 px-1.5 py-1 text-[12px] outline-none">
-                                  <option value="">branch…</option>
-                                  {branches.filter((b) => b.party === m.party).map((b) => <option key={b.id} value={b.id}>{b.branch}</option>)}
-                                </select>
-                                <input value={eInv} onChange={(e) => setEInv(e.target.value)} placeholder="invoice"
-                                  className="w-28 rounded-lg border border-ink/30 px-2 py-1 text-[12px] outline-none" />
-                              </>
-                            )}
-                            <button onClick={() => saveEdit(m)} className="text-[11px] font-bold text-ink">save</button>
-                            <button onClick={() => setEditMv(null)} className="text-[11px] text-ink/50">cancel</button>
-                          </span>
                         ) : canManage && !m.voided_at && (voidRow === m.id ? (
                           <span className="flex items-center justify-end gap-1.5">
                             <input value={voidWhy} autoFocus placeholder="reason"
@@ -1551,6 +1563,108 @@ function WarehouseInner({ section }: { section: Tab }) {
             onOpenBook={(scope) => { closeMissing(); openBook({ scope }); }} />
         </>
       )}
+
+      {/* CORRECTING A LINE ALREADY SAVED (K182).
+          Everything about it, not only the number: the product it is against,
+          how many, the day and the time it happened, and the note. A wrong
+          barcode scanned at the bench used to mean voiding the whole line and
+          recording it again under a new number, for a delivery that only ever
+          happened once. */}
+      <Modal open={!!editMv} onClose={() => !eBusy && setEditMv(null)} wide
+        title={editMv?.movement_type === "IN" ? "Edit this GRN line" : "Edit this delivery line"}
+        subtitle={editMv?.movement_no ? `${editMv.movement_no} · recorded ${when(editMv.created_at)}` : undefined}>
+        {editMv && (() => {
+          /* Where the two balances land if this is saved. Moving a line to
+             another product takes the whole original off the one it was on
+             and puts the whole new quantity on the other — so both are worth
+             showing. Below zero is allowed (K181); it is said, not refused. */
+          const from = items.find((i) => i.barcode === editMv.barcode);
+          const to = items.find((i) => i.item_id === eItem);
+          const q = parseFloat(eQty) || 0;
+          const sign = editMv.movement_type === "IN" ? 1 : -1;
+          const moved = !!to && !!from && to.item_id !== from.item_id;
+          const toAfter = to
+            ? Number(to.quantity) + (moved ? sign * q : sign * (q - Number(editMv.quantity)))
+            : null;
+          const fromAfter = moved && from ? Number(from.quantity) - sign * Number(editMv.quantity) : null;
+          return (
+            <>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <Field label="Product">
+                  <select value={eItem} onChange={(e) => setEItem(e.target.value)}
+                    className="w-full rounded-xl2 border border-line bg-surface px-3 py-2 text-[13px] outline-none focus:border-ink/30">
+                    <option value="">Choose…</option>
+                    {items.map((i) => (
+                      <option key={i.item_id} value={i.item_id}>
+                        {(money[i.barcode]?.manual ?? i.barcode)} — {i.name}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label="Quantity">
+                  <input type="number" value={eQty} autoFocus onChange={(e) => setEQty(e.target.value)}
+                    className="w-full rounded-xl2 border border-line bg-surface px-3 py-2 text-[13px] outline-none focus:border-ink/30" />
+                </Field>
+                <Field label="Date it happened">
+                  <input type="date" value={eDate} max={new Date().toISOString().slice(0, 10)}
+                    onChange={(e) => setEDate(e.target.value)}
+                    className="w-full rounded-xl2 border border-line bg-surface px-3 py-2 text-[13px] outline-none focus:border-ink/30" />
+                </Field>
+                <Field label="Time">
+                  <input type="time" value={eTime} onChange={(e) => setETime(e.target.value)}
+                    className="w-full rounded-xl2 border border-line bg-surface px-3 py-2 text-[13px] outline-none focus:border-ink/30" />
+                </Field>
+                {editMv.movement_type === "OUT" && (
+                  <>
+                    <Field label="Branch">
+                      <select value={eBranch} onChange={(e) => setEBranch(e.target.value)}
+                        className="w-full rounded-xl2 border border-line bg-surface px-3 py-2 text-[13px] outline-none focus:border-ink/30">
+                        <option value="">no branch</option>
+                        {branches.filter((b) => b.party === editMv.party).map((b) => <option key={b.id} value={b.id}>{b.branch}</option>)}
+                      </select>
+                    </Field>
+                    <Field label="Party invoice number">
+                      <input value={eInv} onChange={(e) => setEInv(e.target.value)}
+                        className="w-full rounded-xl2 border border-line bg-surface px-3 py-2 text-[13px] outline-none focus:border-ink/30" />
+                    </Field>
+                  </>
+                )}
+                <div className="sm:col-span-2">
+                  <Field label={editMv.movement_type === "IN" ? "Note" : "Note (optional)"}>
+                    <input value={eNote} onChange={(e) => setENote(e.target.value)}
+                      className="w-full rounded-xl2 border border-line bg-surface px-3 py-2 text-[13px] outline-none focus:border-ink/30" />
+                  </Field>
+                </div>
+              </div>
+
+              {moved && from && to && (
+                <p className="mt-3 rounded-xl2 bg-amber-soft/60 px-3 py-2 text-[12px] leading-relaxed text-ink/80">
+                  This line moves off <b>{from.name}</b> and onto <b>{to.name}</b>.
+                  {" "}{from.name} goes to {n(fromAfter ?? 0)}, {to.name} goes to {n(toAfter ?? 0)}.
+                </p>
+              )}
+              {!moved && toAfter != null && toAfter !== Number(to?.quantity ?? 0) && (
+                <p className="mt-3 text-[12px] text-ink/70">
+                  Stock goes to {n(toAfter)}{toAfter < 0 && <span className="font-semibold text-danger"> — nothing came in for these yet</span>}.
+                </p>
+              )}
+              {editMv.original_quantity != null && (
+                <p className="mt-2 text-[12px] text-hint">First recorded as {n(Number(editMv.original_quantity))}.</p>
+              )}
+              {eErr && <p className="mt-3 text-[12.5px] font-medium text-danger">{eErr}</p>}
+
+              <div className="mt-5 flex justify-end gap-2">
+                <button onClick={() => setEditMv(null)} disabled={eBusy}
+                  className="rounded-xl2 border border-line px-4 py-2.5 text-[13px] font-semibold text-ink/70 hover:bg-panel">Cancel</button>
+                <button onClick={saveEdit} disabled={eBusy}
+                  className="flex items-center gap-1.5 rounded-xl2 bg-ink px-5 py-2.5 text-[13px] font-semibold text-white disabled:opacity-50">
+                  {eBusy && <Loader2 size={15} className="animate-spin" />} Save changes
+                </button>
+              </div>
+            </>
+          );
+        })()}
+      </Modal>
 
       <Modal open={!!histItem} onClose={() => setHistItem(null)} title="Stock in and out" wide>
         {histItem && (
