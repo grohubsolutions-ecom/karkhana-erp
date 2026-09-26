@@ -1,7 +1,9 @@
 "use client";
 
 /* ---------------------------------------------------------------------------
-   THE FIRST-ATTEMPT DESK.
+   DELIVERY UNDER REVIEW — the first-attempt desk.
+   (Named after PostEx's own screen, as the owner asked. The file and the URL
+   keep the older name, first-attempt, so nothing that links here breaks.)
 
    Both couriers give a parcel three tries before it comes back to Lahore. The
    ERP only ever met it at the end, as a return — freight paid twice and the
@@ -30,7 +32,7 @@ import {
   PackageX, UserRound, Bike, Undo2, RotateCw, CheckCircle2,
 } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
-import { Segmented, Sheet, Detail, PhoneCard, PageActions, useIsPhone, waNumber } from "@/components/HubUI";
+import { Segmented, Sheet, Detail, useIsPhone, waNumber } from "@/components/HubUI";
 
 type Row = {
   tracking_id: string; courier: string | null; order_number: string | null; store_code: string | null;
@@ -100,6 +102,28 @@ function groupMessage(r: Row): string {
   ].join("\n");
 }
 
+/* SEVERAL AT ONCE, for the group. One ask at the top, then one short block
+   per parcel, numbered so their reply can say "3) 0301…". *bold* is WhatsApp's
+   own markup for the order numbers they will scan for. */
+function bulkMessage(rows: Row[]): string {
+  if (rows.length === 1) return groupMessage(rows[0]);
+  /* Always one courier per message — the caller splits them — so the group
+     it is pasted into can see at a glance that every parcel is theirs. */
+  const cn = rows[0]?.courier ?? "Courier";
+  const head = [`*${cn} — delivery under review — ${rows.length} parcels*`, "Please share the rider's number for each.", ""];
+  const blocks = rows.map((r, i) => {
+    const who = [r.customer_name, r.city].filter(Boolean).join(" — ");
+    return [
+      `*${i + 1}) ${r.order_number ?? r.tracking_id}* · ${r.tracking_id}`,
+      `${ordinal(r.attempts)} attempt${r.raw_status ? ` (${r.raw_status})` : ""} · ${r.reason ?? "reason not given"}`,
+      [r.cod_amount != null ? rs(r.cod_amount) : null, who || null].filter(Boolean).join(" · ") || "—",
+    ].join("\n");
+  });
+  /* The blank line after the request is part of head; the blocks are joined
+     to it with a newline, not glued on. */
+  return [...head, blocks.join("\n\n")].join("\n");
+}
+
 async function copyText(text: string): Promise<boolean> {
   try {
     await navigator.clipboard.writeText(text);
@@ -128,8 +152,18 @@ export default function FirstAttemptDesk({ compact = false }: { compact?: boolea
   const [err, setErr] = useState("");
   const [scope, setScope] = useState<"open" | "done">("open");
   const [courier, setCourier] = useState<"All" | "PostEx" | "OwnEx">("All");
+  /* THE OWNER'S TABS: the attempt a parcel is on, not the courier it is with.
+     The courier is a narrowing, so it became a dropdown beside them. */
+  const [attempt, setAttempt] = useState<"1" | "2" | "3">("1");
   const [openKey, setOpenKey] = useState<string | null>(null);
   const [copied, setCopied] = useState("");
+  /* Rows ticked for copying. Cleared whenever the list underneath changes, so
+     a tick can never be copied from a parcel that is no longer on screen. */
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  /* The rider's number, typed straight into the row. Held here until saved. */
+  const [riderDraft, setRiderDraft] = useState<Record<string, string>>({});
+  const [savingRider, setSavingRider] = useState("");
+  const [riderErr, setRiderErr] = useState<Record<string, string>>({});
 
   /* Two taps on the scope and the slower answer can land last, painting the
      other list. Every Hub screen with a filter guards this the same way. */
@@ -143,7 +177,7 @@ export default function FirstAttemptDesk({ compact = false }: { compact?: boolea
     setLoading(false);
     if (error) {
       setErr(/function|schema cache/i.test(error.message)
-        ? "This desk needs migrations H274–H277, which have not been run on the database yet."
+        ? "This desk needs migration H278, which has not been run on the database yet."
         : error.message);
       return;
     }
@@ -152,12 +186,29 @@ export default function FirstAttemptDesk({ compact = false }: { compact?: boolea
     setBoard(b);
   }, [scope]);
   useEffect(() => { load(); }, [load]);
+  useEffect(() => { setPicked(new Set()); }, [scope, courier, attempt]);
+  /* After a refresh, a tick on a parcel that has left the list is dropped. */
+  useEffect(() => {
+    const here = new Set((board?.rows ?? []).map((r) => r.tracking_id));
+    setPicked((p) => { const n = new Set([...p].filter((t) => here.has(t))); return n.size === p.size ? p : n; });
+  }, [board]);
 
-  const rows = useMemo(
+  const byCourier = useMemo(
     () => (board?.rows ?? []).filter((r) => courier === "All" || r.courier === courier),
     [board, courier]
   );
+  /* A fourth try should not exist, but if a courier ever reports one it
+     belongs with the third, not nowhere. */
+  const tabOf = (r: Row) => (r.attempts >= 3 ? "3" : r.attempts === 2 ? "2" : "1");
+  const counts = useMemo(() => {
+    const c = { "1": 0, "2": 0, "3": 0 };
+    for (const r of byCourier) c[tabOf(r)]++;
+    return c;
+  }, [byCourier]);
+  const rows = useMemo(() => byCourier.filter((r) => tabOf(r) === attempt), [byCourier, attempt]);
   const open = useMemo(() => (board?.rows ?? []).find((r) => r.tracking_id === openKey) ?? null, [board, openKey]);
+  const pickedRows = rows.filter((r) => picked.has(r.tracking_id));
+  const allPicked = rows.length > 0 && pickedRows.length === rows.length;
 
   async function save(tracking: string, patch: Record<string, unknown>) {
     if (!supabase) return false;
@@ -165,6 +216,9 @@ export default function FirstAttemptDesk({ compact = false }: { compact?: boolea
     const r = (data ?? {}) as { ok?: boolean; error?: string };
     if (error || !r.ok) { setErr(error?.message ?? r.error ?? "Could not save that."); return false; }
     setErr("");
+    /* A number saved from the opened parcel must not be hidden behind an
+       unsaved one still sitting in the row's box. */
+    if ("p_rider_phone" in patch) setRiderDraft((d) => { const n = { ...d }; delete n[tracking]; return n; });
     /* Ticking it off moves it out of this list, so the sheet would vanish
        mid-tap with nothing said. Close it deliberately instead. */
     if (patch.p_done === true) setOpenKey(null);
@@ -172,42 +226,117 @@ export default function FirstAttemptDesk({ compact = false }: { compact?: boolea
     return true;
   }
 
-  async function copyRow(r: Row) {
-    const ok = await copyText(groupMessage(r));
-    setCopied(ok ? r.tracking_id : "");
-    if (!ok) setErr("The phone would not let the page copy. Press and hold the message to copy it by hand.");
-    setTimeout(() => setCopied(""), 2200);
+  async function saveRider(r: Row) {
+    const v = riderDraft[r.tracking_id];
+    if (v === undefined || savingRider === r.tracking_id) return;   // Enter twice is one save
+    setSavingRider(r.tracking_id);
+    setRiderErr((e) => { const n = { ...e }; delete n[r.tracking_id]; return n; });
+    const ok = await save(r.tracking_id, { p_rider_phone: v });
+    setSavingRider((cur) => (cur === r.tracking_id ? "" : cur));
+    /* Thirty cards down, an error at the top of the page is an error nobody
+       sees. It goes on the card whose number did not save. */
+    if (!ok) setRiderErr((e) => ({ ...e, [r.tracking_id]: "Did not save — try again." }));
+  }
+
+  async function copy(key: string, text: string) {
+    const ok = await copyText(text);
+    setCopied(ok ? key : "");
+    if (!ok) setErr("The phone would not let the page copy. Try once more; if it still refuses, open a parcel and press and hold its message to copy it by hand.");
+    setTimeout(() => setCopied((c) => (c === key ? "" : c)), 2200);
+  }
+
+  function toggle(t: string) {
+    setPicked((p) => { const n = new Set(p); if (n.has(t)) n.delete(t); else n.add(t); return n; });
+  }
+  function toggleAll() {
+    setPicked(allPicked ? new Set() : new Set(rows.map((r) => r.tracking_id)));
   }
 
   const s = board?.summary;
+  const noRider = scope === "open" ? (board?.rows ?? []).filter((r) => !r.rider_phone).length : null;
+  const toCopy = pickedRows.length ? pickedRows : rows;
+  /* EACH COURIER HAS ITS OWN GROUP. One message holding both would ask PostEx
+     about OwnEx parcels, so a mixed list becomes one button per courier. */
+  const copyGroups = (["PostEx", "OwnEx", "Other"] as const)
+    .map((c) => ({ c, list: toCopy.filter((r) => (c === "Other" ? r.courier !== "PostEx" && r.courier !== "OwnEx" : r.courier === c)) }))
+    .filter((g) => g.list.length > 0);
 
   return (
     <div className="mt-1">
       {/* ------------------------------------------------------- the numbers */}
       {s && (
         <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
-          <Stat label="On the desk" value={String(s.open)} sub={`${s.postex} PostEx · ${s.ownex} OwnEx`} tone="#E5786B" />
+          <Stat label="Under review" value={String(s.open)} sub={`${s.postex} PostEx · ${s.ownex} OwnEx`} tone="#E5786B" />
           <Stat label="Not yet called" value={String(s.untouched)} sub="nobody has rung the customer" tone="#E4B47E" />
-          <Stat label="On their last try" value={String(s.last_try)} sub="third attempt — no more re-tries" tone="#B693DD" />
+          <Stat label="No rider number" value={noRider == null ? "—" : String(noRider)} sub="still to ask the group" tone="#A6C0E6" />
           <Stat label="Saved so far" value={String(s.saved)} sub={s.lost ? `${s.lost} still came back` : "delivered after a failed try"} tone="#7FC489" />
         </div>
       )}
 
-      {/* ------------------------------------------------------------ filters */}
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <Segmented value={courier} onChange={setCourier} className="flex-1 sm:flex-none"
-          options={[{ key: "All" as const, label: "Both" }, { key: "PostEx" as const, label: "PostEx" }, { key: "OwnEx" as const, label: "OwnEx" }]} />
-        <Segmented value={scope} onChange={setScope} className="flex-1 sm:flex-none"
-          options={[{ key: "open" as const, label: "Working" }, { key: "done" as const, label: "Finished" }]} />
-        <PageActions>
-          <button onClick={load}
-            className="flex items-center justify-center gap-2 rounded-full border border-line bg-surface px-4 py-2 text-[13px] font-semibold text-ink transition hover:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:hover:bg-white/[0.12]">
-            <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> Refresh
-          </button>
-        </PageActions>
+      {/* --------------------------------------------------- attempt tabs */}
+      <Segmented className="mt-3 w-full md:w-max" value={attempt} onChange={setAttempt}
+        options={([["1", "1st attempt", "1st"], ["2", "2nd attempt", "2nd"], ["3", "3rd attempt", "3rd"]] as const).map(([key, label, short]) => ({
+          key, label, short,
+          badge: (
+            <span className={`ml-1 rounded-full px-1.5 text-[11px] font-bold tabular-nums ${attempt === key
+              ? "bg-white/20 dark:bg-black/10" : "bg-black/[0.06] dark:bg-white/10"}`}>{counts[key]}</span>
+          ),
+        }))} />
+
+      {/* ------------------------------------------------ narrow it down */}
+      <div className="mt-2 grid grid-cols-2 gap-2 md:flex md:flex-wrap md:items-center">
+        <select value={courier} onChange={(e) => setCourier(e.target.value as typeof courier)} aria-label="Courier"
+          className="h-11 min-w-0 rounded-full border border-line bg-surface px-3 text-[16px] font-semibold text-ink outline-none md:h-10 xl:h-9 xl:text-[13px] dark:border-white/10 dark:bg-white/[0.06] dark:text-white">
+          <option value="All">Both couriers</option>
+          <option value="PostEx">PostEx</option>
+          <option value="OwnEx">OwnEx</option>
+        </select>
+        <select value={scope} onChange={(e) => setScope(e.target.value as typeof scope)} aria-label="Working or finished"
+          className="h-11 min-w-0 rounded-full border border-line bg-surface px-3 text-[16px] font-semibold text-ink outline-none md:h-10 xl:h-9 xl:text-[13px] dark:border-white/10 dark:bg-white/[0.06] dark:text-white">
+          <option value="open">Still working</option>
+          <option value="done">Finished</option>
+        </select>
+        <button onClick={load}
+          className="col-span-2 flex h-11 items-center justify-center gap-2 rounded-full border border-line bg-surface px-4 text-[13px] font-semibold text-ink transition hover:bg-panel md:col-span-1 md:h-9 dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:hover:bg-white/[0.12]">
+          <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> Refresh
+        </button>
       </div>
 
-      {err && (
+      {/* ------------------------------------------ pick and copy, in bulk */}
+      {/* Only while working: finished parcels have no rider left to ask for. */}
+      {rows.length > 0 && scope === "open" && (
+        <div className="mt-3 flex flex-wrap items-center gap-2 rounded-card border border-line bg-surface px-3 py-2 dark:border-white/[0.06] dark:bg-[#201c17]">
+          <label className="flex min-h-[40px] cursor-pointer items-center gap-2 pr-1 text-[13px] font-semibold text-ink dark:text-[#f4f1ea]">
+            <input type="checkbox" checked={allPicked} onChange={toggleAll}
+              ref={(el) => { if (el) el.indeterminate = pickedRows.length > 0 && !allPicked; }}
+              className="h-5 w-5 shrink-0 accent-[#141414] dark:accent-white" />
+            {pickedRows.length ? `${pickedRows.length} picked` : `Pick all ${rows.length}`}
+          </label>
+          <div className="ml-auto flex flex-wrap items-center gap-2">
+            {pickedRows.length > 0 && (
+              <button onClick={() => setPicked(new Set())}
+                className="h-10 rounded-full px-3 text-[12.5px] font-semibold text-muted hover:text-ink dark:text-[#a89f93] dark:hover:text-white">
+                Clear
+              </button>
+            )}
+            {copyGroups.map(({ c, list }) => {
+              const key = "__bulk_" + c;
+              const label = copyGroups.length > 1
+                ? `Copy ${list.length} ${c}`
+                : pickedRows.length ? `Copy ${list.length} picked` : `Copy all ${list.length}`;
+              return (
+                <button key={key} onMouseDown={(e) => e.preventDefault()} onClick={() => copy(key, bulkMessage(list))}
+                  className={`flex h-10 items-center gap-2 rounded-full px-4 text-[13px] font-semibold transition ${copied === key
+                    ? "bg-success-soft text-[#2f7a3d]" : "bg-ink text-white dark:bg-white dark:text-[#141414]"}`}>
+                  {copied === key ? <><Check size={15} /> Copied {list.length}</> : <><Copy size={15} /> {label}</>}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {err && !open && (
         <div className="mt-3 flex items-start justify-between gap-2 rounded-card border border-red-300 bg-red-50 p-3 text-[13px] text-red-800">
           <span className="flex items-start gap-2"><AlertTriangle size={16} className="mt-0.5 shrink-0" />{err}</span>
           <button onClick={() => setErr("")} className="shrink-0 font-semibold opacity-60 hover:opacity-100">Dismiss</button>
@@ -222,83 +351,186 @@ export default function FirstAttemptDesk({ compact = false }: { compact?: boolea
 
       {board && rows.length === 0 && !loading && (
         <p className="px-4 py-14 text-center text-[13px] text-muted dark:text-[#a89f93]">
-          {scope === "open" ? "Nothing waiting. Every failed attempt has been dealt with." : "Nothing finished yet."}
+          {scope === "open"
+            ? `Nothing on its ${ordinal(Number(attempt))} attempt${courier === "All" ? "" : ` with ${courier}`} right now.`
+            : "Nothing finished here yet."}
         </p>
       )}
 
-      {/* --------------------------------------------------------- phone list */}
+      {/* ----------------------------------------------- cards (below 1280px) */}
+      {/* One column on a phone, two on a tablet or a small laptop. The table
+          only takes over at 1280px, where all its columns fit without a
+          sideways scroll — below that the rider box and Copy fell off the edge. */}
       {rows.length > 0 && (
-        <div className="mt-3 space-y-2 md:hidden">
-          {rows.map((r) => (
-            <PhoneCard key={r.tracking_id} onClick={() => setOpenKey(r.tracking_id)}>
-              <div className="flex items-start justify-between gap-2">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-1.5">
-                    <span className={`rounded-full px-1.5 py-0.5 text-[10.5px] font-bold ${COURIER_TONE[r.courier ?? ""] ?? "bg-panel text-muted"}`}>{r.courier}</span>
-                    <span className="text-[14px] font-bold text-ink dark:text-[#f4f1ea]">{r.order_number ?? r.tracking_id}</span>
-                  </div>
-                  <div className="mt-0.5 truncate text-[12px] text-muted dark:text-[#a89f93]">
-                    {r.customer_name ?? "—"}{r.city ? ` · ${r.city}` : ""}
-                  </div>
+        <div className="mt-3 space-y-2 md:grid md:grid-cols-2 md:gap-3 md:space-y-0 xl:hidden">
+          {rows.map((r) => {
+            const draft = riderDraft[r.tracking_id];
+            const riderVal = draft ?? r.rider_phone ?? "";
+            const dirty = draft !== undefined && draft !== (r.rider_phone ?? "");
+            const on = picked.has(r.tracking_id);
+            return (
+              /* A card with inputs in it cannot itself be one big button — so the
+                 top half opens the parcel and the bottom half is the work. */
+              <div key={r.tracking_id} className={`rounded-xl2 border bg-surface dark:bg-[#201c17] ${on
+                ? "border-ink dark:border-white/60" : "border-line dark:border-white/[0.06]"}`}>
+                <div className="flex items-start gap-2.5 px-3 pt-3">
+                  {/* A 20px box is a miss on a phone. The label around it is the
+                      real target — 44px — and the negative margin keeps the card
+                      laid out as if it were only the box. */}
+                  <label className="-m-3 flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center">
+                    <input type="checkbox" checked={on} onChange={() => toggle(r.tracking_id)} aria-label={`Pick ${r.order_number ?? r.tracking_id}`}
+                      className="h-5 w-5 accent-[#141414] dark:accent-white" />
+                  </label>
+                  <button type="button" onClick={() => setOpenKey(r.tracking_id)} className="ml-1 min-w-0 flex-1 text-left">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5">
+                          <span className={`rounded-full px-1.5 py-0.5 text-[10.5px] font-bold ${COURIER_TONE[r.courier ?? ""] ?? "bg-panel text-muted"}`}>{r.courier ?? "—"}</span>
+                          <span className="truncate text-[14px] font-bold text-ink dark:text-[#f4f1ea]">{r.order_number ?? r.tracking_id}</span>
+                        </div>
+                        <div className="mt-0.5 truncate text-[12px] text-muted dark:text-[#a89f93]">
+                          {r.customer_name ?? "—"}{r.city ? ` · ${r.city}` : ""}
+                        </div>
+                      </div>
+                      <div className="shrink-0 text-right">
+                        <div className="text-[14px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">{rs(r.cod_amount)}</div>
+                        <div className={`text-[11.5px] font-semibold ${heat(r.waiting_hours)}`}>{waited(r.waiting_hours)}</div>
+                      </div>
+                    </div>
+                    <div className="mt-1.5 truncate text-[12px] text-muted dark:text-[#a89f93]">{r.reason ?? "no reason given — ask the group"}</div>
+                  </button>
                 </div>
-                <div className="shrink-0 text-right">
-                  <div className="text-[14px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">{rs(r.cod_amount)}</div>
-                  <div className={`text-[11.5px] font-semibold ${heat(r.waiting_hours)}`}>{waited(r.waiting_hours)} waiting</div>
+
+                <div className="mt-2 grid grid-cols-2 gap-2 px-3">
+                  {r.phone ? (
+                    <a href={`tel:${dial(r.phone)}`}
+                      className="flex h-10 min-w-0 items-center justify-center gap-1.5 rounded-full bg-panel px-2 text-[12.5px] font-semibold tabular-nums text-ink dark:bg-white/[0.07] dark:text-white">
+                      <Phone size={13} className="shrink-0" /><span className="truncate">{r.phone}</span>
+                    </a>
+                  ) : <span className="flex h-10 items-center justify-center rounded-full bg-panel text-[12px] text-hint dark:bg-white/[0.05]">no customer number</span>}
+                  <button onMouseDown={(e) => e.preventDefault()} onClick={() => copy(r.tracking_id, groupMessage(r))}
+                    className={`flex h-10 items-center justify-center gap-1.5 rounded-full text-[12.5px] font-semibold transition ${copied === r.tracking_id
+                      ? "bg-success-soft text-[#2f7a3d]" : "border border-line text-ink dark:border-white/10 dark:text-white"}`}>
+                    {copied === r.tracking_id ? <><Check size={13} /> Copied</> : <><Copy size={13} /> Copy</>}
+                  </button>
                 </div>
+
+                <div className="flex items-center gap-2 px-3 pb-3 pt-2">
+                  <input value={riderVal} inputMode="tel" placeholder="Rider's number" disabled={!board?.may_work}
+                    aria-label={`Rider's number for ${r.order_number ?? r.tracking_id}`}
+                    onChange={(e) => setRiderDraft((d) => ({ ...d, [r.tracking_id]: e.target.value }))}
+                    onKeyDown={(e) => { if (e.key === "Enter") saveRider(r); }}
+                    className="h-10 min-w-0 flex-1 rounded-full border border-line bg-canvas px-3.5 text-[16px] text-ink outline-none disabled:opacity-60 dark:border-white/10 dark:bg-white/[0.04] dark:text-white" />
+                  {dirty ? (
+                    /* onMouseDown keeps the focus in the box. Without it the tap
+                       blurs the box first, the Hub's bottom bar (hidden while
+                       typing) springs back under the finger, and the tap lands
+                       on the bar instead of Save. */
+                    <button onMouseDown={(e) => e.preventDefault()} onClick={() => saveRider(r)} disabled={savingRider === r.tracking_id}
+                      className="flex h-10 shrink-0 items-center gap-1.5 rounded-full bg-ink px-4 text-[12.5px] font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-[#141414]">
+                      {savingRider === r.tracking_id ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />} Save
+                    </button>
+                  ) : (
+                    <div className="flex shrink-0 gap-1">
+                      <Step on={!!r.customer_called_at} text="cust" />
+                      <Step on={!!r.verdict} text="verdict" />
+                    </div>
+                  )}
+                </div>
+                {riderErr[r.tracking_id] && (
+                  <p className="-mt-1 px-4 pb-3 text-[12px] font-semibold text-red-700 dark:text-red-300">{riderErr[r.tracking_id]}</p>
+                )}
               </div>
-              <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11.5px]">
-                <Tag n={r.attempts} />
-                <span className="truncate text-muted dark:text-[#a89f93]">{r.reason ?? "no reason given"}</span>
-              </div>
-              <div className="mt-2 flex flex-wrap gap-1.5">
-                <Step on={!!r.customer_called_at} text="customer" />
-                <Step on={!!r.rider_phone} text="rider no." />
-                <Step on={!!r.rider_called_at} text="rider" />
-                <Step on={!!r.verdict} text="verdict" />
-              </div>
-            </PhoneCard>
-          ))}
+            );
+          })}
         </div>
       )}
 
       {/* ------------------------------------------------------ desktop table */}
+      {/* Built to fit a laptop with the menu open (about 950px). At 1080px the
+          rider box and the Copy button — the two things used on every row —
+          sat off the right edge behind a sideways scroll. The courier rides on
+          the order, the tracking sits under it, and the order itself opens the
+          parcel, so no column is spent on any of those. */}
       {rows.length > 0 && (
-        <div className="mt-3 hidden md:block">
+        <div className="mt-3 hidden xl:block">
           <div className="overflow-x-auto rounded-card border border-line bg-surface dark:border-white/[0.06] dark:bg-[#201c17]">
-            <table className="w-full min-w-[900px] text-[13px]">
+            <table className="w-full min-w-[860px] text-[13px]">
               <thead className="bg-panel text-left text-[11px] uppercase tracking-wide text-muted dark:bg-white/[0.05] dark:text-[#a89f93]">
                 <tr>
-                  {["Courier", "Try", "Order", "Tracking", "Why it failed", "Amount", "Customer", "Waiting", "Rider", "Done so far"].map((h) => (
-                    <th key={h} className="whitespace-nowrap px-3 py-2 font-semibold">{h}</th>
+                  <th className="w-10 px-3 py-2">
+                    <input type="checkbox" checked={allPicked} onChange={toggleAll} aria-label="Pick every row"
+                      ref={(el) => { if (el) el.indeterminate = pickedRows.length > 0 && !allPicked; }}
+                      className="h-4 w-4 accent-[#141414] dark:accent-white" />
+                  </th>
+                  {["Order", "Why it failed", "Amount", "Customer", "Customer no.", "Waiting", "Rider no.", ""].map((h, i) => (
+                    <th key={h + i} className="whitespace-nowrap px-2.5 py-2 font-semibold">{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
-                {rows.map((r) => (
-                  <tr key={r.tracking_id} onClick={() => setOpenKey(r.tracking_id)}
-                    className="cursor-pointer border-t border-line transition hover:bg-panel dark:border-white/[0.06] dark:hover:bg-white/[0.04]">
-                    <td className="px-3 py-2">
-                      <span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${COURIER_TONE[r.courier ?? ""] ?? "bg-panel text-muted"}`}>{r.courier}</span>
-                    </td>
-                    <td className="px-3 py-2"><Tag n={r.attempts} /></td>
-                    <td className="px-3 py-2 font-semibold text-ink dark:text-[#f4f1ea]">{r.order_number ?? "—"}</td>
-                    <td className="px-3 py-2 tabular-nums text-muted dark:text-[#a89f93]">{r.tracking_id}</td>
-                    <td className="max-w-[220px] px-3 py-2">
-                      {r.reason ?? <span className="text-hint">not given — ask the group</span>}
-                    </td>
-                    <td className="px-3 py-2 tabular-nums">{rs(r.cod_amount)}</td>
-                    <td className="max-w-[170px] truncate px-3 py-2">{r.customer_name ?? "—"}<span className="text-hint">{r.city ? ` · ${r.city}` : ""}</span></td>
-                    <td className={`px-3 py-2 font-semibold tabular-nums ${heat(r.waiting_hours)}`}>{waited(r.waiting_hours)}</td>
-                    <td className="px-3 py-2 tabular-nums">{r.rider_phone ?? <span className="text-hint">—</span>}</td>
-                    <td className="px-3 py-2">
-                      <div className="flex gap-1">
-                        <Step on={!!r.customer_called_at} text="cust" />
-                        <Step on={!!r.rider_called_at} text="rider" />
-                        <Step on={!!r.verdict} text={r.verdict ?? "verdict"} />
-                      </div>
-                    </td>
-                  </tr>
-                ))}
+                {rows.map((r) => {
+                  const draft = riderDraft[r.tracking_id];
+                  const riderVal = draft ?? r.rider_phone ?? "";
+                  const dirty = draft !== undefined && draft !== (r.rider_phone ?? "");
+                  const on = picked.has(r.tracking_id);
+                  return (
+                    <tr key={r.tracking_id} className={`border-t border-line align-top transition dark:border-white/[0.06] ${on ? "bg-panel dark:bg-white/[0.05]" : "hover:bg-panel/60 dark:hover:bg-white/[0.03]"}`}>
+                      <td className="px-3 py-2.5">
+                        <input type="checkbox" checked={on} onChange={() => toggle(r.tracking_id)} aria-label={`Pick ${r.order_number ?? r.tracking_id}`}
+                          className="h-4 w-4 accent-[#141414] dark:accent-white" />
+                      </td>
+                      <td className="px-2.5 py-2">
+                        <button onClick={() => setOpenKey(r.tracking_id)} className="group text-left" title="Open the parcel">
+                          <span className="flex items-center gap-1.5">
+                            <span className={`rounded-full px-1.5 py-0.5 text-[10.5px] font-bold ${COURIER_TONE[r.courier ?? ""] ?? "bg-panel text-muted"}`}>{r.courier ?? "—"}</span>
+                            <span className="font-semibold text-ink underline-offset-2 group-hover:underline dark:text-[#f4f1ea]">{r.order_number ?? "—"}</span>
+                          </span>
+                          <span className="mt-0.5 block text-[11.5px] tabular-nums text-muted dark:text-[#a89f93]">{r.tracking_id}</span>
+                        </button>
+                      </td>
+                      <td className="max-w-[170px] px-2.5 py-2.5 leading-snug">
+                        {r.reason ?? <span className="text-hint">not given — ask the group</span>}
+                      </td>
+                      <td className="whitespace-nowrap px-2.5 py-2.5 tabular-nums">{rs(r.cod_amount)}</td>
+                      <td className="max-w-[150px] px-2.5 py-2 leading-snug">
+                        <span className="block truncate">{r.customer_name ?? "—"}</span>
+                        {r.city && <span className="block truncate text-[11.5px] text-muted dark:text-[#a89f93]">{r.city}</span>}
+                      </td>
+                      <td className="whitespace-nowrap px-2.5 py-2.5 tabular-nums">
+                        {r.phone ? <a href={`tel:${dial(r.phone)}`} className="hover:underline">{r.phone}</a> : <span className="text-hint">—</span>}
+                      </td>
+                      <td className={`whitespace-nowrap px-2.5 py-2.5 font-semibold tabular-nums ${heat(r.waiting_hours)}`}>{waited(r.waiting_hours)}</td>
+                      <td className="px-2.5 py-1.5">
+                        {/* Typed straight into the row, the moment the group replies.
+                            Enter saves too. */}
+                        <div className="flex items-center gap-1">
+                          <input value={riderVal} inputMode="tel" placeholder="Add number" disabled={!board?.may_work}
+                            aria-label={`Rider's number for ${r.order_number ?? r.tracking_id}`}
+                            onChange={(e) => setRiderDraft((d) => ({ ...d, [r.tracking_id]: e.target.value }))}
+                            onKeyDown={(e) => { if (e.key === "Enter") saveRider(r); }}
+                            className="h-8 w-[118px] rounded-lg border border-line bg-canvas px-2 text-[12.5px] tabular-nums text-ink outline-none focus:border-ink disabled:opacity-60 dark:border-white/10 dark:bg-white/[0.04] dark:text-white" />
+                          {dirty && (
+                            <button onMouseDown={(e) => e.preventDefault()} onClick={() => saveRider(r)} disabled={savingRider === r.tracking_id} title="Save the rider's number"
+                              className="flex h-8 w-8 items-center justify-center rounded-lg bg-ink text-white disabled:opacity-50 dark:bg-white dark:text-[#141414]">
+                              {savingRider === r.tracking_id ? <Loader2 size={13} className="animate-spin" /> : <Check size={14} />}
+                            </button>
+                          )}
+                        </div>
+                        {riderErr[r.tracking_id] && (
+                          <p className="mt-0.5 text-[11.5px] font-semibold text-red-700 dark:text-red-300">{riderErr[r.tracking_id]}</p>
+                        )}
+                      </td>
+                      <td className="px-2.5 py-1.5 pr-3">
+                        <button onClick={() => copy(r.tracking_id, groupMessage(r))} title="Copy this parcel for the group"
+                          className={`flex h-8 items-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 text-[12px] font-semibold transition ${copied === r.tracking_id
+                            ? "bg-success-soft text-[#2f7a3d]" : "border border-line text-ink hover:bg-panel dark:border-white/10 dark:text-white dark:hover:bg-white/[0.08]"}`}>
+                          {copied === r.tracking_id ? <><Check size={13} /> Copied</> : <><Copy size={13} /> Copy</>}
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -317,7 +549,7 @@ export default function FirstAttemptDesk({ compact = false }: { compact?: boolea
         <CaseSheet
           r={open} mayWork={!!board?.may_work} phone={phone} err={err}
           onClose={() => setOpenKey(null)} onDismissErr={() => setErr("")}
-          onCopy={() => copyRow(open)} copied={copied === open.tracking_id}
+          onCopy={() => copy(open.tracking_id, groupMessage(open))} copied={copied === open.tracking_id}
           onSave={(patch) => save(open.tracking_id, patch)}
         />
       )}

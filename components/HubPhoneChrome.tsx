@@ -75,7 +75,7 @@ export function HubTopBar() {
                       ? "bg-ink text-white shadow-soft dark:bg-white dark:text-[#141414]"
                       : "text-muted active:bg-black/5 dark:text-[#a89f93] dark:active:bg-white/10"}`}>
                     {group.children!.length < 3 && <c.Icon size={15} className="shrink-0" />}
-                    <span className="truncate">{c.label}</span>
+                    <span className="truncate">{c.short ?? c.label}</span>
                   </Link>
                 );
               })}

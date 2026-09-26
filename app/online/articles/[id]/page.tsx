@@ -256,7 +256,11 @@ export default function ArticleDetail() {
             <textarea value={edit.brief} onChange={(e) => setEdit({ ...edit, brief: e.target.value })} rows={3}
               className="mt-1 w-full rounded-xl2 border border-line bg-canvas px-3 py-2 text-[13px] text-ink outline-none dark:border-white/10 dark:bg-white/[0.04] dark:text-[#f4f1ea]" />
             <p className="mt-1 text-[11.5px] text-hint dark:text-[#8a8175]">
-              Changing the brief does not change what is already on somebody&rsquo;s panel — tell him, or send the work back.
+              {/* H279: the panel reads the article live now, so this sentence
+                  used to say the opposite and is no longer true. */}
+              The brief, the prices and the packs show on the panel of everyone working on this article the next
+              time they open it, beside the brief as it was when the work reached them. The ads budget shows only
+              to whoever runs the ads; the cost is never shown.
             </p>
 
             {/* The error shows HERE. It used to appear on the page behind the

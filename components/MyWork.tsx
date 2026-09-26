@@ -19,6 +19,17 @@ import { supabase, isSupabaseConfigured } from "@/lib/supabase";
  * deliberately cannot — that was asked for explicitly.
  */
 
+/* WHAT HE NEEDS TO KNOW ABOUT THE ARTICLE (H279). The price the customer
+   pays, every pack, the brief as it stands now, and — for the ads stage only —
+   the budget. Never the cost: what we paid stays with the administration. */
+type ArticleFacts = {
+  article_id: string; code: string; name: string | null; final_name: string | null;
+  retail_price: number | null; brief: string | null;
+  packs: { label: string; units: number; price: number | null }[];
+  ads_budget: number | null; ads_basis: string | null;
+};
+const rs = (v: number | null | undefined) => (v == null ? "—" : "Rs " + Math.round(Number(v)).toLocaleString("en-PK"));
+
 type Task = {
   task_id: string; article_id: string | null; code: string | null;
   article_name: string | null; stage: string | null; title: string;
@@ -37,6 +48,7 @@ type Task = {
 
 export default function MyWork() {
   const [rows, setRows] = useState<Task[]>([]);
+  const [facts, setFacts] = useState<Record<string, ArticleFacts>>({});
   const [loading, setLoading] = useState(true);
   const [note, setNote] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
@@ -44,9 +56,19 @@ export default function MyWork() {
 
   const load = useCallback(async () => {
     if (!isSupabaseConfigured || !supabase) { setLoading(false); return; }
-    const { data, error } = await supabase.rpc("hub_my_work");
+    const [{ data, error }, arts] = await Promise.all([
+      supabase.rpc("hub_my_work"),
+      supabase.rpc("hub_my_articles"),
+    ]);
     if (error) setErr(error.message);
     setRows((data as Task[]) ?? []);
+    /* A missing function (migration not run yet) must not take the work list
+       down with it: the panel simply shows what it showed before. */
+    if (!arts.error) {
+      const map: Record<string, ArticleFacts> = {};
+      for (const a of ((arts.data as ArticleFacts[]) ?? [])) map[a.article_id] = a;
+      setFacts(map);
+    }
     setLoading(false);
   }, []);
   useEffect(() => { load(); }, [load]);
@@ -134,7 +156,15 @@ export default function MyWork() {
             <p className="mt-2 rounded-xl2 bg-salmon-soft px-3 py-2 text-[12.5px] text-red-900 dark:bg-white/[0.06] dark:text-salmon">
               <b>Back with you:</b> {t.returned_note}
             </p>
-          ) : t.detail ? (
+          ) : null}
+
+          {t.article_id && facts[t.article_id] ? (
+            /* A send-back writes "Sent back by <name>: <reason>" as the detail,
+               and the reason is already in the red box above — so that detail is
+               not passed on. Checked by its exact opening words, not by
+               searching for the reason, which could appear in any brief. */
+            <Facts a={facts[t.article_id]} detail={t.detail?.startsWith("Sent back by ") ? null : t.detail} />
+          ) : !t.returned_note && t.detail ? (
             <p className="mt-2 text-[12.5px] leading-relaxed text-muted dark:text-[#a89f93]">{t.detail}</p>
           ) : null}
 
@@ -205,5 +235,77 @@ export default function MyWork() {
         </div>
       )}
     </section>
+  );
+}
+
+/* THE ARTICLE, AS THE MAN DOING THE WORK NEEDS IT.
+   Prices first, because putting the wrong one on Shopify is the costliest
+   mistake on this panel. Then the budget if he runs the ads, then the brief. */
+function Facts({ a, detail }: { a: ArticleFacts; detail: string | null }) {
+  const priced = a.packs.filter((p) => p.price != null);
+  /* The video stage appends "Video ready: <note>" to the ads and social tasks.
+     That is news, not brief — split it out and show it as its own line,
+     instead of letting it hide at the end of an old copy of the brief. */
+  const [rawSnap, ...videoParts] = (detail ?? "").split(/\n\nVideo ready: /);
+  const video = videoParts.join("\n").trim();
+  /* The task carries the brief as it was when the work reached him. If the
+     administration has changed or removed it since, the old copy is shown
+     labelled as the earlier brief, so nobody works from it without knowing. */
+  const snap = (rawSnap ?? "").trim();
+  const live = (a.brief ?? "").trim();
+  const showSnap = snap !== "" && snap !== live;
+  const basis = a.ads_basis === "daily" ? "a day" : a.ads_basis === "monthly" ? "a month" : "in total";
+  return (
+    <div className="mt-2 space-y-2 rounded-xl2 bg-panel/70 px-3 py-2.5 text-[12.5px] dark:bg-white/[0.04]">
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1.5">
+        <span className="w-[62px] shrink-0 text-[11px] font-bold uppercase tracking-wide text-hint dark:text-[#8a8175]">Price</span>
+        {priced.length === 0 ? (
+          <span className="text-muted dark:text-[#a89f93]">No price set yet — ask the administration before it goes live.</span>
+        ) : priced.map((p, i) => (
+          <span key={`${p.units}-${p.label}-${i}`} className="inline-flex items-baseline gap-1 rounded-full bg-surface px-2.5 py-1 font-semibold text-ink dark:bg-white/[0.07] dark:text-[#f4f1ea]">
+            {p.label} <span className="tabular-nums">{rs(p.price)}</span>
+            {p.units > 1 && p.price != null && (
+              <span className="font-normal text-muted dark:text-[#a89f93]">· {rs(p.price / p.units)} each</span>
+            )}
+          </span>
+        ))}
+      </div>
+      {a.ads_budget != null && (
+        <div className="flex flex-wrap items-baseline gap-x-2">
+          <span className="w-[62px] shrink-0 text-[11px] font-bold uppercase tracking-wide text-hint dark:text-[#8a8175]">Budget</span>
+          <span className="font-semibold tabular-nums text-ink dark:text-[#f4f1ea]">{rs(a.ads_budget)}</span>
+          <span className="text-muted dark:text-[#a89f93]">{basis}</span>
+        </div>
+      )}
+      {a.final_name && (
+        <div className="flex flex-wrap items-baseline gap-x-2">
+          <span className="w-[62px] shrink-0 text-[11px] font-bold uppercase tracking-wide text-hint dark:text-[#8a8175]">Name</span>
+          <span className="font-semibold text-ink dark:text-[#f4f1ea]">{a.final_name}</span>
+        </div>
+      )}
+      {live && (
+        <div className="flex gap-x-2">
+          <span className="w-[62px] shrink-0 pt-px text-[11px] font-bold uppercase tracking-wide text-hint dark:text-[#8a8175]">Brief</span>
+          <p className="min-w-0 flex-1 whitespace-pre-line leading-relaxed text-ink dark:text-[#e7e2d8]">{live}</p>
+        </div>
+      )}
+      {video && (
+        <div className="flex gap-x-2">
+          <span className="w-[62px] shrink-0 pt-px text-[11px] font-bold uppercase tracking-wide text-[#2f7a3d] dark:text-[#8fd39a]">Video</span>
+          <p className="min-w-0 flex-1 whitespace-pre-line font-semibold leading-relaxed text-ink dark:text-[#f4f1ea]">{video}</p>
+        </div>
+      )}
+      {showSnap && (
+        <div className="flex gap-x-2">
+          <span className="w-[62px] shrink-0 pt-px text-[11px] font-bold uppercase leading-tight tracking-wide text-hint dark:text-[#8a8175]">
+            Earlier brief
+          </span>
+          <p className="min-w-0 flex-1 whitespace-pre-line leading-relaxed text-muted dark:text-[#a89f93]">
+            {snap}
+            {!live && <span className="mt-0.5 block text-[11.5px] text-hint dark:text-[#8a8175]">The administration has since removed the brief.</span>}
+          </p>
+        </div>
+      )}
+    </div>
   );
 }

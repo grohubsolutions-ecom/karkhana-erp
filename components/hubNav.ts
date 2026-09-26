@@ -4,7 +4,9 @@ import { requiredFor } from "@/lib/access";
 /* ONE LIST OF HUB PLACES, READ BY BOTH THE DESKTOP SIDEBAR AND THE PHONE BARS.
    Two copies would drift: a page added to the sidebar and forgotten on the
    phone is a page phone users cannot reach. */
-export type HubChild = { label: string; href: string; Icon: LucideIcon };
+/* `short` is what the phone strip under the header shows when three children
+   share 390px — "Delivery Under Review" does not fit a third of a phone. */
+export type HubChild = { label: string; href: string; Icon: LucideIcon; short?: string };
 export type HubNavItem = {
   label: string; short: string; href: string; Icon: LucideIcon; soon?: boolean;
   children?: HubChild[];
@@ -21,10 +23,11 @@ export const HUB_NAV: HubNavItem[] = [
   { label: "Logistics", short: "Shipping", href: "/online/logistics", Icon: Truck, children: [
       { label: "Shipments", href: "/online/logistics", Icon: Truck },
       { label: "Returns", href: "/online/logistics/returns", Icon: Undo2 },
-      /* A parcel that failed its first attempt is not a return yet — it is the
-         last chance to stop one. It sits beside Returns because it is the same
-         team and the same parcel, one step earlier. */
-      { label: "First attempt", href: "/online/logistics/first-attempt", Icon: PhoneCall },
+      /* A parcel that failed an attempt is not a return yet — it is the last
+         chance to stop one. It sits beside Returns because it is the same team
+         and the same parcel, one step earlier. Named after PostEx's own screen,
+         as the owner asked; the URL keeps its first name so links do not break. */
+      { label: "Delivery Under Review", short: "Under review", href: "/online/logistics/first-attempt", Icon: PhoneCall },
   ] },
   /* Disputes are a separate job with its own worklist, not a tab inside the
      settlements screen. */

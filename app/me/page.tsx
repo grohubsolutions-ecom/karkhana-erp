@@ -245,12 +245,16 @@ export default function MyPortal() {
         <div className="mb-4 grid w-full grid-cols-2 gap-1 rounded-[24px] bg-panel p-1 [&>button:last-child:nth-child(odd)]:col-span-2 dark:bg-white/[0.06] sm:flex sm:w-max sm:rounded-full">
           {([["work", "My work"], ["pay", "Attendance & pay"],
              ...(canReturns ? [["returns", "Pending returns"] as const] : []),
-             ...(canRescue ? [["attempt", "First attempt"] as const] : [])] as const).map(([key, label]) => (
+             ...(canRescue ? [["attempt", "Delivery Under Review"] as const] : [])] as const).map(([key, label]) => (
             <button key={key} onClick={() => setTab(key)}
               className={`h-11 min-w-0 flex-1 truncate rounded-full px-3 text-[13.5px] font-semibold transition sm:h-auto sm:flex-none sm:whitespace-nowrap sm:px-5 sm:py-2 sm:text-[13px] ${
                 tab === key ? "bg-ink text-white shadow-soft dark:bg-white dark:text-[#141414]"
                             : "text-muted hover:text-ink dark:text-[#a89f93] dark:hover:text-white"}`}>
-              {label}
+              {/* The one long name gets a short form on a phone, where two tabs
+                  share a row and it would otherwise be cut mid-word. */}
+              {key === "attempt"
+                ? <><span className="sm:hidden">Under review</span><span className="hidden sm:inline">{label}</span></>
+                : label}
             </button>
           ))}
         </div>
