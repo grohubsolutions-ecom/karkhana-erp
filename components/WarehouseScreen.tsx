@@ -453,11 +453,38 @@ function WarehouseInner({ section }: { section: Tab }) {
     && (picked.size === 0 || (m.invoice_no ? picked.has(m.invoice_no) : false))
   ), [moves, items, q, days, dFrom, dTo, fParty, fBranch, fItem, fCat, fNote, invFilter, picked]);
   const visible = fMoves.filter((m) => showVoided || !m.voided_at);
-  const inMoves = visible.filter((m) => m.movement_type === "IN");
-  const outMoves = visible.filter((m) => m.movement_type === "OUT")
-    .sort((a, b) => (a.party ?? "").localeCompare(b.party ?? "")
-                 || (a.branch ?? "").localeCompare(b.branch ?? "")
-                 || (b.delivery_no ?? 0) - (a.delivery_no ?? 0));
+  const inMoves = visible.filter((m) => m.movement_type === "IN")
+    .sort((a, b) => +new Date(b.created_at) - +new Date(a.created_at));
+
+  /* NEWEST FIRST — the branch dealt with most recently at the top.
+     It used to sort the branches by NAME, so Emporium led the list for ever
+     and today's work at Karachi Lucky 1 sat at the bottom under K. Inside a
+     branch it sorted by delivery number, which is not the same as time: #1,
+     #2 and #3 were recorded on the 18th and still fell below #4-#13 from the
+     17th. Both are now ordered by when the stock actually moved.
+
+     The rows of one branch still have to sit together, because the heading
+     is drawn whenever the party or branch changes from the row above — so
+     the GROUP is placed by its most recent delivery, not each row on its
+     own. */
+  const outMoves = (() => {
+    const rows = visible.filter((m) => m.movement_type === "OUT");
+    const groupOf = (m: Move) => `${m.party ?? ""}|${m.branch ?? ""}`;
+    const latest = new Map<string, number>();
+    rows.forEach((m) => {
+      const k = groupOf(m), t = +new Date(m.created_at);
+      if (t > (latest.get(k) ?? -Infinity)) latest.set(k, t);
+    });
+    return rows.sort((a, b) => {
+      const ka = groupOf(a), kb = groupOf(b);
+      if (ka !== kb) return (latest.get(kb) ?? 0) - (latest.get(ka) ?? 0) || ka.localeCompare(kb);
+      /* Same branch: the most recent delivery first, and when two lines share
+         a moment — everything saved in one go does — the higher delivery
+         number first, so an invoice stays in one piece. */
+      return +new Date(b.created_at) - +new Date(a.created_at)
+          || (b.delivery_no ?? 0) - (a.delivery_no ?? 0);
+    });
+  })();
   const voidedCount = fMoves.filter((m) => m.voided_at).length;
 
   /* The scanner types the code and presses Enter. Resolving on Enter — not
