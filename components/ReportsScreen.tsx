@@ -28,6 +28,15 @@ const REPORTS: { r: Rep; label: string }[] = [
 const n = (v: unknown) => Number(v || 0).toLocaleString(undefined, { maximumFractionDigits: 3 });
 const rs = (v: unknown) => (v == null ? "—" : "Rs " + Math.round(Number(v)).toLocaleString());
 const when = (v: unknown) => (v ? new Date(String(v)).toLocaleString() : "—");
+/* A GR out row — back to a supplier, or taken off the shelf. Not a delivery. */
+const GR_OUT = /^(RETURN|STOCK OUT)/;
+/* The note carries both which kind it was and why, run together. Read apart
+   here so the report says it in words instead of a database prefix. */
+const grOutReason = (v: unknown) => {
+  const t = String(v ?? "");
+  if (t.startsWith("RETURN")) return "Back to supplier — " + t.replace(/^RETURN (to )?/, "");
+  return "Taken out" + (t.replace(/^STOCK OUT( — )?/, "") ? " — " + t.replace(/^STOCK OUT( — )?/, "") : "");
+};
 
 export default function ReportsScreen({ side, report }: { side: Side; report: Rep }) {
   /* Fixed by the route. Opening GR out shows GR out — no row of buttons
@@ -59,10 +68,20 @@ export default function ReportsScreen({ side, report }: { side: Side; report: Re
     if (rep === "grn") d = side === "factory"
       ? await pick("v_grn_in", "received_at")
       : (await pick("v_khana_movements", "created_at")).filter((x) => x.movement_type === "IN");
+    /* IN THE WAREHOUSE, "OUT" IS TWO DIFFERENT THINGS and both used to land
+       in the GR out report: a delivery to a shop and a write-off sit in the
+       same ledger, told apart only by how the note begins. So GR out listed
+       every Carrefour delivery, and the STR report read stock_transfers —
+       a table warehouse deliveries never write to — and came back empty.
+       Each report now gets the half that belongs to it. */
     else if (rep === "grout") d = side === "factory"
       ? await pick("v_grn_out", "moved_at")
-      : (await pick("v_khana_movements", "created_at")).filter((x) => x.movement_type === "OUT");
-    else if (rep === "str") d = (await pick("v_stock_transfers", "moved_at")).filter((x) => x.from_side === side);
+      : (await pick("v_khana_movements", "created_at"))
+          .filter((x) => x.movement_type === "OUT" && GR_OUT.test(String(x.note ?? "")));
+    else if (rep === "str") d = side === "factory"
+      ? (await pick("v_stock_transfers", "moved_at")).filter((x) => x.from_side === side)
+      : (await pick("v_khana_movements", "created_at"))
+          .filter((x) => x.movement_type === "OUT" && !GR_OUT.test(String(x.note ?? "")));
     else if (rep === "low") d = await pick("v_low_stock", "headroom");
     else if (rep === "stock") d = side === "factory"
       ? await pick("v_stock_split", "material")
@@ -74,7 +93,7 @@ export default function ReportsScreen({ side, report }: { side: Side; report: Re
 
   const dateKey = rep === "grn" ? (side === "factory" ? "received_at" : "created_at")
     : rep === "grout" ? (side === "factory" ? "moved_at" : "created_at")
-    : rep === "str" ? "moved_at"
+    : rep === "str" ? (side === "factory" ? "moved_at" : "created_at")
     : rep === "stock" ? "" : "updated_at";
 
   /* Categories CASCADE from the division: choosing Fabric must not offer
@@ -158,17 +177,29 @@ export default function ReportsScreen({ side, report }: { side: Side; report: Re
          { k: "manual_code", h: "Barcode" }, { k: "name", h: "Item description" },
          { k: "section", h: "Catgry" },
          { k: "quantity", h: "Qty", align: "r", fmt: n },
+         { k: "cost_price", h: "Cost", align: "r", fmt: rs },
+         { k: "cost_total", h: "Cost total", align: "r", fmt: rs },
+         { k: "note", h: "Kind and reason", fmt: grOutReason },
+         { k: "created_at", h: "Date", fmt: when }],
+    str: side === "factory"
+      ? [{ k: "str_number", h: "STR" },
+         { k: "manual_code", h: "Barcode" }, { k: "item_name", h: "Item description" },
+         { k: "section", h: "Catgry" },
+         { k: "quantity", h: "Qty", align: "r", fmt: n },
+         { k: "cost_price", h: "Cost", align: "r", fmt: rs },
          { k: "retail_price", h: "Retail", align: "r", fmt: rs },
          { k: "retail_total", h: "Retail total", align: "r", fmt: rs },
-         { k: "party", h: "Party" }, { k: "created_at", h: "Date", fmt: when }],
-    str: [{ k: "str_number", h: "STR" },
-          { k: "manual_code", h: "Barcode" }, { k: "item_name", h: "Item description" },
-          { k: "section", h: "Catgry" },
-          { k: "quantity", h: "Qty", align: "r", fmt: n },
-          { k: "cost_price", h: "Cost", align: "r", fmt: rs },
-          { k: "retail_price", h: "Retail", align: "r", fmt: rs },
-          { k: "retail_total", h: "Retail total", align: "r", fmt: rs },
-          { k: "destination", h: "Destination" }, { k: "moved_at", h: "Date", fmt: when }],
+         { k: "destination", h: "Destination" }, { k: "moved_at", h: "Date", fmt: when }]
+      /* The warehouse does not write to stock_transfers — a delivery is an
+         OUT movement carrying a party, a branch and an invoice number. */
+      : [{ k: "invoice_no", h: "Invoice" }, { k: "delivery_no", h: "Del #" },
+         { k: "manual_code", h: "Barcode" }, { k: "name", h: "Item description" },
+         { k: "section", h: "Catgry" },
+         { k: "quantity", h: "Qty", align: "r", fmt: n },
+         { k: "retail_price", h: "Retail", align: "r", fmt: rs },
+         { k: "retail_total", h: "Retail total", align: "r", fmt: rs },
+         { k: "party", h: "Party" }, { k: "branch", h: "Branch" },
+         { k: "created_at", h: "Date", fmt: when }],
     low: [{ k: "code", h: "Item code" }, { k: "material", h: "Item description" },
           { k: "category", h: "Catgry" }, { k: "division", h: "Division" },
           { k: "in_stock", h: "In stock", align: "r", fmt: n },

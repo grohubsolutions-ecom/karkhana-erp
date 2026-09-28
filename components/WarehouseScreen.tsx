@@ -455,6 +455,16 @@ function WarehouseInner({ section }: { section: Tab }) {
     && (picked.size === 0 || (m.invoice_no ? picked.has(m.invoice_no) : false))
   ), [moves, items, q, days, dFrom, dTo, fParty, fBranch, fItem, fCat, fNote, invFilter, picked]);
   const visible = fMoves.filter((m) => showVoided || !m.voided_at);
+  /* GR OUT IS NOT A DELIVERY.
+     Goods going back to a supplier, and goods taken off the shelf because
+     they should never have been on it, are OUT movements like any other —
+     but they are not shipments, they have no party, no branch and no invoice,
+     and they have their own screen. Listing them here put nine write-offs in
+     among the deliveries to Carrefour, under a heading that says in so many
+     words "not supplier returns". Told apart by how the note begins, the same
+     way the GR out screen tells them apart. */
+  const isGrOut = (m: Move) => /^(RETURN|STOCK OUT)/.test(String(m.note ?? ""));
+
   const inMoves = visible.filter((m) => m.movement_type === "IN")
     .sort((a, b) => +new Date(b.created_at) - +new Date(a.created_at));
 
@@ -470,7 +480,7 @@ function WarehouseInner({ section }: { section: Tab }) {
      the GROUP is placed by its most recent delivery, not each row on its
      own. */
   const outMoves = (() => {
-    const rows = visible.filter((m) => m.movement_type === "OUT");
+    const rows = visible.filter((m) => m.movement_type === "OUT" && !isGrOut(m));
     const groupOf = (m: Move) => `${m.party ?? ""}|${m.branch ?? ""}`;
     const latest = new Map<string, number>();
     rows.forEach((m) => {
@@ -883,12 +893,27 @@ function WarehouseInner({ section }: { section: Tab }) {
               {n(moves.filter((m) => !m.voided_at && m.movement_type === "IN" && new Date(m.created_at).toDateString() === new Date().toDateString()).reduce((a, m) => a + Number(m.quantity), 0))}
             </p>
           </div>
-          <div className="rounded-card bg-salmon-soft p-4">
-            <p className="text-[11px] font-bold uppercase tracking-wide text-ink/55">Out today</p>
-            <p className="mt-1 text-[24px] font-extrabold leading-none text-ink">
-              {n(moves.filter((m) => !m.voided_at && m.movement_type === "OUT" && new Date(m.created_at).toDateString() === new Date().toDateString()).reduce((a, m) => a + Number(m.quantity), 0))}
-            </p>
-          </div>
+          {/* Deliveries, and GR out named separately underneath. Counting
+              both in one number is what made "Out today 9,474" sit above a
+              list of deliveries that added up to nothing. */}
+          {(() => {
+            const todays = moves.filter((m) => !m.voided_at && m.movement_type === "OUT"
+              && new Date(m.created_at).toDateString() === new Date().toDateString());
+            const sum = (rows: Move[]) => rows.reduce((a, m) => a + Number(m.quantity || 0), 0);
+            const shipped = sum(todays.filter((m) => !isGrOut(m)));
+            const takenOut = sum(todays.filter(isGrOut));
+            return (
+              <div className="rounded-card bg-salmon-soft p-4">
+                <p className="text-[11px] font-bold uppercase tracking-wide text-ink/55">Out today</p>
+                <p className="mt-1 text-[24px] font-extrabold leading-none text-ink">{n(shipped)}</p>
+                {takenOut > 0 && (
+                  <p className="mt-1 text-[11px] leading-snug text-ink/60">
+                    + {n(takenOut)} on GR out
+                  </p>
+                )}
+              </div>
+            );
+          })()}
         </div>
 
         
