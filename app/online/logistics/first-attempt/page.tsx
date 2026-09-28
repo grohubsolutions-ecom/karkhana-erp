@@ -24,9 +24,9 @@ export default function FirstAttemptPage() {
         </Link>
         <h1 className="mt-2 text-[22px] font-extrabold tracking-tight text-ink dark:text-[#f4f1ea]">Delivery Under Review</h1>
         <p className="mt-1 max-w-[70ch] text-[13px] text-muted dark:text-[#a89f93]">
-          Parcels a courier has failed to deliver, sorted by which attempt they are on, while they are still
-          in the customer&rsquo;s city. Ring the customer, copy the rows into the courier&rsquo;s group, type the
-          rider&rsquo;s number when they reply, ring him too — before it becomes a return.
+          Yesterday&rsquo;s and today&rsquo;s failed deliveries that PostEx or OwnEx still have under review,
+          sorted by which attempt they are on. Ring the customer, copy the rows into the courier&rsquo;s group,
+          type the rider&rsquo;s number when they reply, ring him too — then mark it done and it moves to History.
         </p>
       </div>
       <FirstAttemptDesk />
