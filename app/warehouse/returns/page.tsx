@@ -23,7 +23,7 @@
  * apart by how the note begins — the same way returns already were.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Undo2, Download, Printer, Loader2, Plus } from "lucide-react";
+import { Undo2, Download, Printer, Loader2, Plus, Pencil } from "lucide-react";
 import Topbar from "@/components/Topbar";
 import Modal, { Field } from "@/components/Modal";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
@@ -54,6 +54,9 @@ export default function ReturnsPage() {
   /* K178: GR out is its own permission — an operator can return goods to
      the supplier without holding full control of the warehouse. */
   const canDo = can(["khana.manage", "khana.return"]);
+  /* Correcting or cancelling something already recorded is full control —
+     the same bar as editing any other saved movement. */
+  const canManage = can(["khana.manage"]);
 
   const [rows, setRows] = useState<Row[]>([]);
   const [items, setItems] = useState<Item[]>([]);
@@ -74,6 +77,23 @@ export default function ReturnsPage() {
   const [onTime, setOnTime] = useState("");
   const [busy, setBusy] = useState(false);
   const [fErr, setFErr] = useState("");
+
+  /* CORRECTING ONE ALREADY RECORDED (K186).
+     A wrong GR out used to be permanent — there was no pencil on this screen
+     at all, so the only way back was a second movement the other way, which
+     leaves two lies instead of one. It corrects through the same function
+     every other saved movement uses (khana_edit_movement, K182), so the
+     stock arithmetic is the one that is already proved. */
+  const [editRow, setEditRow] = useState<Row | null>(null);
+  const [eItem, setEItem] = useState("");
+  const [eQty, setEQty] = useState("");
+  const [eDate, setEDate] = useState("");
+  const [eTime, setETime] = useState("");
+  const [eKind, setEKind] = useState<Kind>("writeoff");
+  const [eSupplier, setESupplier] = useState("");
+  const [eWhy, setEWhy] = useState("");
+  const [voidRow, setVoidRow] = useState<string | null>(null);
+  const [voidWhy, setVoidWhy] = useState("");
 
   const load = useCallback(async () => {
     if (!isSupabaseConfigured || !supabase) { setLoading(false); return; }
@@ -167,6 +187,61 @@ export default function ReturnsPage() {
     setOpen(false); setScan(""); setQty(""); setWhy(""); setSupplier(""); setOnDate(""); setOnTime(""); load();
   }
 
+  /* The note is the only place the two kinds are recorded, so reading one
+     back means taking it apart again. */
+  function readNote(note: string | null): { kind: Kind; supplier: string; why: string } {
+    const t = String(note ?? "");
+    if (t.startsWith("RETURN")) {
+      const m = /^RETURN(?: to ([^\u2014]*?))?\s*(?:\u2014\s*(.*))?$/.exec(t);
+      return { kind: "supplier", supplier: (m?.[1] ?? "").trim(), why: (m?.[2] ?? "").trim() };
+    }
+    const m = /^STOCK OUT\s*(?:\u2014\s*(.*))?$/.exec(t);
+    return { kind: "writeoff", supplier: "", why: (m?.[1] ?? "").trim() };
+  }
+
+  function startEdit(r: Row) {
+    setVoidRow(null); setEditRow(r); setFErr("");
+    const d = new Date(r.created_at);
+    const p2 = (x: number) => String(x).padStart(2, "0");
+    setEItem(items.find((x) => x.barcode === r.barcode)?.item_id ?? "");
+    setEQty(String(r.quantity));
+    setEDate(`${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`);
+    setETime(`${p2(d.getHours())}:${p2(d.getMinutes())}`);
+    const parsed = readNote(r.note);
+    setEKind(parsed.kind); setESupplier(parsed.supplier); setEWhy(parsed.why);
+  }
+
+  async function saveEdit() {
+    if (!supabase || !editRow) return;
+    setFErr("");
+    const q = parseFloat(eQty);
+    if (!(q > 0)) { setFErr("Quantity must be above zero."); return; }
+    if (!eItem) { setFErr("Choose the product."); return; }
+    if (eKind === "supplier" && !eSupplier.trim()) { setFErr("Which supplier is it going back to?"); return; }
+    if (eKind === "supplier" && !eWhy.trim()) { setFErr("Why is it going back? The supplier will ask."); return; }
+    setBusy(true);
+    const { error } = await supabase.rpc("khana_edit_movement", {
+      p_id: editRow.id, p_quantity: q,
+      p_note: eKind === "supplier"
+        ? `RETURN to ${eSupplier.trim()} \u2014 ${eWhy.trim()}`
+        : `STOCK OUT${eWhy.trim() ? " \u2014 " + eWhy.trim() : ""}`,
+      /* A GR out belongs to nobody — it is not a delivery, so it carries no
+         invoice number and no branch. */
+      p_invoice_no: null, p_branch_id: null,
+      p_item_id: eItem, p_at: stampAt(eDate, eTime) ?? null,
+    });
+    setBusy(false);
+    if (error) { setFErr(error.message); return; }
+    setEditRow(null); load();
+  }
+
+  async function voidMove(id: string) {
+    if (!supabase || !voidWhy.trim()) return;
+    const { error } = await supabase.rpc("khana_void_movement", { p_id: id, p_reason: voidWhy.trim() });
+    if (error) { setErr(error.message); return; }
+    setVoidRow(null); setVoidWhy(""); load();
+  }
+
   const table = (): ExportTable => ({
     title: "Warehouse GR out",
     /* The printed barcode only — ours is internal and stays off the sheet. */
@@ -251,6 +326,7 @@ export default function ReturnsPage() {
                 <th className="px-4 py-3 text-right font-bold">Qty</th>
                 <th className="px-4 py-3 text-right font-bold">Cost total</th>
                 <th className="px-4 py-3 font-bold">Reason</th>
+                {canManage && <th className="px-4 py-3" />}
               </tr></thead>
               <tbody>
                 {view.map((r, ix) => (
@@ -282,6 +358,31 @@ export default function ReturnsPage() {
                           it is not repeated in every row. */}
                       {String(r.note ?? "").replace(/^STOCK OUT( — )?/, "").replace(/^RETURN (to )?/, "") || "—"}
                     </td>
+                    {canManage && (
+                      <td className="px-4 py-3 text-right">
+                        {r.voided_at ? (
+                          <span className="text-[11.5px] font-semibold text-hint">voided</span>
+                        ) : voidRow === r.id ? (
+                          <span className="flex flex-wrap items-center justify-end gap-1.5">
+                            <input value={voidWhy} autoFocus placeholder="reason"
+                              onChange={(e) => setVoidWhy(e.target.value)}
+                              onKeyDown={(e) => { if (e.key === "Enter") voidMove(r.id); if (e.key === "Escape") { setVoidRow(null); setVoidWhy(""); } }}
+                              className="w-32 rounded-lg border border-ink/30 px-2 py-1 text-[12px] outline-none" />
+                            <button onClick={() => voidMove(r.id)} disabled={!voidWhy.trim()}
+                              className="text-[11px] font-bold text-danger disabled:opacity-40">void</button>
+                            <button onClick={() => { setVoidRow(null); setVoidWhy(""); }}
+                              className="text-[11px] text-ink/50">cancel</button>
+                          </span>
+                        ) : (
+                          <span className="flex items-center justify-end gap-1">
+                            <button onClick={() => startEdit(r)} title="Correct this GR out"
+                              className="rounded-full p-1.5 text-muted transition hover:bg-panel hover:text-ink"><Pencil size={14} /></button>
+                            <button onClick={() => { setVoidRow(r.id); setVoidWhy(""); }} title="Cancel it — the stock comes back"
+                              className="rounded-full p-1.5 text-muted transition hover:bg-panel hover:text-danger"><Undo2 size={14} /></button>
+                          </span>
+                        )}
+                      </td>
+                    )}
                   </tr>
                 ))}
               </tbody>
@@ -378,6 +479,92 @@ export default function ReturnsPage() {
             {kind === "supplier" ? "Record return" : "Take it out"}
           </button>
         </div>
+      </Modal>
+
+      {/* CORRECTING ONE ALREADY RECORDED. Everything about it, not just the
+          number: which product, how many, the day and time, and which of the
+          two kinds it was. Moving it onto a different product takes the whole
+          original off the one it was on — the database does that, not this
+          screen. */}
+      <Modal open={!!editRow} onClose={() => !busy && setEditRow(null)} wide
+        title="Correct this GR out"
+        subtitle={editRow ? `${editRow.movement_no} · recorded ${when(editRow.created_at)}` : undefined}>
+        {editRow && (() => {
+          const to = items.find((x) => x.item_id === eItem);
+          const from = items.find((x) => x.barcode === editRow.barcode);
+          const q = parseFloat(eQty) || 0;
+          const moved = !!to && !!from && to.item_id !== from.item_id;
+          const after = to ? Number(to.quantity) - (moved ? q : q - Number(editRow.quantity)) : null;
+          return (
+            <>
+              <div className="mb-4 grid grid-cols-2 gap-2">
+                {([["writeoff", "Taken out of stock"], ["supplier", "Back to a supplier"]] as [Kind, string][]).map(([k, label]) => (
+                  <button key={k} type="button" onClick={() => { setEKind(k); setFErr(""); }}
+                    className={`rounded-xl2 border px-3 py-2.5 text-[12.5px] font-semibold transition ${
+                      eKind === k ? "border-ink bg-ink text-white" : "border-line text-ink/70 hover:bg-panel"}`}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div className="sm:col-span-2"><Field label="Product">
+                  <select value={eItem} onChange={(e) => setEItem(e.target.value)} className={inp}>
+                    <option value="">Choose…</option>
+                    {items.map((x) => (
+                      <option key={x.item_id} value={x.item_id}>
+                        {x.name}{x.manual_barcode ? ` · ${x.manual_barcode}` : ""}
+                      </option>
+                    ))}
+                  </select>
+                </Field></div>
+                <Field label="How many">
+                  <input type="number" value={eQty} onChange={(e) => setEQty(e.target.value)} className={inp} />
+                </Field>
+                <Field label="Date">
+                  <input type="date" value={eDate} max={new Date().toLocaleDateString("en-CA")}
+                    onChange={(e) => setEDate(e.target.value)} className={inp} />
+                </Field>
+                <Field label="Time">
+                  <input type="time" value={eTime} onChange={(e) => setETime(e.target.value)} className={inp} />
+                </Field>
+                {eKind === "supplier" && (
+                  <Field label="Back to (supplier)">
+                    <input value={eSupplier} onChange={(e) => setESupplier(e.target.value)} className={inp} />
+                  </Field>
+                )}
+                <div className="sm:col-span-2">
+                  <Field label={eKind === "supplier" ? "Why is it going back?" : "Note (optional)"}>
+                    <input value={eWhy} onChange={(e) => setEWhy(e.target.value)} className={inp} />
+                  </Field>
+                </div>
+              </div>
+
+              {moved && from && to && (
+                <p className="mt-3 rounded-xl2 bg-amber-soft/60 px-3 py-2 text-[12px] leading-relaxed text-ink/80">
+                  This moves off <b>{from.name}</b> and onto <b>{to.name}</b>. {from.name} goes back up
+                  to {n(Number(from.quantity) + Number(editRow.quantity))}, {to.name} goes to {n(after ?? 0)}.
+                </p>
+              )}
+              {!moved && after != null && after !== Number(to?.quantity ?? 0) && (
+                <p className="mt-3 text-[12px] text-ink/70">
+                  Stock goes to {n(after)}
+                  {after < 0 && <span className="font-semibold text-danger"> — nothing came in for these yet</span>}.
+                </p>
+              )}
+              {fErr && <p className="mt-3 text-[12.5px] font-medium text-danger">{fErr}</p>}
+
+              <div className="mt-5 flex justify-end gap-2">
+                <button onClick={() => setEditRow(null)} disabled={busy}
+                  className="rounded-xl2 border border-line px-4 py-2.5 text-[13px] font-semibold text-ink/70 hover:bg-panel">Cancel</button>
+                <button onClick={saveEdit} disabled={busy}
+                  className="flex items-center gap-1.5 rounded-xl2 bg-ink px-5 py-2.5 text-[13px] font-semibold text-white disabled:opacity-50">
+                  {busy && <Loader2 size={15} className="animate-spin" />} Save changes
+                </button>
+              </div>
+            </>
+          );
+        })()}
       </Modal>
     </>
   );
