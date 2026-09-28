@@ -2,8 +2,12 @@
 import { X } from "lucide-react";
 import { useEffect } from "react";
 
-export default function Modal({ open, onClose, title, subtitle, children, wide }:
-  { open: boolean; onClose: () => void; title: string; subtitle?: string; children: React.ReactNode; wide?: boolean }) {
+export default function Modal({ open, onClose, title, subtitle, children, wide, xwide }:
+  { open: boolean; onClose: () => void; title: string; subtitle?: string; children: React.ReactNode; wide?: boolean;
+    /* xwide is for a working table that has to show every column at once —
+       a sheet with a column hidden off the right is a sheet that cannot be
+       corrected. Opt-in: nothing that does not pass it changes width. */
+    xwide?: boolean }) {
   useEffect(() => {
     const esc = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     if (open) window.addEventListener("keydown", esc);
@@ -13,7 +17,7 @@ export default function Modal({ open, onClose, title, subtitle, children, wide }
   return (
     <div className="fixed inset-0 z-[60] flex items-end justify-center bg-black/45 p-0 sm:items-center sm:p-4" onClick={onClose}>
       <div onClick={(e) => e.stopPropagation()}
-        className={`max-h-[92dvh] w-full overflow-y-auto rounded-t-card border border-line bg-surface p-5 shadow-xl sm:rounded-card dark:border-white/[0.08] dark:bg-[#201c17] ${wide ? "sm:max-w-3xl" : "sm:max-w-lg"}`}>
+        className={`max-h-[92dvh] w-full overflow-y-auto rounded-t-card border border-line bg-surface p-5 shadow-xl sm:rounded-card dark:border-white/[0.08] dark:bg-[#201c17] ${xwide ? "sm:max-w-5xl" : wide ? "sm:max-w-3xl" : "sm:max-w-lg"}`}>
         <div className="mb-4 flex items-start justify-between gap-3">
           <div>
             <h3 className="text-[17px] font-extrabold tracking-tight text-ink dark:text-[#f4f1ea]">{title}</h3>

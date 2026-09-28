@@ -12,9 +12,15 @@
  * Fixing it here beats importing something known to be wrong and correcting
  * nine entries afterwards.
  *
+ * AN UNFINISHED ROW DOES NOT HOLD THE DAY UP. The rest goes in and the
+ * unfinished ones stay on the screen, waiting, so a single blank rate cannot
+ * stop sixty-five good rows being recorded. Nothing is invented to fill the
+ * gap and nothing is thrown away — the row is simply not written yet, and
+ * the day can be finished whenever the missing piece is known.
+ *
  * WHAT IT STILL DOES NOT DO:
  *   It does not guess. An article is chosen from the list, never matched on
- *   a resemblance. A row that is not complete is marked and cannot be sent.
+ *   a resemblance. An unfinished row is never written on half the truth.
  *
  *   It does not double. The database skips a row already recorded — same
  *   floor, same day, same article, same rate, same quantity — so importing
@@ -101,6 +107,9 @@ export default function MachineProcessImport({
   const [summary, setSummary] = useState<{ imported: number; skipped: number; needs_attention: number } | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  /* The rows that were not ready when the rest went in. Kept so the day can
+     be finished from where it stopped instead of importing the file again. */
+  const [left, setLeft] = useState<Line[]>([]);
 
   /* Adding someone without leaving the sheet. */
   const [addWho, setAddWho] = useState(false);
@@ -124,7 +133,7 @@ export default function MachineProcessImport({
 
   function reset() {
     setLines([]); setResult(null); setSummary(null); setErr(""); setName("");
-    setAddWho(false); setNwName("");
+    setAddWho(false); setNwName(""); setLeft([]);
     if (file.current) file.current.value = "";
   }
 
@@ -223,7 +232,13 @@ export default function MachineProcessImport({
     return f;
   };
   const bad = (l: Line) => faults(l).length > 0;          // shading: not the worker
-  const incomplete = lines.filter((l) => bad(l) || noWho(l));
+
+  /* READY AND WAITING, not right and wrong. A row that is short of something
+     is not an error to be cleared before anything can happen — it is a row
+     that is not known yet. The ready ones are recorded now; the waiting ones
+     stay on the screen and go in when the missing piece turns up. */
+  const ready = lines.filter((l) => !bad(l) && !noWho(l));
+  const waiting = lines.filter((l) => bad(l) || noWho(l));
   const missingWho = lines.filter(noWho);
   const counted = useMemo(() => {
     const c: Record<string, number> = {};
@@ -258,9 +273,13 @@ export default function MachineProcessImport({
   }
 
   async function send() {
-    if (!supabase) return;
+    if (!supabase || ready.length === 0) return;
     setErr(""); setBusy(true);
-    const payload = lines.map((l) => ({
+    /* Only the rows that are actually complete. The unfinished ones are put
+       aside rather than sent — the database would refuse them anyway, and
+       sending them only to be told so turns a waiting row into an error. */
+    const held = waiting;
+    const payload = ready.map((l) => ({
       row: l.row, process: l.process, worked_on: l.worked_on,
       article: artById.get(l.articleId)?.name ?? "",
       rate: l.rate === "" ? null : Number(l.rate),
@@ -274,6 +293,7 @@ export default function MachineProcessImport({
     const d = data as { imported: number; skipped: number; needs_attention: number; rows: Result[] };
     setSummary({ imported: d.imported, skipped: d.skipped, needs_attention: d.needs_attention });
     setResult(d.rows ?? []);
+    setLeft(held);
     onDone();
   }
 
@@ -281,11 +301,15 @@ export default function MachineProcessImport({
   const floors = Array.from(new Set(lines.map((l) => l.process)));
 
   return (
-    <Modal open={open} onClose={() => { if (!busy) { reset(); onClose(); } }} wide
-      title={lines.length ? "Check the day before it goes in" : "Import a day's sheet"}
-      subtitle={lines.length
-        ? "Every cell can be changed, rows can be added, and anything wrong can be thrown out."
-        : "Cutting, Over Lock, Flat Lock and Singer Lock — read straight off the spreadsheet."}>
+    <Modal open={open} onClose={() => { if (!busy) { reset(); onClose(); } }} wide xwide={!!lines.length && !result}
+      title={result ? "What went in" : lines.length ? "Check the day before it goes in" : "Import a day's sheet"}
+      subtitle={result
+        ? (left.length
+            ? "The finished rows are recorded. The rest are below, still waiting."
+            : "All of it is recorded.")
+        : lines.length
+          ? "Every cell can be changed, rows can be added, and anything wrong can be thrown out."
+          : "Cutting, Over Lock, Flat Lock and Singer Lock — read straight off the spreadsheet."}>
 
       {/* ------------------------------------------------ choose a file */}
       {!lines.length && !result && (
@@ -318,7 +342,9 @@ export default function MachineProcessImport({
             <p className="text-[12.5px] text-ink/80">
               {name ? <><b>{name}</b> — </> : null}
               {lines.length} row{lines.length === 1 ? "" : "s"}
-              {incomplete.length === 0 && <span className="ml-1 font-semibold text-[#166534]">· ready</span>}
+              {waiting.length === 0
+                ? <span className="ml-1 font-semibold text-[#166534]">· all ready</span>
+                : <span className="ml-1 text-ink/60">· {ready.length} ready, {waiting.length} waiting</span>}
             </p>
             <div className="flex gap-3">
               <button onClick={() => setAddWho((v) => !v)}
@@ -350,9 +376,9 @@ export default function MachineProcessImport({
           )}
 
           {/* ONE DECISION PER FLOOR, not 66. The sheet never carries a name,
-              so this is the only thing standing between a read file and a
-              recorded day — it is the loudest thing on the screen until it is
-              done, and quiet afterwards. */}
+              and labour has to belong to somebody before a wage can be worked
+              out — so this is the first thing to do, though it stops nothing:
+              rows with nobody on them simply wait their turn. */}
           {floors.length > 0 && (
             <div className={`mt-3 rounded-xl2 border p-3 ${missingWho.length
               ? "border-amber-strong/50 bg-amber-soft/60" : "border-line"}`}>
@@ -382,6 +408,7 @@ export default function MachineProcessImport({
               <p className="mt-2 text-[11.5px] text-ink/60">
                 Sets every row on that floor that has nobody yet. Any single row can still say somebody else.
                 Not on the list? <button onClick={() => setAddWho(true)} className="font-semibold underline decoration-line underline-offset-2">Add him</button>.
+                {missingWho.length > 0 && " A row with nobody on it is left for later, not lost — the rest still goes in."}
               </p>
             </div>
           )}
@@ -451,11 +478,12 @@ export default function MachineProcessImport({
             </button>
           </div>
 
-          {/* Only what is actually wrong, counted, and the rate rows named —
-              in 66 rows "one has no rate" is useless without saying which. */}
+          {/* Only what is actually missing, counted, and the rate rows named —
+              in 66 rows "one has no rate" is useless without saying which. It
+              is a note, not a barrier: the button below does not wait for it. */}
           {Object.keys(counted).length > 0 && (
             <div className="mt-2 flex items-start gap-1.5 text-[12px] text-ink/75">
-              <AlertTriangle size={13} className="mt-0.5 shrink-0 text-danger" />
+              <AlertTriangle size={13} className="mt-0.5 shrink-0 text-amber-strong" />
               <span>
                 {(["rate", "quantity", "article", "date"] as const)
                   .filter((k) => counted[k])
@@ -465,7 +493,8 @@ export default function MachineProcessImport({
                 {rateless.length > 0 && rateless.length <= 4 && (
                   <>The rate is missing on {rateless.map((l) => `${labelOf(l.process)} · ${artById.get(l.articleId)?.name ?? "?"}`).join("; ")}. </>
                 )}
-                Type it in, or throw the row away with the ×.
+                Fill it in now if you know it. If you don&apos;t, leave it — the rest goes in
+                and {counted.rate === 1 && Object.keys(counted).length === 1 ? "it stays" : "they stay"} here, waiting.
               </span>
             </div>
           )}
@@ -474,9 +503,16 @@ export default function MachineProcessImport({
           <div className="mt-4 flex items-center justify-end gap-2">
             <button onClick={() => { reset(); onClose(); }} disabled={busy}
               className="rounded-xl2 border border-line px-4 py-2.5 text-[13px] font-semibold text-ink/70 hover:bg-panel">Cancel</button>
-            <button onClick={send} disabled={busy || incomplete.length > 0 || lines.length === 0}
+            {/* NEVER HELD SHUT BY AN UNFINISHED ROW. It says exactly how many
+                are going in, so 65 of 66 is never mistaken for all of it. */}
+            <button onClick={send} disabled={busy || ready.length === 0}
               className="flex items-center gap-1.5 rounded-xl2 bg-ink px-5 py-2.5 text-[13px] font-semibold text-white disabled:opacity-40">
-              {busy ? <Loader2 size={15} className="animate-spin" /> : <Upload size={15} />} Record {lines.length} rows
+              {busy ? <Loader2 size={15} className="animate-spin" /> : <Upload size={15} />}
+              {ready.length === 0
+                ? "Nothing ready to record yet"
+                : waiting.length === 0
+                  ? `Record ${ready.length} row${ready.length === 1 ? "" : "s"}`
+                  : `Record ${ready.length} of ${lines.length} rows`}
             </button>
           </div>
         </>
@@ -494,9 +530,9 @@ export default function MachineProcessImport({
               <p className="text-[22px] font-extrabold leading-none text-ink">{summary.skipped}</p>
               <p className="mt-1 text-[11.5px] font-semibold text-ink/70">already there</p>
             </div>
-            <div className={`rounded-xl2 p-3 text-center ${summary.needs_attention ? "bg-amber-soft" : "bg-panel"}`}>
-              <p className="text-[22px] font-extrabold leading-none text-ink">{summary.needs_attention}</p>
-              <p className="mt-1 text-[11.5px] font-semibold text-ink/70">not taken</p>
+            <div className={`rounded-xl2 p-3 text-center ${summary.needs_attention + left.length ? "bg-amber-soft" : "bg-panel"}`}>
+              <p className="text-[22px] font-extrabold leading-none text-ink">{summary.needs_attention + left.length}</p>
+              <p className="mt-1 text-[11.5px] font-semibold text-ink/70">still waiting</p>
             </div>
           </div>
 
@@ -506,6 +542,53 @@ export default function MachineProcessImport({
               {summary.skipped} row{summary.skipped === 1 ? " was" : "s were"} already recorded on that day at that
               rate and quantity, so {summary.skipped === 1 ? "it was" : "they were"} left alone.
             </p>
+          )}
+
+          {/* THE ROWS THAT ARE NOT DONE YET, AND THE WAY BACK TO THEM.
+              The day is recorded; these were short of something, so they were
+              left where they were. Going back opens the sheet with only these
+              on it — fill in the missing piece and record them on their own.
+              Nothing doubles: what went in a moment ago is already recorded
+              and would be skipped anyway. */}
+          {left.length > 0 && (
+            <div className="mt-3 overflow-hidden rounded-xl2 border border-amber-strong/50 bg-amber-soft/40">
+              <p className="border-b border-amber-strong/30 px-3.5 py-2 text-[11.5px] font-bold uppercase tracking-wide text-ink/70">
+                Waiting for something — {left.length} row{left.length === 1 ? "" : "s"}
+              </p>
+              <div className="max-h-48 overflow-y-auto">
+                {left.map((l) => {
+                  const f = faults(l);
+                  if (noWho(l)) f.push("who did it");
+                  return (
+                    <div key={l.key} className="flex items-start justify-between gap-3 border-b border-amber-strong/20 px-3.5 py-2 last:border-0">
+                      <span className="min-w-0">
+                        <span className="text-[12.5px] font-semibold text-ink">
+                          {labelOf(l.process)} · {artById.get(l.articleId)?.name ?? "(no article)"}
+                        </span>
+                        <span className="block text-[11.5px] text-ink/60">
+                          no {f.join(", no ")}
+                        </span>
+                      </span>
+                      {l.row != null && (
+                        <span className="shrink-0 rounded-full bg-surface px-2 py-0.5 text-[11px] font-semibold text-ink/70">
+                          sheet row {l.row}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="border-t border-amber-strong/30 px-3.5 py-2.5">
+                <button onClick={() => { setLines(left); setLeft([]); setResult(null); setSummary(null); setErr(""); }}
+                  className="text-[12.5px] font-semibold text-ink underline decoration-amber-strong underline-offset-2">
+                  Finish {left.length === 1 ? "it" : "them"} now
+                </button>
+                <span className="ml-1.5 text-[11.5px] text-ink/60">
+                  — or leave {left.length === 1 ? "it" : "them"}; the sheet can be imported again once the
+                  missing piece is known, and only the new row{left.length === 1 ? "" : "s"} will go in.
+                </span>
+              </div>
+            </div>
           )}
 
           {trouble.length > 0 && (
