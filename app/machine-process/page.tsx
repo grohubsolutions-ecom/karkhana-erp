@@ -7,12 +7,13 @@
  * so the column and the sum can never disagree.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Scissors, Download, Loader2, Plus, Printer, Undo2 } from "lucide-react";
+import { Scissors, Download, Loader2, Plus, Printer, Undo2, Upload } from "lucide-react";
 import Topbar from "@/components/Topbar";
 import Modal, { Field } from "@/components/Modal";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { usePermissions } from "@/lib/usePermissions";
 import { exportCSV, exportExcel, exportPDF, printTable, type ExportTable } from "@/lib/export";
+import MachineProcessImport from "@/components/factory/MachineProcessImport";
 
 type Row = { id: string; entry_no: string; process: string; worked_on: string;
              piece_type: string; paid_at: string | null;
@@ -35,18 +36,28 @@ type Staff = { id: string; name: string; rate: number | null;
    ever worked.
 
    Clipping, checking, pressing and packing are not here on purpose: that
-   work belongs to Finishing, after inventory, not to the machine floor. */
+   work belongs to Finishing, after inventory, not to the machine floor.
+
+   K187: the floor is SINGER Lock — named after the machine — and had been
+   written "Singlelock" since the day it was created. The department CODE is
+   still SINGLELOCK: it is what the employee rows point at, and renaming a
+   key to tidy a label breaks a working link for nothing. */
 const DEPTS: [string, string][] = [
-  ["CUT", "Cutting"], ["SINGLELOCK", "Singlelock"],
-  ["OVERLOCK", "Overlock"], ["FLATLOCK", "Flatlock"]];
+  ["CUT", "Cutting"], ["OVERLOCK", "Over Lock"],
+  ["FLATLOCK", "Flat Lock"], ["SINGLELOCK", "Singer Lock"]];
 
 /* The process is what was done; the department is where the man sits. They
    line up one-for-one on the four floors, so choosing a tab chooses the
    department too. "Other" is the odd job that belongs to no floor, so it
    leaves the department on whatever was last picked. */
-const PROCESSES = ["cutting", "singlelock", "overlock", "flatlock", "other"];
+const PROCESSES = ["cutting", "overlock", "flatlock", "singerlock", "other"];
+/* What each tab is called on screen. The stored key stays lower-case and
+   unspaced; only the label is prettied up. */
+const PROC_LABEL: Record<string, string> = {
+  cutting: "Cutting", overlock: "Over Lock",
+  flatlock: "Flat Lock", singerlock: "Singer Lock", other: "Other" };
 const DEPT_OF: Record<string, string> = {
-  cutting: "CUT", singlelock: "SINGLELOCK",
+  cutting: "CUT", singerlock: "SINGLELOCK",
   overlock: "OVERLOCK", flatlock: "FLATLOCK" };
 const inp = "mt-1 w-full rounded-xl2 border border-line bg-surface px-3 py-2 text-[13px] outline-none focus:border-ink/30";
 const n = (v: number) => Number(v || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
@@ -83,6 +94,13 @@ export default function MachineProcessPage() {
   const [voidRow, setVoidRow] = useState<string | null>(null);
   const [voidWhy, setVoidWhy] = useState("");
   const [payFor, setPayFor] = useState<string | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
+  /* K187: making the article right there, when the floor cut something that
+     is not on the list yet — rather than sending someone to another screen
+     and losing the entry they were halfway through. */
+  const [newArt, setNewArt] = useState(false);
+  const [naName, setNaName] = useState("");
+  const [naSection, setNaSection] = useState("");
 
   const load = useCallback(async () => {
     if (!isSupabaseConfigured || !supabase) { setLoading(false); return; }
@@ -154,11 +172,40 @@ export default function MachineProcessPage() {
 
   function openForm() {
     setOpen(true); setDay(today()); setArtId(""); setCode(""); setPieceType("fresh"); setQty(""); setRate("");
-    setEmpId(""); setWorker(""); setDeptCode(proc === "cutting" ? "CUT" : "MFSU"); setNote(""); setFErr("");
+    setEmpId(""); setWorker(""); setNote(""); setFErr("");
+    setNewArt(false); setNaName(""); setNaSection("");
+    /* K187: the floor the tab is on. This used to read
+         proc === "cutting" ? "CUT" : "MFSU"
+       and MFSU is not one of the four codes, so the dropdown fell back to
+       its first option — Cutting. Opening the form on Over Lock, Flat Lock
+       or Singer Lock filed the work, and the man's wage, under Cutting. */
+    setDeptCode(DEPT_OF[proc] ?? "CUT");
   }
 
   /* Adding him here rather than sending someone to another screen and back —
      the moment you are typing his name is the moment you know he is staff. */
+  /* K187: made here and chosen straight away, so an entry is not abandoned
+     halfway to go and create the article on another screen. */
+  async function addArticle() {
+    if (!supabase) return;
+    setFErr("");
+    if (!naName.trim()) { setFErr("Give the article a name."); return; }
+    if (!naSection) { setFErr("Which section does it belong to?"); return; }
+    setBusy(true);
+    const { data, error } = await supabase.rpc("add_article", {
+      p_name: naName.trim(), p_section: naSection, p_manual_barcode: null,
+      p_garment_type: null, p_size: null,
+      p_cost_price: null, p_retail_price: null, p_gst_rate: null, p_code: null,
+    });
+    setBusy(false);
+    if (error) { setFErr(error.message); return; }
+    const made = data as Record<string, unknown>;
+    await load();
+    setArtId(String(made.id));
+    setCode(`${made.system_barcode ?? ""} — ${naName.trim()}`);
+    setNewArt(false); setNaName(""); setNaSection("");
+  }
+
   async function addPerson() {
     if (!supabase || !worker.trim()) return;
     setBusy(true); setFErr("");
@@ -237,14 +284,6 @@ export default function MachineProcessPage() {
     () => staff.filter((x) => !x.dept_code || x.dept_code === deptCode),
     [staff, deptCode]);
 
-  const matches = useMemo(() => {
-    const t = code.trim().toLowerCase();
-    if (!t) return [];
-    return arts.filter((a) =>
-      String(a.system_barcode ?? "").toLowerCase().includes(t) ||
-      a.name.toLowerCase().includes(t)).slice(0, 10);
-  }, [code, arts]);
-
   const artLabel = (a: Art) => `${a.system_barcode ?? ""} — ${a.name}`;
 
   return (
@@ -257,8 +296,8 @@ export default function MachineProcessPage() {
         <div className="flex flex-wrap gap-2">
           {PROCESSES.map((p) => (
             <button key={p} onClick={() => { setProc(p); if (DEPT_OF[p]) { setDeptCode(DEPT_OF[p]); setEmpId(""); } }}
-              className={`rounded-full px-4 py-2 text-[13px] font-semibold capitalize transition ${proc === p ? "bg-ink text-white" : "border border-line text-ink/70 hover:bg-panel"}`}>
-              {p}
+              className={`rounded-full px-4 py-2 text-[13px] font-semibold transition ${proc === p ? "bg-ink text-white" : "border border-line text-ink/70 hover:bg-panel"}`}>
+              {PROC_LABEL[p] ?? p}
             </button>
           ))}
         </div>
@@ -285,6 +324,12 @@ export default function MachineProcessPage() {
           <button onClick={() => exportExcel(table())} className="rounded-full border border-line px-3 py-2 text-[12px] font-semibold text-ink/70 hover:bg-panel">Excel</button>
           <button onClick={() => exportPDF(table())} className="rounded-full border border-line px-3 py-2 text-[12px] font-semibold text-ink/70 hover:bg-panel">PDF</button>
           <button onClick={() => printTable(table())} className="flex items-center gap-1 rounded-full border border-line px-3 py-2 text-[12px] font-semibold text-ink/70 hover:bg-panel"><Printer size={13} /> Print</button>
+          {canDo && (
+            <button onClick={() => setImportOpen(true)}
+              className="flex items-center gap-1 rounded-full border border-line px-3 py-2 text-[12px] font-semibold text-ink/70 hover:bg-panel">
+              <Upload size={13} /> Import a sheet
+            </button>
+          )}
           {canDo && (
             <button onClick={openForm} className="ml-auto flex items-center gap-1.5 rounded-full bg-ink px-4 py-2 text-[13px] font-semibold text-white">
               <Plus size={15} /> New entry
@@ -388,7 +433,11 @@ export default function MachineProcessPage() {
         )}
       </div>
 
-      <Modal open={open} onClose={() => setOpen(false)} title={`New ${proc} entry`} wide>
+      <MachineProcessImport open={importOpen} onClose={() => setImportOpen(false)}
+        staff={staff.map((x) => ({ id: x.id, name: x.name, dept_code: x.dept_code }))}
+        onDone={load} />
+
+      <Modal open={open} onClose={() => setOpen(false)} title={`New ${PROC_LABEL[proc] ?? proc} entry`} wide>
         <div className="grid grid-cols-2 gap-3">
           <Field label="Date">
             <input type="date" value={day} onChange={(e) => setDay(e.target.value)} className={inp} />
@@ -434,30 +483,57 @@ export default function MachineProcessPage() {
           </p>
         )}
 
-        <div className="mt-3"><Field label="Computer code or item name">
-          <input value={code} onChange={(e) => { setCode(e.target.value); setArtId(""); }}
-            placeholder="type 43-000010 or a name" className={inp} />
+        {/* K187: the list itself, not a box to guess at. The floor knows the
+            article by its name, and the names are the ones the factory list
+            already holds — so picking one cannot produce a name the import
+            will later fail to match. */}
+        <div className="mt-3"><Field label="Article">
+          <select value={artId} className={inp}
+            onChange={(e) => {
+              setArtId(e.target.value);
+              const a = arts.find((x) => x.id === e.target.value);
+              setCode(a ? artLabel(a) : "");
+              setNewArt(false);
+            }}>
+            <option value="">Choose…</option>
+            {arts.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.name}{a.system_barcode ? ` · ${a.system_barcode}` : ""}
+              </option>
+            ))}
+          </select>
         </Field></div>
-        {!artId && code.trim() && (
-          matches.length > 0 ? (
-            <div className="mt-2 overflow-hidden rounded-xl2 border border-line">
-              <p className="border-b border-line bg-panel/50 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-hint">
-                {matches.length} match{matches.length === 1 ? "" : "es"} — click one
-              </p>
-              <div className="max-h-40 overflow-y-auto">
-                {matches.map((a) => (
-                  <button key={a.id} onClick={() => { setArtId(a.id); setCode(artLabel(a)); }}
-                    className="flex w-full items-center justify-between gap-3 border-b border-line/60 px-3 py-2 text-left last:border-0 hover:bg-panel">
-                    <span>
-                      <span className="text-[13px] font-semibold text-ink">{a.name}</span>
-                      <span className="block font-mono text-[11px] text-hint">{a.system_barcode ?? "—"}</span>
-                    </span>
-                    <span className="shrink-0 rounded-full bg-panel px-2 py-0.5 text-[10.5px] font-semibold text-muted">{a.source}</span>
-                  </button>
-                ))}
-              </div>
+
+        {!newArt ? (
+          <button onClick={() => { setNewArt(true); setNaName(""); setNaSection(""); setFErr(""); }}
+            className="mt-2 text-[12px] font-semibold text-ink/60 underline decoration-line underline-offset-2 hover:text-ink">
+            Not in the list? Add the article here
+          </button>
+        ) : (
+          <div className="mt-2 rounded-xl2 border border-line p-3">
+            <p className="text-[12px] font-bold uppercase tracking-wide text-hint">New article</p>
+            <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+              <input value={naName} onChange={(e) => setNaName(e.target.value)}
+                placeholder="name, e.g. Men Fleece Hood Suit" className={inp} autoFocus />
+              <select value={naSection} onChange={(e) => setNaSection(e.target.value)} className={inp}>
+                <option value="">Section…</option>
+                <option value="41">41 Kids</option><option value="42">42 Child</option>
+                <option value="43">43 Ladies</option><option value="44">44 Men</option>
+                <option value="40">40 Baby/Newborn</option>
+                <option value="60">60 Shoes</option><option value="61">61 Accessories</option>
+              </select>
             </div>
-          ) : <p className="mt-2 text-[12.5px] text-muted">Nothing matches that code or name.</p>
+            <p className="mt-2 text-[11.5px] text-hint">
+              Its code is generated from the section. Prices and the printed barcode are set later on the article.
+            </p>
+            <div className="mt-2 flex gap-2">
+              <button onClick={addArticle} disabled={busy}
+                className="rounded-full bg-ink px-3.5 py-1.5 text-[12px] font-semibold text-white disabled:opacity-50">
+                {busy && <Loader2 size={13} className="mr-1 inline animate-spin" />} Add it
+              </button>
+              <button onClick={() => setNewArt(false)} className="text-[12px] font-semibold text-ink/50">cancel</button>
+            </div>
+          </div>
         )}
 
         <div className="mt-3"><Field label="Fabric was">
