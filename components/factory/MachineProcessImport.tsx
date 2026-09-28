@@ -18,6 +18,14 @@
  * gap and nothing is thrown away — the row is simply not written yet, and
  * the day can be finished whenever the missing piece is known.
  *
+ * AND NOBODY HAS TO BE NAMED FIRST (K189). The sheet off the floor carries
+ * the floor, the day, the article, the rate and the pieces — it does not
+ * carry a name. The work happened; who did it is the one thing still to be
+ * worked out. So a row goes in with nobody on it, counts in production, and
+ * the name is added afterwards with the pencil on the list. It cannot be
+ * paid to nobody in the meantime: the database matches wages on the name,
+ * and an empty name matches nothing.
+ *
  * WHAT IT STILL DOES NOT DO:
  *   It does not guess. An article is chosen from the list, never matched on
  *   a resemblance. An unfinished row is never written on half the truth.
@@ -104,7 +112,7 @@ export default function MachineProcessImport({
   const [name, setName] = useState("");
   const [lines, setLines] = useState<Line[]>([]);
   const [result, setResult] = useState<Result[] | null>(null);
-  const [summary, setSummary] = useState<{ imported: number; skipped: number; needs_attention: number } | null>(null);
+  const [summary, setSummary] = useState<{ imported: number; skipped: number; needs_attention: number; no_worker?: number } | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   /* The rows that were not ready when the rest went in. Kept so the day can
@@ -236,10 +244,15 @@ export default function MachineProcessImport({
   /* READY AND WAITING, not right and wrong. A row that is short of something
      is not an error to be cleared before anything can happen — it is a row
      that is not known yet. The ready ones are recorded now; the waiting ones
-     stay on the screen and go in when the missing piece turns up. */
-  const ready = lines.filter((l) => !bad(l) && !noWho(l));
-  const waiting = lines.filter((l) => bad(l) || noWho(l));
+     stay on the screen and go in when the missing piece turns up.
+
+     A MISSING NAME IS NOT WHAT HOLDS A ROW BACK. Only the facts about the
+     work do — the article, the day, the rate, the pieces. Those cannot be
+     guessed. The name can wait, and be put on afterwards. */
+  const ready = lines.filter((l) => !bad(l));
+  const waiting = lines.filter(bad);
   const missingWho = lines.filter(noWho);
+  const goingInNameless = ready.filter(noWho);
   const counted = useMemo(() => {
     const c: Record<string, number> = {};
     lines.forEach((l) => faults(l).forEach((f) => { c[f] = (c[f] ?? 0) + 1; }));
@@ -275,9 +288,10 @@ export default function MachineProcessImport({
   async function send() {
     if (!supabase || ready.length === 0) return;
     setErr(""); setBusy(true);
-    /* Only the rows that are actually complete. The unfinished ones are put
+    /* Only the rows whose facts are complete. The unfinished ones are put
        aside rather than sent — the database would refuse them anyway, and
-       sending them only to be told so turns a waiting row into an error. */
+       sending them only to be told so turns a waiting row into an error.
+       A row with no NAME is not unfinished in that sense: it goes. */
     const held = waiting;
     const payload = ready.map((l) => ({
       row: l.row, process: l.process, worked_on: l.worked_on,
@@ -290,8 +304,8 @@ export default function MachineProcessImport({
     const { data, error } = await supabase.rpc("import_machine_process", { p_rows: payload });
     setBusy(false);
     if (error) { setErr(error.message); return; }
-    const d = data as { imported: number; skipped: number; needs_attention: number; rows: Result[] };
-    setSummary({ imported: d.imported, skipped: d.skipped, needs_attention: d.needs_attention });
+    const d = data as { imported: number; skipped: number; needs_attention: number; no_worker?: number; rows: Result[] };
+    setSummary({ imported: d.imported, skipped: d.skipped, needs_attention: d.needs_attention, no_worker: d.no_worker ?? 0 });
     setResult(d.rows ?? []);
     setLeft(held);
     onDone();
@@ -375,16 +389,15 @@ export default function MachineProcessImport({
             </div>
           )}
 
-          {/* ONE DECISION PER FLOOR, not 66. The sheet never carries a name,
-              and labour has to belong to somebody before a wage can be worked
-              out — so this is the first thing to do, though it stops nothing:
-              rows with nobody on them simply wait their turn. */}
+          {/* ONE DECISION PER FLOOR, not 66 — and an OFFER, not a gate. The
+              sheet never carries a name. Naming a floor here is the quick way
+              to do it while the day is in front of you; skipping it records
+              the work anyway and leaves the names to be put on later. */}
           {floors.length > 0 && (
-            <div className={`mt-3 rounded-xl2 border p-3 ${missingWho.length
-              ? "border-amber-strong/50 bg-amber-soft/60" : "border-line"}`}>
+            <div className="mt-3 rounded-xl2 border border-line p-3">
               <p className="text-[12.5px] font-semibold text-ink">
                 {missingWho.length
-                  ? `Who did this work? ${missingWho.length} row${missingWho.length === 1 ? " has" : "s have"} nobody on ${missingWho.length === 1 ? "it" : "them"} — the sheet does not say.`
+                  ? `Who did this work? ${missingWho.length} row${missingWho.length === 1 ? " has" : "s have"} nobody on ${missingWho.length === 1 ? "it" : "them"} — the sheet does not say. You can fill them in now, or record the day and name them later.`
                   : "Who did this work"}
               </p>
               <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
@@ -408,7 +421,7 @@ export default function MachineProcessImport({
               <p className="mt-2 text-[11.5px] text-ink/60">
                 Sets every row on that floor that has nobody yet. Any single row can still say somebody else.
                 Not on the list? <button onClick={() => setAddWho(true)} className="font-semibold underline decoration-line underline-offset-2">Add him</button>.
-                {missingWho.length > 0 && " A row with nobody on it is left for later, not lost — the rest still goes in."}
+                {missingWho.length > 0 && " Leaving a row with nobody on it is fine — it still goes in, it still counts the pieces, and it cannot be paid to anybody until a name is on it."}
               </p>
             </div>
           )}
@@ -498,6 +511,16 @@ export default function MachineProcessImport({
               </span>
             </div>
           )}
+
+          {/* Said plainly before the button is pressed, so nothing about the
+              day is a surprise afterwards. */}
+          {goingInNameless.length > 0 && (
+            <p className="mt-2 text-[12px] text-ink/60">
+              {goingInNameless.length} of those rows {goingInNameless.length === 1 ? "has" : "have"} nobody
+              on {goingInNameless.length === 1 ? "it" : "them"}. {goingInNameless.length === 1 ? "It goes" : "They go"} in
+              as {goingInNameless.length === 1 ? "it is" : "they are"} — the pieces count, the wage waits for a name.
+            </p>
+          )}
           {err && <p className="mt-3 text-[12.5px] font-medium text-danger">{err}</p>}
 
           <div className="mt-4 flex items-center justify-end gap-2">
@@ -535,6 +558,18 @@ export default function MachineProcessImport({
               <p className="mt-1 text-[11.5px] font-semibold text-ink/70">still waiting</p>
             </div>
           </div>
+
+          {summary.no_worker ? (
+            <p className="mt-3 flex items-start gap-1.5 rounded-xl2 border border-amber-strong/50 bg-amber-soft/40 px-3.5 py-2.5 text-[12.5px] text-ink">
+              <UserPlus size={14} className="mt-0.5 shrink-0" />
+              <span>
+                <b>{summary.no_worker} of them went in with nobody on {summary.no_worker === 1 ? "it" : "them"}.</b>{" "}
+                The pieces are counted and they show on the list as <i>nobody yet</i>. Put a name on
+                {summary.no_worker === 1 ? " it" : " them"} with the pencil whenever you know — until then the
+                wage belongs to no one and cannot be settled to anybody by mistake.
+              </span>
+            </p>
+          ) : null}
 
           {summary.skipped > 0 && (
             <p className="mt-3 flex items-start gap-1.5 text-[12.5px] text-muted">

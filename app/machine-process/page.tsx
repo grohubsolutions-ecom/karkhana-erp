@@ -19,8 +19,13 @@ type Row = { id: string; entry_no: string; process: string; worked_on: string;
              piece_type: string; paid_at: string | null;
              item_name: string | null; barcode: string | null; manual_barcode: string | null;
              section: string | null; quantity: number; rate: number; total_labour: number;
-             worker_name: string; note: string | null; voided_at: string | null;
+             worker_name: string | null; note: string | null; voided_at: string | null;
              on_payroll: boolean };
+/* The key the foot of the table gathers un-named work under. Not a name
+   anybody could have — an employee called this would collide, and nobody is
+   called this. */
+const NOBODY = "\u0000nobody";
+
 type Art = { id: string; name: string; system_barcode: string | null;
              section: string | null; source: "factory" | "warehouse" };
 type Staff = { id: string; name: string; rate: number | null;
@@ -78,6 +83,7 @@ export default function MachineProcessPage() {
   const [to, setTo] = useState(today());
   const [q, setQ] = useState("");
 
+  const [onlyNameless, setOnlyNameless] = useState(false);
   const [open, setOpen] = useState(false);
   const [day, setDay] = useState(today());
   const [artId, setArtId] = useState("");
@@ -143,8 +149,24 @@ export default function MachineProcessPage() {
   }, []);
   useEffect(() => { load(); }, [load]);
 
+  /* K189 — ENTRIES WITH NOBODY ON THEM.
+     A day imported off the floor arrives without names; they are put on
+     afterwards. This is how they are found again: a count that only appears
+     when there are any, and a click that shows just those lines.
+     The count follows the floor and the dates on screen, so the number on
+     the button is always the number of lines clicking it will show. */
+  const nameless = useMemo(() => rows.filter((r) => {
+    if (r.voided_at || r.worker_name) return false;
+    if (r.process !== proc) return false;
+    const d = String(r.worked_on).slice(0, 10);
+    if (from && d < from) return false;
+    if (to && d > to) return false;
+    return true;
+  }), [rows, proc, from, to]);
+
   const view = useMemo(() => rows.filter((r) => {
     if (r.process !== proc) return false;
+    if (onlyNameless && r.worker_name) return false;
     const d = String(r.worked_on).slice(0, 10);
     if (from && d < from) return false;
     if (to && d > to) return false;
@@ -154,7 +176,7 @@ export default function MachineProcessPage() {
         .some((x) => String(x ?? "").toLowerCase().includes(t));
     }
     return true;
-  }), [rows, proc, from, to, q]);
+  }), [rows, proc, from, to, q, onlyNameless]);
 
   const live = view.filter((r) => !r.voided_at);
   const pieces = live.reduce((a, r) => a + Number(r.quantity || 0), 0);
@@ -162,11 +184,14 @@ export default function MachineProcessPage() {
 
   /* The foot of the paper sheet: one line per person, biggest first. */
   const perPerson = useMemo(() => {
+    /* Everything with nobody on it collects under one key, so the unclaimed
+       labour of a day is a single visible line rather than a blank name. */
     const m = new Map<string, { pieces: number; earned: number; paid: number; entries: number }>();
     live.forEach((r) => {
-      const p = m.get(r.worker_name) ?? { pieces: 0, earned: 0, paid: 0, entries: 0 };
+      const key = r.worker_name ?? NOBODY;
+      const p = m.get(key) ?? { pieces: 0, earned: 0, paid: 0, entries: 0 };
       const amt = Number(r.total_labour || 0);
-      m.set(r.worker_name, {
+      m.set(key, {
         pieces: p.pieces + Number(r.quantity || 0),
         earned: p.earned + amt,
         paid: p.paid + (r.paid_at ? amt : 0),
@@ -191,7 +216,7 @@ export default function MachineProcessPage() {
     setPieceType(r.piece_type === "pieces" ? "pieces" : "fresh");
     setQty(String(r.quantity)); setRate(String(r.rate));
     const s = staff.find((x) => x.name === r.worker_name);
-    setEmpId(s?.id ?? ""); setWorker(s ? "" : r.worker_name);
+    setEmpId(s?.id ?? ""); setWorker(s ? "" : (r.worker_name ?? ""));
     setNote(r.note ?? "");
     setNewArt(false);
   }
@@ -201,14 +226,16 @@ export default function MachineProcessPage() {
     setFErr("");
     if (!(parseFloat(qty) > 0)) { setFErr("How many pieces?"); return; }
     if (rate === "" || !(parseFloat(rate) >= 0)) { setFErr("Give the rate per piece."); return; }
-    if (!empId && !worker.trim()) { setFErr("Say who did the work."); return; }
+    /* K189 — no "say who did the work" here. Opening a line that has nobody
+       on it to fix its quantity should not force a name to be invented on
+       the spot. Leaving both empty keeps whatever the line already had. */
     setBusy(true);
     const { error } = await supabase.rpc("update_machine_process", {
       p_id: editRow.id,
       p_process: procForm, p_worked_on: day,
       p_article_id: artId || null,
       p_quantity: parseFloat(qty), p_rate: parseFloat(rate),
-      p_worker_name: empId ? null : worker.trim(),
+      p_worker_name: empId ? null : (worker.trim() || null),
       p_worker_employee_id: empId || null,
       p_piece_type: pieceType, p_note: note.trim(),
     });
@@ -318,7 +345,7 @@ export default function MachineProcessPage() {
     headers: ["Entry", "Date", "Item code", "Item description", "Fresh/pieces", "Qty", "Rate", "Job person", "Total labour", "Paid"],
     rows: [
       ...live.map((r) => [r.entry_no, r.worked_on, r.barcode ?? "", r.item_name ?? "",
-        r.piece_type, r.quantity, r.rate, r.worker_name, r.total_labour,
+        r.piece_type, r.quantity, r.rate, r.worker_name ?? "(nobody yet)", r.total_labour,
         r.paid_at ? "paid" : "pending"]),
       ...(perPerson.length ? [["", "", "", "", "", "", "", "", "", ""]] : []),
       ...perPerson.map((p) => ["", "", "", `TOTAL — ${p.name}`, "", p.pieces, "", "",
@@ -382,6 +409,15 @@ export default function MachineProcessPage() {
           )}
           <button onClick={() => { setFrom(""); setTo(""); }}
             className="rounded-full border border-line px-3 py-2 text-[12px] font-semibold text-ink/70 hover:bg-panel">All dates</button>
+          {/* Only there when there is something to find. */}
+          {(nameless.length > 0 || onlyNameless) && (
+            <button onClick={() => setOnlyNameless((v) => !v)}
+              className={`rounded-full px-3 py-2 text-[12px] font-semibold transition ${onlyNameless
+                ? "bg-ink text-white"
+                : "border border-amber-strong/60 bg-amber-soft/50 text-ink/80 hover:bg-amber-soft"}`}>
+              Nobody named · {nameless.length}
+            </button>
+          )}
           <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search item, barcode, person…"
             className="w-full max-w-xs rounded-xl2 border border-line bg-surface px-3 py-2 text-[13px] outline-none focus:border-ink/30" />
           <button onClick={() => exportCSV(table())} className="flex items-center gap-1 rounded-full border border-line px-3 py-2 text-[12px] font-semibold text-ink/70 hover:bg-panel"><Download size={13} /> CSV</button>
@@ -437,8 +473,20 @@ export default function MachineProcessPage() {
                     <td className="px-4 py-3 text-right tnum font-semibold text-ink">{n(r.quantity)}</td>
                     <td className="px-4 py-3 text-right tnum text-muted">{n(r.rate)}</td>
                     <td className="px-4 py-3 text-ink/85">
-                      {r.worker_name}
-                      {!r.on_payroll && <span className="ml-1 rounded-full bg-panel px-1.5 py-0.5 text-[10px] font-semibold text-muted">casual</span>}
+                      {r.worker_name ? (
+                        <>
+                          {r.worker_name}
+                          {!r.on_payroll && <span className="ml-1 rounded-full bg-panel px-1.5 py-0.5 text-[10px] font-semibold text-muted">casual</span>}
+                        </>
+                      ) : (
+                        /* Not blank — said. A blank cell looks like a bug; this
+                           says what it is and that it is waiting on you. */
+                        <button onClick={() => canDo && startEdit(r)} disabled={!canDo || !!r.paid_at}
+                          title={canDo ? "Put a name on this line" : undefined}
+                          className="rounded-full bg-amber-soft px-2 py-0.5 text-[11.5px] font-semibold text-ink/75 enabled:hover:bg-amber-strong/40">
+                          nobody yet
+                        </button>
+                      )}
                     </td>
                     <td className="px-4 py-3 text-right tnum text-[15px] font-extrabold text-ink">{rs(r.total_labour)}</td>
                     <td className="px-4 py-3 text-right">
@@ -467,9 +515,9 @@ export default function MachineProcessPage() {
               {perPerson.length > 0 && (
                 <tfoot>
                   {perPerson.map((p) => (
-                    <tr key={p.name} className="border-t border-line bg-panel/40 text-[13px] text-ink">
+                    <tr key={p.name} className={`border-t border-line text-[13px] text-ink ${p.name === NOBODY ? "bg-amber-soft/50" : "bg-panel/40"}`}>
                       <td className="px-4 py-2.5 font-bold" colSpan={2}>
-                        {p.name}
+                        {p.name === NOBODY ? "Nobody named yet" : p.name}
                         <span className="ml-2 text-[11px] font-normal text-muted">{p.entries} entr{p.entries === 1 ? "y" : "ies"}</span>
                       </td>
                       <td className="px-4 py-2.5 text-right tnum font-bold">{n(p.pieces)}</td>
@@ -483,7 +531,15 @@ export default function MachineProcessPage() {
                         {p.pending > 0 ? rs(p.pending) : <span className="text-[13px] font-semibold text-[#166534]">settled</span>}
                       </td>
                       <td className="px-4 py-2.5 text-right">
-                        {canDo && p.pending > 0 && (payFor === p.name ? (
+                        {/* Work belonging to nobody is owed to nobody. Naming
+                            the man is what turns it into a wage — so this line
+                            offers that, not a payment. */}
+                        {p.name === NOBODY ? (
+                          <button onClick={() => { setOnlyNameless(true); setQ(""); }}
+                            className="rounded-full border border-amber-strong/60 px-2.5 py-1 text-[11px] font-semibold text-ink/75 hover:bg-amber-soft">
+                            name them
+                          </button>
+                        ) : canDo && p.pending > 0 && (payFor === p.name ? (
                           <span className="flex items-center justify-end gap-1.5">
                             <button onClick={() => payOff(p.name)}
                               className="rounded-full bg-ink px-2.5 py-1 text-[11px] font-semibold text-white">pay {rs(p.pending)}</button>
