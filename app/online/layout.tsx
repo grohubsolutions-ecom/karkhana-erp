@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import OnlineSidebar, { SidebarTab } from "@/components/OnlineSidebar";
 import { HubTopBar, HubTabBar } from "@/components/HubPhoneChrome";
+import HubSessionGuard from "@/components/HubSessionGuard";
 import "./hub-mobile.css";
 
 /* TWO SHAPES, ONE HUB.
@@ -56,6 +57,9 @@ export default function OnlineLayout({ children }: { children: React.ReactNode }
         </main>
       </div>
       <HubTabBar />
+      {/* Says so when the sign-in ends mid-work, instead of letting a form
+          fail with the database's "permission denied". */}
+      <HubSessionGuard />
     </div>
   );
 }

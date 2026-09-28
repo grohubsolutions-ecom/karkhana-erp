@@ -26,6 +26,7 @@ import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import MyWork from "@/components/MyWork";
 import MyPendingReturns from "@/components/MyPendingReturns";
 import FirstAttemptDesk from "@/components/FirstAttemptDesk";
+import HubSessionGuard from "@/components/HubSessionGuard";
 import HubBell from "@/components/HubBell";
 /* The Hub's phone rules (16px inputs so iPhones do not zoom, thumb-sized
    buttons, no sideways drift) apply here too — this is the page staff open on
@@ -156,6 +157,9 @@ export default function MyPortal() {
 
   return (
     <div className="hub-clip min-h-screen bg-canvas pb-[calc(64px+env(safe-area-inset-bottom))] dark:bg-[#17140f]">
+      {/* Staff sign in less often than the office and leave the tab open for
+          days — the likeliest place for a sign-in to go stale unnoticed. */}
+      <HubSessionGuard />
 
       {/* THE IDENTITY BAND.
           A wage slip opens by saying who it is for and what it is worth, and
