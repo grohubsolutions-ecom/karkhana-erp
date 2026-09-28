@@ -205,10 +205,33 @@ export default function MachineProcessImport({
   const set = (key: number, patch: Partial<Line>) =>
     setLines((ls) => ls.map((l) => (l.key === key ? { ...l, ...patch } : l)));
 
-  const bad = (l: Line) =>
-    !l.articleId || !l.worked_on || l.rate === "" || !(parseFloat(l.quantity) > 0)
-    || (!l.employeeId && !l.workerName.trim());
-  const incomplete = lines.filter(bad);
+  /* WHAT IS MISSING, NAMED. Saying "66 rows need an article, a date, a rate,
+     a quantity or a name" is no help at all when 65 of them only want a name
+     — it reads as though the whole sheet is wrong. Each reason is counted on
+     its own and only the ones that apply are shown.
+
+     No worker is kept apart from the rest on purpose: it is one decision for
+     a whole floor, not 66 separate mistakes, so it gets its own prompt and
+     does not paint every row red. */
+  const noWho = (l: Line) => !l.employeeId && !l.workerName.trim();
+  const faults = (l: Line) => {
+    const f: string[] = [];
+    if (!l.articleId) f.push("article");
+    if (!l.worked_on) f.push("date");
+    if (l.rate === "") f.push("rate");
+    if (!(parseFloat(l.quantity) > 0)) f.push("quantity");
+    return f;
+  };
+  const bad = (l: Line) => faults(l).length > 0;          // shading: not the worker
+  const incomplete = lines.filter((l) => bad(l) || noWho(l));
+  const missingWho = lines.filter(noWho);
+  const counted = useMemo(() => {
+    const c: Record<string, number> = {};
+    lines.forEach((l) => faults(l).forEach((f) => { c[f] = (c[f] ?? 0) + 1; }));
+    return c;
+  }, [lines]);
+  /* Which rows want a rate, named, so they can be found in a sheet of 66. */
+  const rateless = lines.filter((l) => l.rate === "");
 
   /* Fills every row on a floor that has nobody on it yet. The fast way in,
      with each row still free to say someone else. */
@@ -295,9 +318,7 @@ export default function MachineProcessImport({
             <p className="text-[12.5px] text-ink/80">
               {name ? <><b>{name}</b> — </> : null}
               {lines.length} row{lines.length === 1 ? "" : "s"}
-              {incomplete.length > 0 && (
-                <span className="ml-1 font-semibold text-danger">· {incomplete.length} not ready</span>
-              )}
+              {incomplete.length === 0 && <span className="ml-1 font-semibold text-[#166534]">· ready</span>}
             </p>
             <div className="flex gap-3">
               <button onClick={() => setAddWho((v) => !v)}
@@ -328,19 +349,40 @@ export default function MachineProcessImport({
             </div>
           )}
 
-          {/* One man for a whole floor, then change the odd row. */}
+          {/* ONE DECISION PER FLOOR, not 66. The sheet never carries a name,
+              so this is the only thing standing between a read file and a
+              recorded day — it is the loudest thing on the screen until it is
+              done, and quiet afterwards. */}
           {floors.length > 0 && (
-            <div className="mt-2 flex flex-wrap gap-2">
-              {floors.map((f) => (
-                <div key={f} className="flex items-center gap-1.5 rounded-full border border-line px-2.5 py-1">
-                  <span className="text-[11.5px] font-semibold text-ink/70">{labelOf(f)}</span>
-                  <select defaultValue="" onChange={(e) => { fillFloor(f, e.target.value); e.currentTarget.value = ""; }}
-                    className="rounded-md border-0 bg-transparent py-0 pl-1 pr-5 text-[11.5px] text-ink/60 outline-none">
-                    <option value="">set everyone…</option>
-                    {staff.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-                  </select>
-                </div>
-              ))}
+            <div className={`mt-3 rounded-xl2 border p-3 ${missingWho.length
+              ? "border-amber-strong/50 bg-amber-soft/60" : "border-line"}`}>
+              <p className="text-[12.5px] font-semibold text-ink">
+                {missingWho.length
+                  ? `Who did this work? ${missingWho.length} row${missingWho.length === 1 ? " has" : "s have"} nobody on ${missingWho.length === 1 ? "it" : "them"} — the sheet does not say.`
+                  : "Who did this work"}
+              </p>
+              <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                {floors.map((f) => {
+                  const left = lines.filter((l) => l.process === f && noWho(l)).length;
+                  return (
+                    <div key={f}>
+                      <p className="text-[11.5px] font-semibold text-ink/70">
+                        {labelOf(f)}
+                        {left > 0 && <span className="ml-1 font-normal text-ink/50">· {left} to fill</span>}
+                      </p>
+                      <select defaultValue="" onChange={(e) => { fillFloor(f, e.target.value); e.currentTarget.value = ""; }}
+                        className={`${cell} mt-1`}>
+                        <option value="">{left > 0 ? "Choose the man…" : "set everyone…"}</option>
+                        {staff.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                      </select>
+                    </div>
+                  );
+                })}
+              </div>
+              <p className="mt-2 text-[11.5px] text-ink/60">
+                Sets every row on that floor that has nobody yet. Any single row can still say somebody else.
+                Not on the list? <button onClick={() => setAddWho(true)} className="font-semibold underline decoration-line underline-offset-2">Add him</button>.
+              </p>
             </div>
           )}
 
@@ -385,7 +427,8 @@ export default function MachineProcessImport({
                           onChange={(e) => set(l.key, { quantity: e.target.value })} className={`${cell} text-right`} />
                       </td>
                       <td className="px-2 py-1.5">
-                        <select value={l.employeeId} onChange={(e) => set(l.key, { employeeId: e.target.value, workerName: "" })} className={cell}>
+                        <select value={l.employeeId} onChange={(e) => set(l.key, { employeeId: e.target.value, workerName: "" })}
+                          className={`${cell} ${noWho(l) ? "border-amber-strong/70 bg-amber-soft/40" : ""}`}>
                           <option value="">{l.workerName ? `${l.workerName} — not on the list` : "Choose…"}</option>
                           {staff.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
                         </select>
@@ -408,12 +451,23 @@ export default function MachineProcessImport({
             </button>
           </div>
 
-          {incomplete.length > 0 && (
-            <p className="mt-2 flex items-start gap-1.5 text-[12px] text-ink/70">
+          {/* Only what is actually wrong, counted, and the rate rows named —
+              in 66 rows "one has no rate" is useless without saying which. */}
+          {Object.keys(counted).length > 0 && (
+            <div className="mt-2 flex items-start gap-1.5 text-[12px] text-ink/75">
               <AlertTriangle size={13} className="mt-0.5 shrink-0 text-danger" />
-              {incomplete.length} row{incomplete.length === 1 ? "" : "s"} still need an article, a date, a rate,
-              a quantity or a name. Fill them in, or throw them away with the ×.
-            </p>
+              <span>
+                {(["rate", "quantity", "article", "date"] as const)
+                  .filter((k) => counted[k])
+                  .map((k) => `${counted[k]} row${counted[k] === 1 ? "" : "s"} with no ${k}`)
+                  .join(", ")}
+                {" — shaded below. "}
+                {rateless.length > 0 && rateless.length <= 4 && (
+                  <>The rate is missing on {rateless.map((l) => `${labelOf(l.process)} · ${artById.get(l.articleId)?.name ?? "?"}`).join("; ")}. </>
+                )}
+                Type it in, or throw the row away with the ×.
+              </span>
+            </div>
           )}
           {err && <p className="mt-3 text-[12.5px] font-medium text-danger">{err}</p>}
 
