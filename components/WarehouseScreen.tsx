@@ -192,9 +192,11 @@ function WarehouseInner({ section }: { section: Tab }) {
   const [sQty, setSQty] = useState("");
   const [sWhy, setSWhy] = useState("");
 
-  /* Cost, retail and GST live on the ARTICLE. A warehouse product and an
-     article are the same thing when they share a barcode — the same join the
-     whole factory→warehouse handover already runs on. */
+  /* K183: the printed barcode, cost, retail and GST are the WAREHOUSE'S OWN.
+     They used to be read out of the factory's articles table by matching on
+     the code, so deleting an article blanked them here — which is exactly
+     what happened on 28 Sept. A transfer from the factory still copies them
+     across once, when it creates the product; after that they are ours. */
   const [money, setMoney] = useState<Record<string, {
     cost: number | null; retail: number | null; gst: number | null;
     manual: string | null }>>({});
@@ -753,13 +755,10 @@ function WarehouseInner({ section }: { section: Tab }) {
        failed to fill is the screen's fault, not the user's. */
     const code = eBar.trim() || i.barcode;
     if (!code) { setRowErr("This item has no code at all — set one before saving."); return; }
-    /* Both halves in one step: the product (name, code, category) and its
-       article (printed barcode, prices). They used to be two writes, and the
-       article one never landed — the articles table only allows reading, and
-       a blocked write reports "0 rows" instead of an error. So the name and
-       code changed while the printed barcode and prices did not, and the two
-       halves quietly drifted apart. update_warehouse_product (K177) saves both
-       or neither, and keeps the article on the same code as the product. */
+    /* One write, all of it on the warehouse product itself (K183). This used
+       to save the name and code here and push the printed barcode and prices
+       onto the article — which meant a product with no article could not be
+       edited at all, and deleting the article wiped what it was holding. */
     const num = (v: string) => (v === "" ? null : parseFloat(v));
     const { error } = await supabase.rpc("update_warehouse_product", {
       p_item_id: i.item_id,

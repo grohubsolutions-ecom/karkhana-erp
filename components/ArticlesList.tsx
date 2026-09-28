@@ -21,7 +21,10 @@ type Article = { id: string; code: string; name: string; garment_type: string | 
                  /* K148 */
                  section: string | null; system_barcode: string | null;
                  manual_barcode: string | null; cost_price: number | null;
-                 retail_price: number | null; gst_rate: number | null };
+                 retail_price: number | null; gst_rate: number | null;
+                 /* K184 — which warehouse product this article becomes. */
+                 warehouse_item_id: string | null };
+type WhOption = { item_id: string; barcode: string; name: string; manual_barcode: string | null };
 type BomLine = { group_id: string; category_id: string; size_id: string; quantity: string; unit_id: string };
 
 const AUDIENCES = ["Kids", "Men", "Ladies", "Unisex"];
@@ -54,16 +57,38 @@ export default function ArticlesList({ reloadKey = 0, recipeFor: openFor = null,
   const [recipeLoading, setRecipeLoading] = useState(false);
   const [savingRecipe, setSavingRecipe] = useState(false); const [recipeErr, setRecipeErr] = useState("");
   const [deleteFor, setDeleteFor] = useState<Article | null>(null); const [deleting, setDeleting] = useState(false); const [deleteErr, setDeleteErr] = useState("");
+  /* K184 — the warehouse products an article can be matched to, and which row
+     is being matched right now. Read through an RPC rather than the warehouse
+     views, which are behind khana.view: someone working on factory articles
+     has no reason to hold that. */
+  const [whOptions, setWhOptions] = useState<WhOption[]>([]);
+  const [matching, setMatching] = useState<string | null>(null);
+  const [matchErr, setMatchErr] = useState("");
+
+  /* K184 — match an article to the warehouse product it becomes. The database
+     holds the one-to-one: a product already spoken for is refused by name. */
+  async function matchTo(a: Article, itemId: string) {
+    if (!supabase) return;
+    setMatchErr(""); setMatching(a.id);
+    const { error } = await supabase.rpc("set_article_warehouse_link", {
+      p_article: a.id, p_item: itemId || null,
+    });
+    setMatching(null);
+    if (error) { setMatchErr(error.message); return; }
+    load();
+  }
 
   const load = useCallback(async () => {
     if (!supabase) return;
     setLoading(true);
-    const [a, g, sz, pm] = await Promise.all([
-      supabase.from("articles").select("id,code,name,garment_type,audience,size,notes,is_active,created_at,section,system_barcode,manual_barcode,cost_price,retail_price,gst_rate, article_bom(count)").order("code", { ascending: false }),
+    const [a, g, sz, pm, wh] = await Promise.all([
+      supabase.from("articles").select("id,code,name,garment_type,audience,size,notes,is_active,created_at,section,system_barcode,manual_barcode,cost_price,retail_price,gst_rate,warehouse_item_id, article_bom(count)").order("code", { ascending: false }),
       supabase.from("material_groups").select("id,name,has_category,has_color,has_size, group_units(units(id,symbol)), material_categories(id,name)").eq("is_active", true).order("name"),
       supabase.from("sizes").select("id,name").eq("is_active", true).order("sort_order"),
       supabase.rpc("has_permission", { p_permission_code: "production.manage" }),
+      supabase.rpc("warehouse_product_options"),
     ]);
+    setWhOptions((wh.data as WhOption[]) ?? []);
     setArticles(((a.data as unknown as Record<string, unknown>[]) ?? []).map((r) => {
       const bc = (r.article_bom as { count: number }[] | null)?.[0]?.count ?? 0;
       const num = (v: unknown) => (v == null ? null : Number(v));
@@ -77,7 +102,8 @@ export default function ArticlesList({ reloadKey = 0, recipeFor: openFor = null,
         system_barcode: (r.system_barcode as string) || null,
         manual_barcode: (r.manual_barcode as string) || null,
         cost_price: num(r.cost_price), retail_price: num(r.retail_price),
-        gst_rate: num(r.gst_rate) };
+        gst_rate: num(r.gst_rate),
+        warehouse_item_id: (r.warehouse_item_id as string) || null };
     }));
     setGroups(((g.data as unknown as Record<string, unknown>[]) ?? []).map((r) => {
       const gu = (r.group_units as { units: { id: string; symbol: string } | null }[]) ?? [];
@@ -230,11 +256,19 @@ export default function ArticlesList({ reloadKey = 0, recipeFor: openFor = null,
               </div>
             ) : (
               <div className="overflow-hidden rounded-card bg-surface shadow-card">
+                {/* The database's own words when a match is refused — on the
+                    list being looked at, not at the top of the page. */}
+                {matchErr && (
+                  <p className="border-b border-danger/25 bg-danger-soft px-4 py-2.5 text-[12.5px] font-medium text-ink">{matchErr}</p>
+                )}
                 <div className="-mx-4 overflow-x-auto px-4 sm:mx-0 sm:px-0"><table className="w-full text-left text-[13.5px]">
                   <thead><tr className="border-b border-line text-[11px] uppercase tracking-wide text-muted">
                     <th className="px-3 py-2.5 font-semibold">Barcode</th><th className="px-3 py-2.5 font-semibold">Article</th>
                     <th className="px-3 py-2.5 font-semibold">Type</th>
                     <th className="px-3 py-2.5 font-semibold">Recipe</th>
+                    {/* K184 — the warehouse product this article becomes.
+                        Empty on all of them until they are matched by hand. */}
+                    <th className="px-3 py-2.5 font-semibold">Warehouse description</th>
                     <th className="px-3 py-2.5 text-right font-semibold">Cost</th>
                     <th className="px-3 py-2.5 text-right font-semibold">Retail</th>
                     <th className="px-3 py-2.5 text-right font-semibold">GST</th>
@@ -263,6 +297,24 @@ export default function ArticlesList({ reloadKey = 0, recipeFor: openFor = null,
                           {a.audience && <span className="block text-[11.5px] text-hint">{a.audience}</span>}
                         </td>
                         <td className="whitespace-nowrap px-3 py-2.5">{a.bomCount > 0 ? <span className="rounded-full bg-success-soft px-2 py-0.5 text-[11.5px] font-semibold text-[#166534]">{a.bomCount} material{a.bomCount > 1 ? "s" : ""}</span> : <span className="rounded-full bg-panel px-2 py-0.5 text-[11.5px] font-semibold text-muted">Not set</span>}</td>
+                        <td className="min-w-[210px] px-3 py-2.5">
+                          {canManage ? (
+                            <select value={a.warehouse_item_id ?? ""} disabled={matching === a.id}
+                              onChange={(e) => matchTo(a, e.target.value)}
+                              className={`w-full rounded-lg border px-2 py-1 text-[12px] outline-none ${a.warehouse_item_id ? "border-line text-ink" : "border-dashed border-line text-hint"}`}>
+                              <option value="">not matched yet</option>
+                              {whOptions.map((w) => (
+                                <option key={w.item_id} value={w.item_id}>
+                                  {w.name}{w.manual_barcode ? ` · ${w.manual_barcode}` : ""}
+                                </option>
+                              ))}
+                            </select>
+                          ) : (
+                            <span className="text-[12.5px] text-ink/70">
+                              {whOptions.find((w) => w.item_id === a.warehouse_item_id)?.name ?? "—"}
+                            </span>
+                          )}
+                        </td>
                         <td className="whitespace-nowrap px-3 py-2.5 text-right tnum text-[12.5px] text-muted">
                           {a.cost_price == null ? "—" : `Rs ${Number(a.cost_price).toLocaleString()}`}
                         </td>
