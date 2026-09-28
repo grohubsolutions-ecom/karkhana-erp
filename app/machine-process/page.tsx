@@ -7,7 +7,7 @@
  * so the column and the sum can never disagree.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Scissors, Download, Loader2, Plus, Printer, Undo2, Upload } from "lucide-react";
+import { Scissors, Download, Loader2, Plus, Printer, Undo2, Upload, Pencil } from "lucide-react";
 import Topbar from "@/components/Topbar";
 import Modal, { Field } from "@/components/Modal";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
@@ -95,6 +95,14 @@ export default function MachineProcessPage() {
   const [voidWhy, setVoidWhy] = useState("");
   const [payFor, setPayFor] = useState<string | null>(null);
   const [importOpen, setImportOpen] = useState(false);
+  /* K188: correcting a line already saved. It could only be voided before,
+     which left a dead row in the day and a second entry number for one
+     piece of work. */
+  const [editRow, setEditRow] = useState<Row | null>(null);
+  /* The floor the FORM is on. The tab decides it for a new entry, but a
+     correction may be moving the line to another floor, so it is its own
+     value rather than the tab's. */
+  const [procForm, setProcForm] = useState("cutting");
   /* K187: making the article right there, when the floor cut something that
      is not on the list yet — rather than sending someone to another screen
      and losing the entry they were halfway through. */
@@ -170,6 +178,45 @@ export default function MachineProcessPage() {
       .sort((a, b) => b.pending - a.pending || b.earned - a.earned);
   }, [live]);
 
+  /* K188 — the same boxes as a new entry, filled in with what is there. */
+  function startEdit(r: Row) {
+    setVoidRow(null); setEditRow(r); setFErr("");
+    setDay(String(r.worked_on).slice(0, 10));
+    setProcForm(r.process);
+    setDeptCode(DEPT_OF[r.process] ?? "CUT");
+    const a = arts.find((x) => x.system_barcode && x.system_barcode === r.barcode)
+           ?? arts.find((x) => x.name === r.item_name);
+    setArtId(a?.id ?? "");
+    setCode(a ? artLabel(a) : String(r.item_name ?? ""));
+    setPieceType(r.piece_type === "pieces" ? "pieces" : "fresh");
+    setQty(String(r.quantity)); setRate(String(r.rate));
+    const s = staff.find((x) => x.name === r.worker_name);
+    setEmpId(s?.id ?? ""); setWorker(s ? "" : r.worker_name);
+    setNote(r.note ?? "");
+    setNewArt(false);
+  }
+
+  async function saveEdit() {
+    if (!supabase || !editRow) return;
+    setFErr("");
+    if (!(parseFloat(qty) > 0)) { setFErr("How many pieces?"); return; }
+    if (rate === "" || !(parseFloat(rate) >= 0)) { setFErr("Give the rate per piece."); return; }
+    if (!empId && !worker.trim()) { setFErr("Say who did the work."); return; }
+    setBusy(true);
+    const { error } = await supabase.rpc("update_machine_process", {
+      p_id: editRow.id,
+      p_process: procForm, p_worked_on: day,
+      p_article_id: artId || null,
+      p_quantity: parseFloat(qty), p_rate: parseFloat(rate),
+      p_worker_name: empId ? null : worker.trim(),
+      p_worker_employee_id: empId || null,
+      p_piece_type: pieceType, p_note: note.trim(),
+    });
+    setBusy(false);
+    if (error) { setFErr(error.message); return; }
+    setEditRow(null); load();
+  }
+
   function openForm() {
     setOpen(true); setDay(today()); setArtId(""); setCode(""); setPieceType("fresh"); setQty(""); setRate("");
     setEmpId(""); setWorker(""); setNote(""); setFErr("");
@@ -180,6 +227,7 @@ export default function MachineProcessPage() {
        its first option — Cutting. Opening the form on Over Lock, Flat Lock
        or Singer Lock filed the work, and the man's wage, under Cutting. */
     setDeptCode(DEPT_OF[proc] ?? "CUT");
+    setProcForm(proc);
   }
 
   /* Adding him here rather than sending someone to another screen and back —
@@ -231,7 +279,7 @@ export default function MachineProcessPage() {
     if (!empId && !worker.trim()) { setFErr("Who did the work?"); return; }
     setBusy(true);
     const { error } = await supabase.rpc("post_machine_process", {
-      p_process: proc, p_worked_on: day, p_article_id: artId || null,
+      p_process: procForm, p_worked_on: day, p_article_id: artId || null,
       p_quantity: parseFloat(qty), p_rate: parseFloat(rate),
       p_worker_name: worker.trim() || null, p_worker_employee_id: empId || null,
       p_note: note.trim() || null,
@@ -318,6 +366,22 @@ export default function MachineProcessPage() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          {/* K188: THE DATES HAD NO BOXES. from and to existed, defaulted to
+              today and filtered the list — but nothing on the page ever drew
+              them, so the screen was locked to today with no way out. Import
+              a sheet for the 18th and you would be looking at an empty table
+              wondering where the 65 entries went. */}
+          <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} title="From"
+            className="rounded-xl2 border border-line bg-surface px-3 py-2 text-[13px] outline-none focus:border-ink/30" />
+          <span className="text-[12px] text-muted">to</span>
+          <input type="date" value={to} onChange={(e) => setTo(e.target.value)} title="To"
+            className="rounded-xl2 border border-line bg-surface px-3 py-2 text-[13px] outline-none focus:border-ink/30" />
+          {(from !== today() || to !== today()) && (
+            <button onClick={() => { setFrom(today()); setTo(today()); }}
+              className="rounded-full border border-line px-3 py-2 text-[12px] font-semibold text-ink/70 hover:bg-panel">Today</button>
+          )}
+          <button onClick={() => { setFrom(""); setTo(""); }}
+            className="rounded-full border border-line px-3 py-2 text-[12px] font-semibold text-ink/70 hover:bg-panel">All dates</button>
           <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search item, barcode, person…"
             className="w-full max-w-xs rounded-xl2 border border-line bg-surface px-3 py-2 text-[13px] outline-none focus:border-ink/30" />
           <button onClick={() => exportCSV(table())} className="flex items-center gap-1 rounded-full border border-line px-3 py-2 text-[12px] font-semibold text-ink/70 hover:bg-panel"><Download size={13} /> CSV</button>
@@ -387,8 +451,14 @@ export default function MachineProcessPage() {
                             className="text-[11px] font-bold text-danger disabled:opacity-40">void</button>
                         </span>
                       ) : (
-                        <button onClick={() => { setVoidRow(r.id); setVoidWhy(""); }}
-                          className="rounded-full p-1.5 text-muted transition hover:bg-panel hover:text-danger"><Undo2 size={14} /></button>
+                        <span className="flex items-center justify-end gap-1">
+                          {!r.paid_at && (
+                            <button onClick={() => startEdit(r)} title="Correct this entry"
+                              className="rounded-full p-1.5 text-muted transition hover:bg-panel hover:text-ink"><Pencil size={14} /></button>
+                          )}
+                          <button onClick={() => { setVoidRow(r.id); setVoidWhy(""); }} title="Void it"
+                            className="rounded-full p-1.5 text-muted transition hover:bg-panel hover:text-danger"><Undo2 size={14} /></button>
+                        </span>
                       ))}
                     </td>
                   </tr>
@@ -435,12 +505,21 @@ export default function MachineProcessPage() {
 
       <MachineProcessImport open={importOpen} onClose={() => setImportOpen(false)}
         staff={staff.map((x) => ({ id: x.id, name: x.name, dept_code: x.dept_code }))}
-        onDone={load} />
+        arts={arts.map((a) => ({ id: a.id, name: a.name, system_barcode: a.system_barcode }))}
+        onDone={load} onReload={load} />
 
-      <Modal open={open} onClose={() => setOpen(false)} title={`New ${PROC_LABEL[proc] ?? proc} entry`} wide>
+      <Modal open={open || !!editRow} onClose={() => { setOpen(false); setEditRow(null); }} wide
+        title={editRow ? `Correct ${editRow.entry_no}` : `New ${PROC_LABEL[procForm] ?? procForm} entry`}
+        subtitle={editRow ? "The wage is quantity × rate, worked out every time it is read — so a corrected number corrects the money with it." : undefined}>
         <div className="grid grid-cols-2 gap-3">
           <Field label="Date">
             <input type="date" value={day} onChange={(e) => setDay(e.target.value)} className={inp} />
+          </Field>
+          <Field label="Floor">
+            <select value={procForm} className={inp}
+              onChange={(e) => { setProcForm(e.target.value); if (DEPT_OF[e.target.value]) { setDeptCode(DEPT_OF[e.target.value]); setEmpId(""); } }}>
+              {PROCESSES.map((p) => <option key={p} value={p}>{PROC_LABEL[p] ?? p}</option>)}
+            </select>
           </Field>
           <Field label="Department">
             <select value={deptCode} onChange={(e) => { setDeptCode(e.target.value); setEmpId(""); }} className={inp}>
@@ -573,14 +652,18 @@ export default function MachineProcessPage() {
         {fErr && <p className="mt-3 text-[12.5px] font-medium text-danger">{fErr}</p>}
 
         <div className="mt-5 flex justify-end gap-2">
-          <button onClick={() => setOpen(false)} className="rounded-xl2 border border-line px-4 py-2.5 text-[13px] font-semibold text-ink/70">Cancel</button>
-          <button onClick={() => save(true)} disabled={busy}
-            className="flex items-center gap-1.5 rounded-xl2 border border-line px-4 py-2.5 text-[13px] font-semibold text-ink/75 disabled:opacity-50">
-            {busy && <Loader2 size={15} className="animate-spin" />} Save &amp; add another
-          </button>
-          <button onClick={() => save(false)} disabled={busy}
+          <button onClick={() => { setOpen(false); setEditRow(null); }}
+            className="rounded-xl2 border border-line px-4 py-2.5 text-[13px] font-semibold text-ink/70">Cancel</button>
+          {/* "Save & add another" only makes sense when making one. */}
+          {!editRow && (
+            <button onClick={() => save(true)} disabled={busy}
+              className="flex items-center gap-1.5 rounded-xl2 border border-line px-4 py-2.5 text-[13px] font-semibold text-ink/75 disabled:opacity-50">
+              {busy && <Loader2 size={15} className="animate-spin" />} Save &amp; add another
+            </button>
+          )}
+          <button onClick={() => (editRow ? saveEdit() : save(false))} disabled={busy}
             className="flex items-center gap-1.5 rounded-xl2 bg-ink px-5 py-2.5 text-[13px] font-semibold text-white disabled:opacity-50">
-            {busy && <Loader2 size={15} className="animate-spin" />} Save
+            {busy && <Loader2 size={15} className="animate-spin" />} {editRow ? "Save changes" : "Save"}
           </button>
         </div>
       </Modal>
