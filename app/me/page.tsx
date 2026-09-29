@@ -70,27 +70,37 @@ export default function MyPortal() {
   const [hols, setHols] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
-  /* Work first. It is the half that changes during the day; the wage figure
-     has not moved since last night. */
-  const [tab, setTab] = useState<"work" | "pay" | "returns" | "attempt">("work");
-  /* THE LAST TWO TABS ARE NOT FOR EVERYONE.
+  /* null = the person has not picked a tab yet, so the portal opens on his
+     main job: Delivery Under Review for whoever works that desk, My work for
+     everyone else. Work first because it is the half that changes during the
+     day; the wage figure has not moved since last night. */
+  const [tab, setTab] = useState<"work" | "pay" | "returns" | "attempt" | null>(null);
+  /* TWO TABS ARE NOT FOR EVERYONE.
      Each is one person's job and appears only for whoever holds its key:
      'returns.print' is Abdul Rehman's printed returns sheet, 'returns.rescue'
-     is Abdullah's first-attempt desk. They are separate keys on purpose — the
-     two jobs are different, and neither man should inherit the other's screen.
-     Neither permission opens a page of its own; the database functions behind
-     the tabs are the only things they unlock, so a portal without them is
-     exactly the portal it was before. */
-  const [canReturns, setCanReturns] = useState(false);
-  const [canRescue, setCanRescue] = useState(false);
+     is Abdullah's Delivery Under Review desk. They are separate keys on
+     purpose — the two jobs are different, and neither man should inherit the
+     other's screen. Neither permission opens a page of its own; the database
+     functions behind the tabs are the only things they unlock, so a portal
+     without them is exactly the portal it was before.
+     Both are asked before the portal is shown, so it opens on the right tab
+     rather than flicking from My work to the desk a moment later. */
+  const [perms, setPerms] = useState<{ returns: boolean; rescue: boolean } | null>(null);
+  const canReturns = perms?.returns === true;
+  const canRescue = perms?.rescue === true;
+  /* How many parcels are waiting on the desk — shown on its tab, so it is
+     seen from the other tabs too. Reported by the desk itself. */
+  const [rescueCount, setRescueCount] = useState<number | null>(null);
 
   useEffect(() => {
-    if (!isSupabaseConfigured || !supabase) return;
-    supabase.rpc("has_permission", { p_permission_code: "returns.print" })
-      .then(({ data }) => setCanReturns(data === true));
-    supabase.rpc("has_permission", { p_permission_code: "returns.rescue" })
-      .then(({ data }) => setCanRescue(data === true));
+    if (!isSupabaseConfigured || !supabase) { setPerms({ returns: false, rescue: false }); return; }
+    Promise.all([
+      supabase.rpc("has_permission", { p_permission_code: "returns.print" }),
+      supabase.rpc("has_permission", { p_permission_code: "returns.rescue" }),
+    ]).then(([p, r]) => setPerms({ returns: p.data === true, rescue: r.data === true }))
+      .catch(() => setPerms({ returns: false, rescue: false }));
   }, []);
+  const shown = tab ?? (canRescue ? "attempt" : "work");
 
   const load = useCallback(async () => {
     if (!isSupabaseConfigured || !supabase) { setLoading(false); return; }
@@ -129,7 +139,7 @@ export default function MyPortal() {
      Hamza Khan's August was overstated by Rs 7,700. */
   const gross = Number(pay?.gross ?? 0);
 
-  if (loading) {
+  if (loading || !perms) {
     return <div className="flex min-h-screen items-center justify-center bg-canvas dark:bg-[#17140f]">
       <Loader2 size={20} className="animate-spin text-muted" /></div>;
   }
@@ -235,43 +245,75 @@ export default function MyPortal() {
           somebody reads in: the money first, then the days behind it, then the
           evidence. On a wide screen the calendar sits beside the figures rather
           than a screen below them. */}
-      {/* TWO TABS, ONE PORTAL.
+      {/* TABS, ONE PORTAL.
           A man opening this in the morning wants one of exactly two things:
           what have I been given to do, or what am I owed. Stacking them made a
           long scroll on a phone where the second half was never reached. Work
-          is first because it is the half that changes during the day.
-          The same two tabs on a phone and on a desktop — there is no third
-          layout to keep in step. */}
+          is first because it is the half that changes during the day — and for
+          Abdullah his work IS the Delivery Under Review desk, so that tab comes
+          first and the portal opens on it.
+          The same tabs on a phone and on a desktop — there is no third layout
+          to keep in step. */}
       <div className="mx-auto -mt-4 max-w-5xl px-4 sm:px-6">
         {/* Two to a row on a phone. With four tabs a single row ran 170px past
             the edge of a 390px screen and the last two could not be reached;
             a lone last tab takes the whole width rather than sitting half-empty. */}
-        <div className="mb-4 grid w-full grid-cols-2 gap-1 rounded-[24px] bg-panel p-1 [&>button:last-child:nth-child(odd)]:col-span-2 dark:bg-white/[0.06] sm:flex sm:w-max sm:rounded-full">
-          {([["work", "My work"], ["pay", "Attendance & pay"],
-             ...(canReturns ? [["returns", "Pending returns"] as const] : []),
-             ...(canRescue ? [["attempt", "Delivery Under Review"] as const] : [])] as const).map(([key, label]) => (
-            <button key={key} onClick={() => setTab(key)}
+        <div role="tablist" aria-label="Your portal"
+          className="mb-4 grid w-full grid-cols-2 gap-1 rounded-[24px] bg-panel p-1 [&>button:last-child:nth-child(odd)]:col-span-2 dark:bg-white/[0.06] sm:flex sm:w-max sm:rounded-full">
+          {([...(canRescue ? [["attempt", "Delivery Under Review"] as const] : []),
+             ["work", "My work"] as const, ["pay", "Attendance & pay"] as const,
+             ...(canReturns ? [["returns", "Pending returns"] as const] : [])]).map(([key, label]) => (
+            <button key={key} role="tab" aria-selected={shown === key} onClick={() => setTab(key)}
               className={`h-11 min-w-0 flex-1 truncate rounded-full px-3 text-[13.5px] font-semibold transition sm:h-auto sm:flex-none sm:whitespace-nowrap sm:px-5 sm:py-2 sm:text-[13px] ${
-                tab === key ? "bg-ink text-white shadow-soft dark:bg-white dark:text-[#141414]"
-                            : "text-muted hover:text-ink dark:text-[#a89f93] dark:hover:text-white"}`}>
+                shown === key ? "bg-ink text-white shadow-soft dark:bg-white dark:text-[#141414]"
+                              : "text-muted hover:text-ink dark:text-[#a89f93] dark:hover:text-white"}`}>
               {/* The one long name gets a short form on a phone, where two tabs
-                  share a row and it would otherwise be cut mid-word. */}
+                  share a row and it would otherwise be cut mid-word. The count
+                  is what is waiting on the desk right now — red while there is
+                  anything, so it is seen from the other tabs too. */}
               {key === "attempt"
-                ? <><span className="sm:hidden">Under review</span><span className="hidden sm:inline">{label}</span></>
+                ? <>
+                    <span className="sm:hidden">Under review</span><span className="hidden sm:inline">{label}</span>
+                    {rescueCount != null && (
+                      <span className={`ml-1.5 inline-block min-w-[20px] rounded-full px-1.5 text-center text-[11px] font-bold leading-[18px] tabular-nums ${
+                        rescueCount > 0 ? "bg-[#E5786B] text-white"
+                        : shown === key ? "bg-white/20 dark:bg-black/10" : "bg-black/[0.06] dark:bg-white/10"}`}>
+                        {rescueCount}
+                      </span>
+                    )}
+                  </>
                 : label}
             </button>
           ))}
         </div>
 
-        {tab === "work" && <MyWork />}
+        {shown === "work" && <MyWork />}
 
-        {tab === "returns" && canReturns && <MyPendingReturns />}
+        {shown === "returns" && canReturns && <MyPendingReturns />}
 
-        {/* The same desk the office sees under Logistics — one component, one
-            pair of functions, so the two lists cannot drift apart. */}
-        {tab === "attempt" && canRescue && <FirstAttemptDesk compact />}
+        {/* DELIVERY UNDER REVIEW — the whole section, as the office sees it
+            under Hub → Logistics: the same component and the same pair of
+            database functions, so the two lists cannot drift apart. It stays
+            mounted behind the other tabs, so coming back to it keeps the
+            attempt tab and the ticks he left it on. */}
+        {canRescue && (
+          <section aria-label="Delivery Under Review" className={shown === "attempt" ? "" : "hidden"}>
+            <div className="px-1">
+              <h2 className="text-[20px] font-extrabold tracking-tight text-ink dark:text-[#f4f1ea] sm:text-[22px]">
+                Delivery Under Review
+              </h2>
+              <p className="mt-1 max-w-[70ch] text-[13px] leading-snug text-muted dark:text-[#a89f93]">
+                Yesterday&rsquo;s and today&rsquo;s failed deliveries that PostEx or OwnEx still have under review,
+                sorted by which attempt they are on, with the courier&rsquo;s own reason. Ring the customer, copy the
+                tracking IDs into the courier&rsquo;s group, ring the rider — then press Re-attempt or Return and it
+                moves to History.
+              </p>
+            </div>
+            <FirstAttemptDesk onCount={setRescueCount} />
+          </section>
+        )}
 
-        <div className={`grid gap-4 lg:grid-cols-[1fr_1.05fr] lg:items-start ${tab === "pay" ? "" : "hidden"}`}>
+        <div className={`grid gap-4 lg:grid-cols-[1fr_1.05fr] lg:items-start ${shown === "pay" ? "" : "hidden"}`}>
 
           <div className="space-y-4">
 
@@ -406,7 +448,7 @@ export default function MyPortal() {
           </div>
         </div>
 
-        <p className={`mt-5 px-1 text-[11.5px] leading-relaxed text-hint dark:text-[#8a8175] ${tab === "pay" ? "" : "hidden"}`}>
+        <p className={`mt-5 px-1 text-[11.5px] leading-relaxed text-hint dark:text-[#8a8175] ${shown === "pay" ? "" : "hidden"}`}>
           Sundays and public holidays are paid. Working one adds a day. An absent day is
           not counted, and it is the only thing that reduces what you earn.
           {isCurrent && " This month is still running, so the figure grows each day you are marked present."}

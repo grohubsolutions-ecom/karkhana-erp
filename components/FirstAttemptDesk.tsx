@@ -263,7 +263,11 @@ const SELECT = "h-11 min-w-0 rounded-full border border-line bg-surface px-3 tex
    while typing) springs back under the finger, and the tap lands on the bar. */
 const keepFocus = (e: { preventDefault: () => void }) => e.preventDefault();
 
-export default function FirstAttemptDesk({ compact = false }: { compact?: boolean }) {
+export default function FirstAttemptDesk({ compact = false, onCount }: {
+  compact?: boolean;
+  /* The portal puts this number on its tab: what is on the desk right now. */
+  onCount?: (n: number) => void;
+}) {
   const phone = useIsPhone();
   /* Two lists, kept apart: today's desk and the History. */
   const [desk, setDesk] = useState<Board | null>(null);
@@ -330,6 +334,10 @@ export default function FirstAttemptDesk({ compact = false }: { compact?: boolea
     const t = setTimeout(() => setUndo(null), 15000);
     return () => clearTimeout(t);
   }, [undo]);
+
+  useEffect(() => {
+    if (onCount && desk?.summary) onCount(Number(desk.summary.desk) || 0);
+  }, [desk, onCount]);
 
   const board = view === "history" ? hist : desk;
   const today = board?.today ?? desk?.today ?? ymdPK(new Date());
