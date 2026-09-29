@@ -18,6 +18,13 @@
  * gap and nothing is thrown away — the row is simply not written yet, and
  * the day can be finished whenever the missing piece is known.
  *
+ * THE SAME SHEET CAN BE LOADED AGAIN TO FILL IN THE NAMES (K191). A row
+ * that matches work already recorded is not simply skipped any more: if
+ * that recorded row has NOBODY on it and this sheet names somebody, the
+ * name is put on it. If it already has a name, it is left exactly as it is,
+ * even when the sheet disagrees — a re-upload fills blanks, it never
+ * overwrites. Nothing doubles either way.
+ *
  * AND NOBODY HAS TO BE NAMED FIRST (K189). The sheet off the floor carries
  * the floor, the day, the article, the rate and the pieces — it does not
  * carry a name. The work happened; who did it is the one thing still to be
@@ -112,7 +119,7 @@ export default function MachineProcessImport({
   const [name, setName] = useState("");
   const [lines, setLines] = useState<Line[]>([]);
   const [result, setResult] = useState<Result[] | null>(null);
-  const [summary, setSummary] = useState<{ imported: number; skipped: number; needs_attention: number; no_worker?: number } | null>(null);
+  const [summary, setSummary] = useState<{ imported: number; named?: number; skipped: number; needs_attention: number; no_worker?: number } | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   /* The rows that were not ready when the rest went in. Kept so the day can
@@ -126,9 +133,19 @@ export default function MachineProcessImport({
 
   /* By name, so a sheet that DOES carry an Employee column still matches a
      person on the staff list rather than being stored as loose text. */
+  /* MATCHING A NAME OFF THE SHEET TO A MAN — ONLY ON THE FOUR FLOORS.
+     The staff list carries the whole company, office people included. A
+     sheet that says "Awais" means the Awais who works a machine, and if
+     there is no such man the name belongs on the line as plain text. Left
+     unfiltered, a cutting wage could attach itself to somebody in the Hub
+     because two people share a name. The database refuses that too (K191);
+     this is the same rule on the screen so the two never disagree. */
   const byName = useMemo(() => {
+    const floors = new Set(FLOORS.map(([, , , code]) => code));
     const m = new Map<string, string>();
-    staff.forEach((s) => m.set(squash(s.name), s.id));
+    staff
+      .filter((s) => !s.dept_code || floors.has(s.dept_code))
+      .forEach((s) => m.set(squash(s.name), s.id));
     return m;
   }, [staff]);
 
@@ -304,8 +321,9 @@ export default function MachineProcessImport({
     const { data, error } = await supabase.rpc("import_machine_process", { p_rows: payload });
     setBusy(false);
     if (error) { setErr(error.message); return; }
-    const d = data as { imported: number; skipped: number; needs_attention: number; no_worker?: number; rows: Result[] };
-    setSummary({ imported: d.imported, skipped: d.skipped, needs_attention: d.needs_attention, no_worker: d.no_worker ?? 0 });
+    const d = data as { imported: number; named?: number; skipped: number; needs_attention: number; no_worker?: number; rows: Result[] };
+    setSummary({ imported: d.imported, named: d.named ?? 0, skipped: d.skipped,
+                 needs_attention: d.needs_attention, no_worker: d.no_worker ?? 0 });
     setResult(d.rows ?? []);
     setLeft(held);
     onDone();
@@ -320,7 +338,9 @@ export default function MachineProcessImport({
       subtitle={result
         ? (left.length
             ? "The finished rows are recorded. The rest are below, still waiting."
-            : "All of it is recorded.")
+            : summary?.named
+              ? "The names are on. Nothing was recorded twice."
+              : "All of it is recorded.")
         : lines.length
           ? "Every cell can be changed, rows can be added, and anything wrong can be thrown out."
           : "Cutting, Over Lock, Flat Lock and Singer Lock — read straight off the spreadsheet."}>
@@ -544,11 +564,19 @@ export default function MachineProcessImport({
       {/* ------------------------------------------------ what happened */}
       {result && summary && (
         <>
-          <div className="grid grid-cols-3 gap-2">
+          {/* A fourth number appears only when a re-upload actually filled
+              something in, so an ordinary import still reads as three. */}
+          <div className={`grid gap-2 ${summary.named ? "grid-cols-2 sm:grid-cols-4" : "grid-cols-3"}`}>
             <div className="rounded-xl2 bg-success-soft p-3 text-center">
               <p className="text-[22px] font-extrabold leading-none text-ink">{summary.imported}</p>
               <p className="mt-1 text-[11.5px] font-semibold text-ink/70">recorded</p>
             </div>
+            {!!summary.named && (
+              <div className="rounded-xl2 bg-success-soft p-3 text-center">
+                <p className="text-[22px] font-extrabold leading-none text-ink">{summary.named}</p>
+                <p className="mt-1 text-[11.5px] font-semibold text-ink/70">names filled in</p>
+              </div>
+            )}
             <div className="rounded-xl2 bg-panel p-3 text-center">
               <p className="text-[22px] font-extrabold leading-none text-ink">{summary.skipped}</p>
               <p className="mt-1 text-[11.5px] font-semibold text-ink/70">already there</p>
@@ -558,6 +586,17 @@ export default function MachineProcessImport({
               <p className="mt-1 text-[11.5px] font-semibold text-ink/70">still waiting</p>
             </div>
           </div>
+
+          {summary.named ? (
+            <p className="mt-3 flex items-start gap-1.5 rounded-xl2 border border-line bg-success-soft/50 px-3.5 py-2.5 text-[12.5px] text-ink">
+              <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
+              <span>
+                <b>{summary.named} line{summary.named === 1 ? "" : "s"} that had nobody on {summary.named === 1 ? "it" : "them"} now {summary.named === 1 ? "has a name" : "have names"}.</b>{" "}
+                Nothing was recorded twice and nothing that already had a name was changed —
+                a sheet loaded again fills what is empty and leaves the rest alone.
+              </span>
+            </p>
+          ) : null}
 
           {summary.no_worker ? (
             <p className="mt-3 flex items-start gap-1.5 rounded-xl2 border border-amber-strong/50 bg-amber-soft/40 px-3.5 py-2.5 text-[12.5px] text-ink">
@@ -575,7 +614,9 @@ export default function MachineProcessImport({
             <p className="mt-3 flex items-start gap-1.5 text-[12.5px] text-muted">
               <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
               {summary.skipped} row{summary.skipped === 1 ? " was" : "s were"} already recorded on that day at that
-              rate and quantity, so {summary.skipped === 1 ? "it was" : "they were"} left alone.
+              rate and quantity, and already {summary.skipped === 1 ? "has" : "have"} somebody on{" "}
+              {summary.skipped === 1 ? "it" : "them"}, so {summary.skipped === 1 ? "it was" : "they were"} left
+              exactly as {summary.skipped === 1 ? "it was" : "they were"}.
             </p>
           )}
 
