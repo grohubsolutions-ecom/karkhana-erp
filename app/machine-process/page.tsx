@@ -79,8 +79,15 @@ export default function MachineProcessPage() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
   const [proc, setProc] = useState("cutting");
-  const [from, setFrom] = useState(today());
-  const [to, setTo] = useState(today());
+  /* THE DAY IS NOT THE DEFAULT. Work is entered off a sheet days after it
+     was done — the 18th imported on the 29th — so opening the screen on
+     today showed an empty table and a day that looked lost. Empty means no
+     date limit: everything, newest at the top. Every other screen in
+     Karkhana already opens this way; this was the one that did not.
+     The entry FORM still opens on today (see `day` below); that is a
+     different thing — recording work that is happening now. */
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
   const [q, setQ] = useState("");
 
   const [onlyNameless, setOnlyNameless] = useState(false);
@@ -403,12 +410,14 @@ export default function MachineProcessPage() {
           <span className="text-[12px] text-muted">to</span>
           <input type="date" value={to} onChange={(e) => setTo(e.target.value)} title="To"
             className="rounded-xl2 border border-line bg-surface px-3 py-2 text-[13px] outline-none focus:border-ink/30" />
-          {(from !== today() || to !== today()) && (
-            <button onClick={() => { setFrom(today()); setTo(today()); }}
-              className="rounded-full border border-line px-3 py-2 text-[12px] font-semibold text-ink/70 hover:bg-panel">Today</button>
-          )}
+          {/* Both always on screen, and the one you are looking at is filled
+              in — so what the table is showing is never a guess. */}
+          <button onClick={() => { setFrom(today()); setTo(today()); }}
+            className={`rounded-full px-3 py-2 text-[12px] font-semibold transition ${from === today() && to === today()
+              ? "bg-ink text-white" : "border border-line text-ink/70 hover:bg-panel"}`}>Today</button>
           <button onClick={() => { setFrom(""); setTo(""); }}
-            className="rounded-full border border-line px-3 py-2 text-[12px] font-semibold text-ink/70 hover:bg-panel">All dates</button>
+            className={`rounded-full px-3 py-2 text-[12px] font-semibold transition ${!from && !to
+              ? "bg-ink text-white" : "border border-line text-ink/70 hover:bg-panel"}`}>All dates</button>
           {/* Only there when there is something to find. */}
           {(nameless.length > 0 || onlyNameless) && (
             <button onClick={() => setOnlyNameless((v) => !v)}
