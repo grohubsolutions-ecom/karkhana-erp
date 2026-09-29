@@ -12,8 +12,8 @@
 
    The job on each row, in order:
      1. Ring the customer.  Why was it not received? Were you called?
-     2. Copy the row into the courier's WhatsApp group — every detail, or just
-        the tracking numbers. They reply with the rider's number.
+     2. Copy the tracking numbers into the courier's WhatsApp group. They
+        reply with the rider's number.
      3. Ring the rider.  Did you call? Did you reach the address?
      4. Re-attempt or Return — the two buttons on every row. Return asks why,
         and will not take an empty answer. Either way the parcel moves to
@@ -86,7 +86,6 @@ type Board = {
 type Tab = "1" | "2" | "3" | "history";
 type Span = "today" | "yesterday" | "7" | "30" | "90";
 type Kind = "all" | Exclude<LeftAs, "desk">;
-type CopyMode = "full" | "ids";
 
 /* A missing amount is a missing amount. Coercing it to zero printed "Rs 0",
    which in a COD business reads as a free parcel. */
@@ -233,34 +232,8 @@ const RETURN_REASONS = [
 
 /* ------------------------------------------------------------------ copying */
 
-/* Everything the dealership group needs to find the parcel and the customer. */
-function detailLines(r: Row): string[] {
-  const where = [r.address, r.city].filter(Boolean).join(", ");
-  return [
-    `Order ${r.order_number ?? "—"} · Tracking ${r.tracking_id}`,
-    `Customer: ${r.customer_name ?? "—"}${r.phone ? ` · ${r.phone}` : ""}`,
-    ...(where ? [`Address: ${where}`] : []),
-    `Amount: ${rs(r.cod_amount)}`,
-    `${ordinal(r.attempts)} attempt failed · ${r.reason ?? "reason not given"}`,
-  ];
-}
-function groupMessage(r: Row): string {
-  return [...detailLines(r), "", "Please share the rider's number for this parcel."].join("\n");
-}
-/* SEVERAL AT ONCE. One ask at the top, then one numbered block per parcel, so
-   the reply can say "3) 0301…". *bold* is WhatsApp's own markup. Always one
-   courier per message — the caller splits them. */
-function bulkMessage(rows: Row[]): string {
-  if (rows.length === 1) return groupMessage(rows[0]);
-  const cn = rows[0]?.courier ?? "Courier";
-  const head = [`*${cn} — delivery under review — ${rows.length} parcels*`, "Please share the rider's number for each.", ""];
-  const blocks = rows.map((r, i) => {
-    const [first, ...rest] = detailLines(r);
-    return [`*${i + 1}) ${first}*`, ...rest].join("\n");
-  });
-  return [...head, blocks.join("\n\n")].join("\n");
-}
-/* JUST THE NUMBERS, one to a line — what the group asked for. */
+/* COPY IS THE TRACKING NUMBERS, one to a line — nothing else. That is what
+   the courier's group asks for, and what the owner asked the button to do. */
 const idsMessage = (rows: Row[]) => rows.map((r) => r.tracking_id).join("\n");
 
 async function copyText(text: string): Promise<boolean> {
@@ -289,7 +262,6 @@ const SELECT = "h-11 min-w-0 rounded-full border border-line bg-surface px-3 tex
    Without this the tap blurs the box first, the Hub's bottom bar (hidden
    while typing) springs back under the finger, and the tap lands on the bar. */
 const keepFocus = (e: { preventDefault: () => void }) => e.preventDefault();
-const COPY_MODE_KEY = "kk-under-review-copy";
 
 export default function FirstAttemptDesk({ compact = false }: { compact?: boolean }) {
   const phone = useIsPhone();
@@ -305,8 +277,6 @@ export default function FirstAttemptDesk({ compact = false }: { compact?: boolea
   const [q, setQ] = useState("");
   const [openKey, setOpenKey] = useState<string | null>(null);
   const [copied, setCopied] = useState("");
-  /* Full details, or the tracking numbers alone. Remembered per phone. */
-  const [copyMode, setCopyModeState] = useState<CopyMode>("full");
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [riderDraft, setRiderDraft] = useState<Record<string, string>>({});
   const [savingRider, setSavingRider] = useState("");
@@ -319,13 +289,6 @@ export default function FirstAttemptDesk({ compact = false }: { compact?: boolea
 
   const view: "today" | "history" = tab === "history" ? "history" : "today";
 
-  useEffect(() => {
-    try { const v = localStorage.getItem(COPY_MODE_KEY); if (v === "ids" || v === "full") setCopyModeState(v); } catch { /* private mode */ }
-  }, []);
-  const setCopyMode = (m: CopyMode) => {
-    setCopyModeState(m);
-    try { localStorage.setItem(COPY_MODE_KEY, m); } catch { /* private mode */ }
-  };
 
   const reqId = useRef(0);
   const load = useCallback(async () => {
@@ -512,7 +475,6 @@ export default function FirstAttemptDesk({ compact = false }: { compact?: boolea
     if (!ok) setErr("The phone would not let the page copy. Try once more; if it still refuses, open a parcel and press and hold its message to copy it by hand.");
     setTimeout(() => setCopied((c) => (c === key ? "" : c)), 2200);
   }
-  const rowCopyText = (r: Row) => (copyMode === "ids" ? r.tracking_id : groupMessage(r));
 
   /* Refresh also asks PostEx again straight away (at most every two minutes),
      and looks once more when that answer has had time to land. */
@@ -666,29 +628,15 @@ export default function FirstAttemptDesk({ compact = false }: { compact?: boolea
                 Clear
               </button>
             )}
-            {/* WHAT A COPY HOLDS: every detail for the group, or the tracking
-                numbers alone, one to a line. */}
-            <div role="radiogroup" aria-label="What to copy"
-              className="ml-auto flex items-center rounded-full bg-panel p-1 dark:bg-white/[0.06]">
-              {([["full", "Full details"], ["ids", "Tracking IDs"]] as const).map(([m, label]) => (
-                <button key={m} role="radio" aria-checked={copyMode === m} onMouseDown={keepFocus} onClick={() => setCopyMode(m)}
-                  className={`h-10 rounded-full px-3 text-[12.5px] font-semibold transition xl:h-8 ${copyMode === m
-                    ? "bg-surface text-ink shadow-sm dark:bg-white dark:text-[#141414]" : "text-muted dark:text-[#a89f93]"}`}>
-                  {label}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className="mt-2 flex flex-wrap items-center justify-end gap-2">
+            <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
             {copyGroups.map(({ c, list }) => {
               const key = "__bulk_" + c;
-              const ids = copyMode === "ids" ? " IDs" : "";
               const label = copyGroups.length > 1
-                ? `Copy ${list.length} ${c}${ids}`
-                : pickedRows.length ? `Copy ${list.length} picked${ids}` : `Copy all ${list.length}${ids}`;
+                ? `Copy ${list.length} ${c} IDs`
+                : pickedRows.length ? `Copy ${list.length} picked IDs` : `Copy all ${list.length} IDs`;
               return (
                 <button key={key} onMouseDown={keepFocus}
-                  onClick={() => copy(key, copyMode === "ids" ? idsMessage(list) : bulkMessage(list))}
+                  onClick={() => copy(key, idsMessage(list))}
                   className={`flex h-10 items-center gap-2 rounded-full px-4 text-[13px] font-semibold transition ${copied === key
                     ? "bg-success-soft text-[#2f7a3d]" : "bg-ink text-white dark:bg-white dark:text-[#141414]"}`}>
                   {copied === key ? <><Check size={15} /> Copied {list.length}</> : <><Copy size={15} /> {label}</>}
@@ -707,14 +655,9 @@ export default function FirstAttemptDesk({ compact = false }: { compact?: boolea
                   className="flex h-10 items-center gap-2 rounded-full border border-[#8d3328]/30 bg-danger-soft px-4 text-[13px] font-semibold text-[#8d3328] disabled:opacity-50">
                   <Undo2 size={15} /> Return {pickedRows.length}
                 </button>
-                <button onMouseDown={keepFocus} disabled={!!marking}
-                  onClick={() => markDone(pickedRows.map((r) => r.tracking_id), true, "__bulk_done")}
-                  className="flex h-10 items-center gap-2 rounded-full border border-[#2f7a3d]/40 bg-success-soft px-4 text-[13px] font-semibold text-[#2f7a3d] disabled:opacity-50">
-                  {marking === "__bulk_done" ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />}
-                  Done {pickedRows.length}
-                </button>
               </>
             )}
+            </div>
           </div>
         </div>
       )}
@@ -778,27 +721,13 @@ export default function FirstAttemptDesk({ compact = false }: { compact?: boolea
                   </button>
                 </div>
 
-                <div className={`mt-2 grid gap-2 px-3 ${mayWork ? "grid-cols-[minmax(0,1fr)_auto_auto]" : "grid-cols-[minmax(0,1fr)_auto]"}`}>
+                <div className="mt-2 px-3">
                   {r.phone ? (
                     <a href={`tel:${dial(r.phone)}`}
                       className="flex h-10 min-w-0 items-center justify-center gap-1.5 rounded-full bg-panel px-2 text-[12.5px] font-semibold tabular-nums text-ink dark:bg-white/[0.07] dark:text-white">
                       <Phone size={13} className="shrink-0" /><span className="truncate">{r.phone}</span>
                     </a>
                   ) : <span className="flex h-10 min-w-0 items-center justify-center truncate rounded-full bg-panel px-2 text-[12px] text-hint dark:bg-white/[0.05]">no number</span>}
-                  <button onMouseDown={keepFocus} onClick={() => copy(r.tracking_id, rowCopyText(r))}
-                    aria-label={copyMode === "ids" ? `Copy the tracking ID of ${label}` : `Copy ${label} for the group`}
-                    className={`flex h-10 items-center justify-center gap-1.5 rounded-full px-3 text-[12.5px] font-semibold transition ${copied === r.tracking_id
-                      ? "bg-success-soft text-[#2f7a3d]" : "border border-line text-ink dark:border-white/10 dark:text-white"}`}>
-                    {copied === r.tracking_id ? <><Check size={13} /> Copied</> : <><Copy size={13} /> {copyMode === "ids" ? "ID" : "Copy"}</>}
-                  </button>
-                  {mayWork && (
-                    <button onMouseDown={keepFocus} disabled={!!marking}
-                      onClick={() => markDone([r.tracking_id], true, r.tracking_id + ":done", label)}
-                      aria-label={`Mark ${label} done`}
-                      className="flex h-10 items-center justify-center gap-1.5 rounded-full border border-[#2f7a3d]/35 px-3 text-[12.5px] font-semibold text-[#2f7a3d] disabled:opacity-50 dark:text-[#8fd49a]">
-                      {marking === r.tracking_id + ":done" ? <Loader2 size={13} className="animate-spin" /> : <CheckCircle2 size={13} />} Done
-                    </button>
-                  )}
                 </div>
 
                 {/* THE TWO BUTTONS THE OWNER ASKED FOR. A third try can only come back. */}
@@ -854,7 +783,7 @@ export default function FirstAttemptDesk({ compact = false }: { compact?: boolea
       {view === "today" && rows.length > 0 && (
         <div className="mt-3 hidden xl:block">
           <div className="overflow-x-auto rounded-card border border-line bg-surface dark:border-white/[0.06] dark:bg-[#201c17]">
-            <table className="w-full min-w-[840px] text-[13px]">
+            <table className="w-full min-w-[760px] text-[13px]">
               <thead className="bg-panel text-left text-[11px] uppercase tracking-wide text-muted dark:bg-white/[0.05] dark:text-[#a89f93]">
                 <tr>
                   <th className="w-10 px-3 py-2">
@@ -862,7 +791,7 @@ export default function FirstAttemptDesk({ compact = false }: { compact?: boolea
                       ref={(el) => { if (el) el.indeterminate = pickedRows.length > 0 && !allPicked; }}
                       className="h-4 w-4 accent-[#141414] dark:accent-white" />
                   </th>
-                  {["Order", "Why it failed", "Amount", "Customer", "Customer no.", "Rider no.", "Decide", ""].map((h, i) => (
+                  {["Order", "Why it failed", "Amount", "Customer", "Customer no.", "Rider no.", "Decide"].map((h, i) => (
                     <th key={h + i} className="whitespace-nowrap px-2 py-2 font-semibold">{h}</th>
                   ))}
                 </tr>
@@ -924,7 +853,7 @@ export default function FirstAttemptDesk({ compact = false }: { compact?: boolea
                           <p className="mt-0.5 text-[11.5px] font-semibold text-red-700 dark:text-red-300">{riderErr[r.tracking_id]}</p>
                         )}
                       </td>
-                      <td className="px-2 py-1.5">
+                      <td className="px-2 py-1.5 pr-3">
                         {mayWork ? (
                           <div className="flex w-[96px] flex-col gap-1">
                             <button onClick={() => decide([r.tracking_id], "reattempt", r.tracking_id + ":re", label)}
@@ -940,23 +869,6 @@ export default function FirstAttemptDesk({ compact = false }: { compact?: boolea
                             </button>
                           </div>
                         ) : <span className="text-hint">—</span>}
-                      </td>
-                      <td className="px-2 py-1.5 pr-3">
-                        <div className="flex w-[78px] flex-col gap-1">
-                          <button onClick={() => copy(r.tracking_id, rowCopyText(r))}
-                            title={copyMode === "ids" ? "Copy the tracking ID" : "Copy this parcel for the group"}
-                            className={`flex h-8 w-full items-center justify-center gap-1.5 whitespace-nowrap rounded-lg px-2 text-[12px] font-semibold transition ${copied === r.tracking_id
-                              ? "bg-success-soft text-[#2f7a3d]" : "border border-line text-ink hover:bg-panel dark:border-white/10 dark:text-white dark:hover:bg-white/[0.08]"}`}>
-                            {copied === r.tracking_id ? <><Check size={13} /> Copied</> : <><Copy size={13} /> {copyMode === "ids" ? "ID" : "Copy"}</>}
-                          </button>
-                          {mayWork && (
-                            <button onClick={() => markDone([r.tracking_id], true, r.tracking_id + ":done", label)} disabled={!!marking}
-                              title="Mark done without a decision — it moves to History"
-                              className="flex h-8 w-full items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-[#2f7a3d]/35 px-2 text-[12px] font-semibold text-[#2f7a3d] transition hover:bg-success-soft disabled:opacity-50 dark:text-[#8fd49a] dark:hover:bg-white/[0.06]">
-                              {marking === r.tracking_id + ":done" ? <Loader2 size={13} className="animate-spin" /> : <CheckCircle2 size={13} />} Done
-                            </button>
-                          )}
-                        </div>
                       </td>
                     </tr>
                   );
@@ -1028,7 +940,7 @@ export default function FirstAttemptDesk({ compact = false }: { compact?: boolea
         <p className="mt-4 px-1 text-[11.5px] leading-relaxed text-hint dark:text-[#8a8175]">
           The desk holds parcels that came under review yesterday or today and that PostEx or OwnEx still show
           under review — each parcel re-read from the couriers about every half hour, and PostEx&rsquo;s own reason
-          and history every 15 minutes. Re-attempt, Return or Done moves a parcel to History for good; it only comes back if the
+          and history every 15 minutes. Re-attempt or Return moves a parcel to History for good; it only comes back if the
           courier reports a new failed try. A parcel already settled on PostEx&rsquo;s portal leaves by itself.
           The re-attempt or the return is still pressed in the courier&rsquo;s own portal — this desk decides and
           records, it does not send anything to them.
@@ -1039,7 +951,7 @@ export default function FirstAttemptDesk({ compact = false }: { compact?: boolea
         <CaseSheet
           r={open} mayWork={mayWork} phone={phone} err={err} today={today}
           onClose={() => setOpenKey(null)} onDismissErr={() => setErr("")}
-          onCopy={() => copy(open.tracking_id, rowCopyText(open))} copied={copied === open.tracking_id} copyMode={copyMode}
+          onCopy={() => copy(open.tracking_id, open.tracking_id)} copied={copied === open.tracking_id}
           onSave={(patch) => save(open.tracking_id, patch)}
           onDone={(done) => markDone([open.tracking_id], done, "__sheet", open.order_number ?? open.tracking_id)}
           onReattempt={() => decide([open.tracking_id], "reattempt", "__sheet", open.order_number ?? open.tracking_id)}
@@ -1174,11 +1086,11 @@ function ReturnDialog({ rows, err, busy, onClose, onConfirm }: {
 }
 
 /* The whole job for one parcel, in the order it is done. */
-function CaseSheet({ r, mayWork, phone, err, today, onClose, onDismissErr, onCopy, copied, copyMode, onSave, onDone,
+function CaseSheet({ r, mayWork, phone, err, today, onClose, onDismissErr, onCopy, copied, onSave, onDone,
   onReattempt, onReturn, onUndoDecision, busy }: {
   r: Row; mayWork: boolean; phone: boolean; err: string; today: string;
   onClose: () => void; onDismissErr: () => void;
-  onCopy: () => void; copied: boolean; copyMode: CopyMode;
+  onCopy: () => void; copied: boolean;
   onSave: (patch: Record<string, unknown>) => Promise<boolean>;
   onDone: (done: boolean) => void;
   onReattempt: () => void; onReturn: () => void; onUndoDecision: () => void;
@@ -1322,9 +1234,9 @@ function CaseSheet({ r, mayWork, phone, err, today, onClose, onDismissErr, onCop
         <button onClick={onCopy}
           className={`mt-2 flex h-11 w-full items-center justify-center gap-2 rounded-full text-[13px] font-semibold transition ${copied
             ? "bg-success-soft text-[#2f7a3d]" : "border border-line bg-surface text-ink hover:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white"}`}>
-          {copied ? <><Check size={15} /> Copied</> : <><Copy size={15} /> {copyMode === "ids" ? "Copy the tracking ID" : "Copy for the group"}</>}
+          {copied ? <><Check size={15} /> Copied</> : <><Copy size={15} /> Copy the tracking ID</>}
         </button>
-        <pre className="mt-2 max-h-36 overflow-auto whitespace-pre-wrap rounded-xl2 bg-panel px-3 py-2 text-[11.5px] leading-relaxed text-muted dark:bg-white/[0.05] dark:text-[#a89f93]">{copyMode === "ids" ? r.tracking_id : groupMessage(r)}</pre>
+        <pre className="mt-2 max-h-36 overflow-auto whitespace-pre-wrap rounded-xl2 bg-panel px-3 py-2 text-[11.5px] leading-relaxed text-muted dark:bg-white/[0.05] dark:text-[#a89f93]">{r.tracking_id}</pre>
         <div className="mt-2 flex gap-2">
           <input value={rider} onChange={(e) => setRider(e.target.value)} disabled={!canEdit}
             inputMode="tel" placeholder="Rider's number"
