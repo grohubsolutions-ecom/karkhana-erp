@@ -25,8 +25,8 @@ export default function FirstAttemptPage() {
         <h1 className="mt-2 text-[22px] font-extrabold tracking-tight text-ink dark:text-[#f4f1ea]">Delivery Under Review</h1>
         <p className="mt-1 max-w-[70ch] text-[13px] text-muted dark:text-[#a89f93]">
           Yesterday&rsquo;s and today&rsquo;s failed deliveries that PostEx or OwnEx still have under review,
-          sorted by which attempt they are on. Ring the customer, copy the rows into the courier&rsquo;s group,
-          type the rider&rsquo;s number when they reply, ring him too — then mark it done and it moves to History.
+          sorted by which attempt they are on, with the courier&rsquo;s own reason. Ring the customer, copy the rows
+          into the courier&rsquo;s group, ring the rider — then press Re-attempt or Return and it moves to History.
         </p>
       </div>
       <FirstAttemptDesk />
