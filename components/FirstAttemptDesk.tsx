@@ -23,11 +23,12 @@
    YESTERDAY OR TODAY and that PostEx or OwnEx STILL shows under review.
    Everything else is in History, one line per failed try.
 
-   THE COURIER'S OWN WORD (H281). PostEx's reason — "REFUSED TO RECEIVE",
-   "INCOMPLETE ADDRESS" — is read from the parcel's history every 15 minutes,
-   along with its real count of tries and any Return or Re-attempt already
-   pressed on PostEx's own portal. A parcel settled there leaves the desk by
-   itself, so nobody is asked to decide it twice.
+   THE COURIER'S OWN WORD (H281, H283). PostEx's and OwnEx's own history is
+   read every 10 minutes — the reason, the real count of tries, and any Return
+   or Re-attempt already pressed on their portals (or started by the courier
+   itself). A parcel settled there leaves the desk by itself, marked who did
+   it, so nobody is asked to decide it twice. The open desk looks again every
+   2 minutes.
 
    WHAT THIS SCREEN DOES NOT DO: press the button at the courier. The owner's
    decision — the re-attempt or the return is pressed in PostEx's or OwnEx's
@@ -72,7 +73,7 @@ type Row = {
   waiting_hours: number | null; past_refusals: number; rider_strikes: number;
   decided_at: string | null; delivery_status: string | null;
 };
-type NotSent = { tracking_id: string; order_number: string | null; decision: Decision };
+type NotSent = { tracking_id: string; order_number: string | null; decision: Decision; courier?: string | null };
 type Summary = {
   desk: number; postex: number; ownex: number; untouched: number; no_rider: number;
   not_worked: number; done_today: number; courier_today?: number;
@@ -175,8 +176,15 @@ const leftOf = (k: LeftAs) => LEFT.find((l) => l.key === k);
 /* Who settled a decision, in a few words. */
 function decidedBy(r: Row): string {
   const cn = r.courier ?? "the courier";
-  if (r.decided_via === "courier") return r.courier_advice_by === "courier" ? `${cn} started the return itself` : `pressed on ${cn}'s portal`;
+  if (r.decided_via === "courier") return courierDid(cn, r.decision ?? r.courier_advice, r.courier_advice_by);
   return r.done_by_name ?? "on this desk";
+}
+/* H283: both couriers are read now, and a courier acts on its own in two ways —
+   PostEx starts a return after a second failure, OwnEx re-attempts a "not
+   available" itself, PostEx sends a CNA out again next morning. */
+function courierDid(cn: string, what: Decision | null, by: "merchant" | "courier" | null): string {
+  if (by === "courier") return what === "reattempt" ? `${cn} sent it out again itself` : `${cn} started the return itself`;
+  return `pressed on ${cn}'s portal`;
 }
 
 /* One line under the badge, saying what that badge means for THIS parcel. */
@@ -187,13 +195,14 @@ function leftDetail(r: Row, today: string): string {
     case "return": {
       const t = r.done_at ? ` · ${when(r.done_at, today)}` : "";
       const why = r.left_as === "return" && r.return_reason ? ` · “${r.return_reason}”` : "";
-      /* Decided here: has anybody pressed it on PostEx's portal yet? */
-      const sent = r.decided_via === "desk" && r.courier === "PostEx" && r.attempt_no === r.attempts
+      /* Decided here: has anybody pressed it on the courier's portal yet?
+         Both couriers' histories are read now (H283). */
+      const sent = r.decided_via === "desk" && (r.courier === "PostEx" || r.courier === "OwnEx") && r.attempt_no === r.attempts
         ? (r.courier_advice === r.decision
-            ? " · ✓ done on PostEx"
+            ? ` · ✓ done on ${cn}`
             : r.courier_advice
-              ? ` · PostEx shows ${r.courier_advice === "return" ? "a return" : "a re-attempt"}${r.courier_advice_by === "courier" ? " (its own)" : ""} instead`
-              : underReview(r.raw_status) ? " · not yet pressed on PostEx" : "")
+              ? ` · ${cn} shows ${r.courier_advice === "return" ? "a return" : "a re-attempt"}${r.courier_advice_by === "courier" ? " (its own)" : ""} instead`
+              : underReview(r.raw_status) ? ` · not yet pressed on ${cn}` : "")
         : "";
       return decidedBy(r) + t + why + sent;
     }
@@ -334,6 +343,19 @@ export default function FirstAttemptDesk({ compact = false, onCount }: {
     const t = setTimeout(() => setUndo(null), 15000);
     return () => clearTimeout(t);
   }, [undo]);
+  /* LIVE (H283). Both couriers are read every 10 minutes; the open desk looks
+     again every 2 minutes, so a parcel settled on PostEx's or OwnEx's portal
+     leaves the screen by itself. Not while a parcel or the Return box is open,
+     and not in a hidden tab. */
+  const quiet = useRef(false);
+  useEffect(() => { quiet.current = !!openKey || !!returning; }, [openKey, returning]);
+  useEffect(() => {
+    const t = setInterval(() => {
+      if (quiet.current || (typeof document !== "undefined" && document.visibilityState !== "visible")) return;
+      loadRef.current();
+    }, 120000);
+    return () => clearInterval(t);
+  }, []);
 
   useEffect(() => {
     if (onCount && desk?.summary) onCount(Number(desk.summary.desk) || 0);
@@ -484,8 +506,8 @@ export default function FirstAttemptDesk({ compact = false, onCount }: {
     setTimeout(() => setCopied((c) => (c === key ? "" : c)), 2200);
   }
 
-  /* Refresh also asks PostEx again straight away (at most every two minutes),
-     and looks once more when that answer has had time to land. */
+  /* Refresh also asks PostEx and OwnEx again straight away (at most every two
+     minutes each), and looks once more when their answers have had time to land. */
   async function refresh() {
     if (supabase) {
       const { data } = await supabase.rpc("hub_rescue_refresh_courier");
@@ -545,21 +567,27 @@ export default function FirstAttemptDesk({ compact = false, onCount }: {
           {" "}({dateOf(shiftDay(today, -1))} – {dateOf(today)}) and still waiting for a decision at the courier.
         </p>
       )}
-      {/* DECIDED HERE, NOT YET PRESSED AT POSTEX. The desk records; PostEx only
-          acts when the button is pressed on its portal. */}
-      {view === "today" && notSent.length > 0 && (
-        <div className="mt-2 flex flex-col gap-2 rounded-card border border-[#e7c98f] bg-amber-soft px-3 py-2 text-[12.5px] leading-snug text-[#7a5a28] sm:flex-row sm:items-center dark:border-white/10">
-          <span className="min-w-0 flex-1">
-            <b>{notSent.length} decided here but not yet pressed on PostEx&rsquo;s portal:</b>{" "}
-            {notSent.map((x) => `${x.order_number ?? x.tracking_id} (${x.decision === "return" ? "return" : "re-attempt"})`).join(", ")}
-          </span>
-          <button onMouseDown={keepFocus} onClick={() => copy("__notsent", notSent.map((x) => x.tracking_id).join("\n"))}
-            className={`flex h-10 shrink-0 items-center justify-center gap-1.5 self-start rounded-full px-3 text-[12px] font-bold sm:h-9 sm:self-auto ${copied === "__notsent"
-              ? "bg-success-soft text-[#2f7a3d]" : "bg-surface text-ink dark:bg-white dark:text-[#141414]"}`}>
-            {copied === "__notsent" ? <><Check size={13} /> Copied</> : <><Copy size={13} /> Copy their tracking IDs</>}
-          </button>
-        </div>
-      )}
+      {/* DECIDED HERE, NOT YET PRESSED AT THE COURIER. The desk records; the
+          courier only acts when the button is pressed on its portal. One line
+          per courier, because each portal is pressed separately (H283). */}
+      {view === "today" && (["PostEx", "OwnEx"] as const).map((cname) => {
+        const list = notSent.filter((x) => (x.courier ?? "PostEx") === cname);
+        if (!list.length) return null;
+        const key = `__notsent_${cname}`;
+        return (
+          <div key={cname} className="mt-2 flex flex-col gap-2 rounded-card border border-[#e7c98f] bg-amber-soft px-3 py-2 text-[12.5px] leading-snug text-[#7a5a28] sm:flex-row sm:items-center dark:border-white/10">
+            <span className="min-w-0 flex-1">
+              <b>{list.length} decided here but not yet pressed on {cname}&rsquo;s portal:</b>{" "}
+              {list.map((x) => `${x.order_number ?? x.tracking_id} (${x.decision === "return" ? "return" : "re-attempt"})`).join(", ")}
+            </span>
+            <button onMouseDown={keepFocus} onClick={() => copy(key, list.map((x) => x.tracking_id).join("\n"))}
+              className={`flex h-10 shrink-0 items-center justify-center gap-1.5 self-start rounded-full px-3 text-[12px] font-bold sm:h-9 sm:self-auto ${copied === key
+                ? "bg-success-soft text-[#2f7a3d]" : "bg-surface text-ink dark:bg-white dark:text-[#141414]"}`}>
+              {copied === key ? <><Check size={13} /> Copied</> : <><Copy size={13} /> Copy their tracking IDs</>}
+            </button>
+          </div>
+        );
+      })}
       {view === "today" && s && s.not_worked > 0 && (
         <button onClick={seeNotWorked}
           className="mt-2 flex min-h-[40px] w-full items-center justify-between gap-3 rounded-card border border-dashed border-line px-3 py-1.5 text-left text-[12.5px] text-muted transition hover:bg-panel md:w-auto dark:border-white/15 dark:text-[#a89f93] dark:hover:bg-white/[0.05]">
@@ -947,9 +975,10 @@ export default function FirstAttemptDesk({ compact = false, onCount }: {
       {!compact && board && (
         <p className="mt-4 px-1 text-[11.5px] leading-relaxed text-hint dark:text-[#8a8175]">
           The desk holds parcels that came under review yesterday or today and that PostEx or OwnEx still show
-          under review — each parcel re-read from the couriers about every half hour, and PostEx&rsquo;s own reason
-          and history every 15 minutes. Re-attempt or Return moves a parcel to History for good; it only comes back if the
-          courier reports a new failed try. A parcel already settled on PostEx&rsquo;s portal leaves by itself.
+          under review. PostEx&rsquo;s and OwnEx&rsquo;s own history is read every 10 minutes (and when you press
+          Refresh), and this screen looks again every 2 minutes. Re-attempt or Return moves a parcel to History for
+          good; it only comes back if the courier reports a new failed try. A parcel settled on PostEx&rsquo;s or
+          OwnEx&rsquo;s portal — by your agent, or by the courier itself — leaves by itself, marked who did it.
           The re-attempt or the return is still pressed in the courier&rsquo;s own portal — this desk decides and
           records, it does not send anything to them.
         </p>
@@ -1192,7 +1221,7 @@ function CaseSheet({ r, mayWork, phone, err, today, onClose, onDismissErr, onCop
         {r.courier_advice && r.courier_advice_at && !earlierTry && (
           <Detail label={`On ${cn}'s portal`}>
             {r.courier_advice_by === "courier"
-              ? `${cn} started the return itself`
+              ? courierDid(cn, r.courier_advice, "courier")
               : `${r.courier_advice === "return" ? "Return" : "Re-attempt"} requested`} · {when(r.courier_advice_at, today)}
           </Detail>
         )}

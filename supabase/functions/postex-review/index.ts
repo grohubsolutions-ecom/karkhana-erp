@@ -23,9 +23,16 @@
 //   and hands them to hub_rescue_courier_facts(), which writes them where the
 //   desk and every other screen read them.
 //
+// H283 (30 Sep) — PostEx SENDING IT OUT AGAIN BY ITSELF
+//   "Attempt Made: CNA" then, next morning, "Enroute for Delivery" with no
+//   merchant request in between: PostEx re-attempted on its own (seen on
+//   #TS3596, #TS3586, #TS3437, #TS3614). That is a re-attempt too, and History
+//   must say so — advice "reattempt", advice_by "courier", at the moment it
+//   went out. A merchant request, if there is one, still wins.
+//
 //   It is deliberately separate from postex-sync: that job keeps Orders and
 //   Logistics filled and is not touched. This one reads only the few dozen
-//   parcels the desk cares about (hub_rescue_postex_queue), every 15 minutes,
+//   parcels the desk cares about (hub_rescue_postex_queue), every 10 minutes,
 //   and writes nothing but through that one database function.
 //
 // SECRETS: POSTEX_API_TOKEN, SYNC_KEY (the same ones postex-sync uses).
@@ -101,6 +108,9 @@ function readHistory(detail: Record<string, unknown>, tracking: string, codes: M
         const already = advice === "return" && adviceBy === "courier";
         advice = "return"; adviceBy = "courier";
         if (!already) adviceAt = h.at;
+      } else if (advice == null && h.at > last.at && /^(en-?\s*route|out)\s+for\s+delivery/i.test(h.msg)) {
+        /* H283: out again with no request from us — PostEx re-attempting itself. */
+        advice = "reattempt"; adviceAt = h.at; adviceBy = "courier";
       }
     }
   }
@@ -137,9 +147,13 @@ Deno.serve(async (req) => {
     const body = await req.json().catch(() => ({}));
     const db = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
 
-    const { data: queue, error: qErr } = await db.rpc("hub_rescue_postex_queue", { p_limit: Number(body.limit ?? 60) });
-    if (qErr) return json({ error: qErr.message }, 500);
-    const nums = ((queue ?? []) as { tracking_id: string }[]).map((r) => r.tracking_id).filter(Boolean);
+    /* Exactly these parcels (a backfill or a check), or the desk's queue. */
+    let nums: string[] = Array.isArray(body.tracking_ids) ? body.tracking_ids.map(String).slice(0, 150) : [];
+    if (!nums.length) {
+      const { data: queue, error: qErr } = await db.rpc("hub_rescue_postex_queue", { p_limit: Number(body.limit ?? 60) });
+      if (qErr) return json({ error: qErr.message }, 500);
+      nums = ((queue ?? []) as { tracking_id: string }[]).map((r) => r.tracking_id).filter(Boolean);
+    }
     if (!nums.length) return json({ ok: true, checked: 0, note: "nothing to read" });
 
     const facts: Fact[] = []; const failed: string[] = [];
@@ -161,12 +175,15 @@ Deno.serve(async (req) => {
     for (const x of details) readHistory(x.d, x.tn, codes);
     for (const x of details) facts.push(readHistory(x.d, x.tn, codes));
 
+    const summary = facts.map((f) => ({ tracking_id: f.tracking_id, attempts: f.attempts, advice: f.advice, by: f.advice_by }));
+    if (body.dry_run === true) return json({ ok: true, dry_run: true, checked: nums.length, read: facts.length, failed, facts: summary });
+
     const { data: res, error } = await db.rpc("hub_rescue_courier_facts", {
       p_facts: facts,
       p_codes: [...codes].map(([code, meaning]) => ({ code, meaning })),
     });
     if (error) return json({ error: error.message, read: facts.length }, 500);
-    return json({ ok: true, checked: nums.length, read: facts.length, failed: failed.slice(0, 10), result: res });
+    return json({ ok: true, checked: nums.length, read: facts.length, failed: failed.slice(0, 10), result: res, facts: summary });
   } catch (e) {
     return json({ error: String(e) }, 500);
   }
