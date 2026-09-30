@@ -162,7 +162,7 @@ export function downloadBoardExcel(rows: BoardRow[], o: BoardOpts) {
     `<sheetData>${rowsXml.join("")}</sheetData>` +
     `<mergeCells count="${merges.length}">${merges.map((m) => `<mergeCell ref="${m}"/>`).join("")}</mergeCells>` +
     `<pageMargins left="0.3" right="0.3" top="0.4" bottom="0.4" header="0.2" footer="0.2"/>` +
-    `<pageSetup orientation="landscape" paperSize="9" fitToWidth="1" fitToHeight="0"/>` +
+    `<pageSetup orientation="landscape" paperSize="9" fitToWidth="1" fitToHeight="1"/>` +
     `</worksheet>`;
 
   const border = `<border><left style="thin"><color rgb="FF5F5E5A"/></left><right style="thin"><color rgb="FF5F5E5A"/></right><top style="thin"><color rgb="FF5F5E5A"/></top><bottom style="thin"><color rgb="FF5F5E5A"/></bottom><diagonal/></border>`;
@@ -201,6 +201,8 @@ export function downloadBoardExcel(rows: BoardRow[], o: BoardOpts) {
     `<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>` +
     `</styleSheet>`;
 
+  /* fitToHeight 1: Excel prints it on one sheet too, like the PDF and the
+     printout — the owner's one-page rule (30 Sep). */
   const sheetName = b.title.slice(0, 31);
   const files: [string, string][] = [
     ["[Content_Types].xml",
@@ -245,20 +247,104 @@ const TONE: Record<string, { fill: string; ink: string; line: string }> = {
   Other:  { fill: "F1EFE8", ink: "444441", line: "5F5E5A" },
 };
 
+/* ============================================== ONE PAGE, WHATEVER THE COUNT
+   The owner's rule (30 Sep 2026): the board goes on ONE landscape sheet — ten
+   returns or a hundred. A second page carrying three rows is paper thrown away,
+   and it was happening as soon as one store column passed about 23.
+
+     1. Up to about 30 deep it is the drawing as it always was — one list per
+        store, the # column down the side — with the rows made shorter as the
+        list grows.
+     2. Deeper than that, a long store column splits into two or more lists
+        side by side (newest first: down the first list, then the next) and
+        takes the width the short columns do not need. The print stays large
+        enough to tick with a pencil.
+     3. Only past roughly a thousand returns does it spill onto a second page;
+        no single sheet could be read at that size anyway.
+   The PDF and the printout share this arithmetic, so they come out alike. */
+export type BoardFit = {
+  rh: number; f: number; fd: number; bs: number;   // row height, order and date font, tick box (points)
+  lanes: number[]; widths: number[];                // per store column: side-by-side lists, width
+  seq: boolean;                                     // the # column — only while every column is one list
+  perPage: number; pages: number;                   // rows a page can take, pages used
+};
+const RH_MAX = 17, RH_CLASSIC = 13.5, RH_MIN = 7.75, SEQ_W = 24;
+const fontFor = (rh: number) => Math.min(8.5, Math.floor(rh * 0.52 * 4) / 4);
+const dateFont = (f: number) => Math.max(3.5, Math.round(f * 0.82 * 4) / 4);
+const boxFor = (f: number) => Math.max(3.5, Math.round(f * 0.88 * 4) / 4);
+
+export function fitBoard(cols: { store: string; list: BoardRow[] }[], usable: number, rowsH: number): BoardFit {
+  const counts = cols.map((c) => c.list.length);
+  const orders = cols.flatMap((c) => c.list.map((r) => ascii(r.order_number ?? r.tracking_id)));
+  const headW = cols.map((c) => tw(ascii(storeLabel(c.store)), "F2", 8.5) + 10);
+  const laneW = (f: number) =>
+    3 + boxFor(f) + 3.5 + Math.max(tw("#LM00000", "F2", f), ...orders.map((t) => tw(t, "F2", f)))
+      + 4 + tw("00 Mmm", "F1", dateFont(f)) + 3;
+  const need = (lanes: number[], f: number) => { const w = laneW(f); return lanes.map((l, i) => Math.max(l * w, headW[i])); };
+  const fits = (lanes: number[], f: number, seq: boolean) =>
+    need(lanes, f).reduce((a, x) => a + x, 0) + (seq ? SEQ_W : 0) <= usable + 0.01;
+  const make = (rh: number, lanes: number[], seq: boolean, perPage: number): BoardFit => {
+    const f = fontFor(rh), n = need(lanes, f);
+    const spare = Math.max(0, usable - (seq ? SEQ_W : 0) - n.reduce((a, x) => a + x, 0));
+    const all = lanes.reduce((a, x) => a + x, 0) || 1;
+    return {
+      rh, f, fd: dateFont(f), bs: boxFor(f), lanes, seq, perPage,
+      widths: n.map((x, i) => x + spare * (lanes[i] / all)),
+      pages: Math.max(1, ...counts.map((c, i) => Math.ceil(c / (lanes[i] * perPage)))),
+    };
+  };
+  const depth = Math.max(0, ...counts);
+  for (let rh = RH_MAX; rh >= RH_CLASSIC - 1e-9; rh -= 0.25) {            // 1. as it always was
+    const per = Math.floor(rowsH / rh), one = counts.map(() => 1);
+    if (depth <= per && fits(one, fontFor(rh), true)) return make(rh, one, true, per);
+  }
+  for (let rh = RH_MAX; rh >= RH_MIN - 1e-9; rh -= 0.25) {                // 2. long columns split
+    const per = Math.floor(rowsH / rh);
+    const lanes = counts.map((c) => Math.max(1, Math.ceil(c / per)));
+    if (fits(lanes, fontFor(rh), false)) return make(rh, lanes, false, per);
+  }
+  const per = Math.floor(rowsH / RH_MIN), lanes = counts.map(() => 1);     // 3. more than a sheet holds
+  for (;;) {
+    let worst = -1, most = 1;
+    counts.forEach((c, i) => { const p = Math.ceil(c / (lanes[i] * per)); if (p > most) { most = p; worst = i; } });
+    if (worst < 0) break;
+    lanes[worst]++;
+    if (!fits(lanes, fontFor(RH_MIN), false)) { lanes[worst]--; break; }
+  }
+  return make(RH_MIN, lanes, false, per);
+}
+
+/* Where every return sits: page, row, store column, list. */
+function placeAll(cols: { list: BoardRow[] }[], fit: BoardFit) {
+  const at = new Map<string, BoardRow>();
+  const rowsOn: number[] = Array.from({ length: fit.pages }, () => 1);
+  cols.forEach((c, ci) => {
+    const lanes = fit.lanes[ci], cap = lanes * fit.perPage;
+    const len = fit.pages === 1 ? Math.max(1, Math.ceil(c.list.length / lanes)) : fit.perPage;
+    c.list.forEach((r, i) => {
+      const page = Math.floor(i / cap), j = i - page * cap;
+      const lane = Math.floor(j / len), row = j % len;
+      at.set(`${page}:${row}:${ci}:${lane}`, r);
+      rowsOn[page] = Math.max(rowsOn[page], row + 1);
+    });
+  });
+  return { at, rowsOn };
+}
+
 export function downloadBoardPdf(rows: BoardRow[], o: BoardOpts) {
   const b = build(rows, o);
   const W = 842, H = 595, M = 26;
   const usable = W - M * 2;
-  const SEQ = 24;
-  const cw = (usable - SEQ) / Math.max(1, b.cols.length);
-  const x0 = (i: number) => M + SEQ + i * cw;           // left edge of store column i
-  const CH = 20, SH = 24, RH = 17;                      // courier band, store band, row
+  const CH = 20, SH = 24;                               // courier band, store band
   const TOP = H - M - 48;                               // table top, below the heading
-  const footerRoom = 46;               // signatures and page number
-  const firstFit = Math.floor((TOP - CH - SH - M - footerRoom) / RH);
-  const perPage = Math.max(1, firstFit);
-  const pages: number[][] = [];
-  for (let i = 0; i < Math.max(1, b.depth); i += perPage) pages.push([i, Math.min(b.depth, i + perPage)]);
+  const footerRoom = 46;                                // signatures and page number
+  const fit = fitBoard(b.cols, usable, TOP - CH - SH - M - footerRoom);
+  const { at, rowsOn } = placeAll(b.cols, fit);
+  const left = M + (fit.seq ? SEQ_W : 0);
+  const xs: number[] = [];
+  fit.widths.reduce((x, w) => { xs.push(x); return x + w; }, left);
+  const laneW = (c: number) => fit.widths[c] / fit.lanes[c];
+  const nS = b.stores.length;
 
   const T = (x: number, y: number, f: "F1" | "F2", s: number, t: string, rgb = "000000") =>
     `${hex(rgb)} rg BT /${f} ${s} Tf ${x.toFixed(2)} ${y.toFixed(2)} Td (${esc(ascii(t))}) Tj ET\n`;
@@ -266,10 +352,10 @@ export function downloadBoardPdf(rows: BoardRow[], o: BoardOpts) {
     T(cx - tw(ascii(t), f, s) / 2, y, f, s, t, rgb);
   const rect = (x: number, y: number, w: number, h: number, rgb: string) => `${hex(rgb)} rg ${x.toFixed(2)} ${y.toFixed(2)} ${w.toFixed(2)} ${h.toFixed(2)} re f\n`;
   const box = (x: number, y: number, w: number, h: number, rgb: string, lw = 0.8) => `${hex(rgb)} RG ${lw} w ${x.toFixed(2)} ${y.toFixed(2)} ${w.toFixed(2)} ${h.toFixed(2)} re S\n`;
-  const line = (x1: number, y1: number, x2: number, y2: number, rgb: string, lw: number) =>
-    `${hex(rgb)} RG ${lw} w ${x1.toFixed(2)} ${y1.toFixed(2)} m ${x2.toFixed(2)} ${y2.toFixed(2)} l S\n`;
+  const line = (x1: number, y1: number, x2: number, y2: number, rgb: string, lw: number, dash = "") =>
+    `${dash ? `[${dash}] 0 d ` : ""}${hex(rgb)} RG ${lw} w ${x1.toFixed(2)} ${y1.toFixed(2)} m ${x2.toFixed(2)} ${y2.toFixed(2)} l S${dash ? " [] 0 d" : ""}\n`;
 
-  const streams = pages.map(([from, to], pi) => {
+  const streams = Array.from({ length: fit.pages }, (_, pi) => {
     let s = "";
     // Heading: title and scope on the left, Pending and Printed-on cards on the right.
     s += T(M, H - M - 14, "F2", 17, b.title);
@@ -286,11 +372,14 @@ export function downloadBoardPdf(rows: BoardRow[], o: BoardOpts) {
 
     // Courier band
     const yC = TOP - CH;
-    s += rect(M, yC - SH, SEQ, CH + SH, "F1EFE8");
-    s += TC(M + SEQ / 2, yC - SH / 2 + 3, "F2", 9, "#", "444441");
+    if (fit.seq) {
+      s += rect(M, yC - SH, SEQ_W, CH + SH, "F1EFE8");
+      s += TC(M + SEQ_W / 2, yC - SH / 2 + 3, "F2", 9, "#", "444441");
+    }
     b.couriers.forEach((c, ci) => {
       const t = TONE[c] ?? TONE.Other;
-      const x = x0(ci * b.stores.length), w = cw * b.stores.length;
+      const first = ci * nS, x = xs[first];
+      const w = fit.widths.slice(first, first + nS).reduce((a, v) => a + v, 0);
       const cnt = b.cols.filter((k) => k.courier === c).reduce((a, k) => a + k.list.filter(b.pend).length, 0);
       s += rect(x, yC, w, CH, t.fill);
       s += TC(x + w / 2, yC + 6.5, "F2", 11.5, `${c}  -  ${cnt} pending`, t.ink);
@@ -299,64 +388,73 @@ export function downloadBoardPdf(rows: BoardRow[], o: BoardOpts) {
     const yS = yC - SH;
     b.cols.forEach((k, i) => {
       const t = TONE[k.courier] ?? TONE.Other;
-      s += rect(x0(i), yS, cw, SH, t.fill);
-      s += TC(x0(i) + cw / 2, yS + 13, "F2", 8.5, storeLabel(k.store), t.ink);
-      s += TC(x0(i) + cw / 2, yS + 4, "F2", 7.5, String(k.list.filter(b.pend).length), t.ink);
+      s += rect(xs[i], yS, fit.widths[i], SH, t.fill);
+      s += TC(xs[i] + fit.widths[i] / 2, yS + 13, "F2", 8.5, storeLabel(k.store), t.ink);
+      s += TC(xs[i] + fit.widths[i] / 2, yS + 4, "F2", 7.5, String(k.list.filter(b.pend).length), t.ink);
     });
 
     // Rows
-    const n = to - from;
+    const n = rowsOn[pi], rh = fit.rh;
+    const thin = rh < 10 ? 0.3 : 0.4;
     for (let ri = 0; ri < n; ri++) {
-      const i = from + ri;
-      const yTop = yS - ri * RH, y = yTop - RH;
-      s += rect(M, y, SEQ, RH, "F1EFE8");
-      s += TC(M + SEQ / 2, y + 5.5, "F2", 7.5, String(i + 1), "444441");
-      b.cols.forEach((k, ci) => {
-        const r = k.list[i];
-        if (!r) return;
-        const got = !b.pend(r);
-        const x = x0(ci);
-        if (got) s += rect(x, y, cw, RH, "EAF3DE");
-        s += box(x + 4, y + 4.5, 7.5, 7.5, "222222", 0.6);
-        const on = r.order_number ?? r.tracking_id;
-        const ox = x + 15;
-        s += T(ox, y + 5.2, "F2", 8.5, on, got ? "27500A" : "000000");
-        if (got) s += line(ox, y + 8, ox + tw(ascii(on), "F2", 8.5), y + 8, "27500A", 0.8);
-        s += T(ox + tw(ascii(on), "F2", 8.5) + 5, y + 5.4, "F1", 7, dateShort(r.return_date), "555555");
+      const y = yS - (ri + 1) * rh;
+      if (fit.seq) {
+        s += rect(M, y, SEQ_W, rh, "F1EFE8");
+        s += TC(M + SEQ_W / 2, y + (rh - Math.min(7.5, fit.f) * 0.72) / 2, "F2", Math.min(7.5, fit.f), String(ri + 1), "444441");
+      }
+      b.cols.forEach((_, ci) => {
+        for (let l = 0; l < fit.lanes[ci]; l++) {
+          const r = at.get(`${pi}:${ri}:${ci}:${l}`);
+          if (!r) continue;
+          const got = !b.pend(r);
+          const x = xs[ci] + l * laneW(ci);
+          if (got) s += rect(x, y, laneW(ci), rh, "EAF3DE");
+          s += box(x + 3, y + (rh - fit.bs) / 2, fit.bs, fit.bs, "222222", fit.bs > 5 ? 0.6 : 0.45);
+          const on = ascii(r.order_number ?? r.tracking_id);
+          const ox = x + 3 + fit.bs + 3.5, base = y + (rh - fit.f * 0.72) / 2, onW = tw(on, "F2", fit.f);
+          s += T(ox, base, "F2", fit.f, on, got ? "27500A" : "000000");
+          if (got) s += line(ox, base + fit.f * 0.33, ox + onW, base + fit.f * 0.33, "27500A", 0.7);
+          s += T(ox + onW + 4, base, "F1", fit.fd, dateShort(r.return_date), "555555");
+        }
       });
     }
-    if (!b.depth) s += TC(M + usable / 2, yS - RH + 5, "F1", 9, "No pending returns. Nothing to chase.", "444441");
+    if (!b.depth) s += TC(M + usable / 2, yS - rh + (rh - 9 * 0.72) / 2, "F1", 9, "No pending returns. Nothing to chase.", "444441");
 
     // Grid
-    const bottom = yS - Math.max(1, n) * RH;
-    for (let ri = 1; ri <= Math.max(1, n); ri++) s += line(M, yS - ri * RH, M + usable, yS - ri * RH, "9A9892", 0.4);
-    s += line(M + SEQ, yS, M + usable, yS, "9A9892", 0.6);
-    for (let i = 1; i < b.cols.length; i++) {
-      const split = i % b.stores.length === 0;
-      s += line(x0(i), split ? TOP : yC, x0(i), bottom, split ? "333333" : "9A9892", split ? 1.8 : 0.4);
-    }
-    s += line(x0(0), TOP, x0(0), bottom, "333333", 1.8);
-    s += line(M, yS, M + SEQ, yS, "9A9892", 0.6);
+    const bottom = yS - n * rh;
+    for (let ri = 1; ri <= n; ri++) s += line(M, yS - ri * rh, M + usable, yS - ri * rh, "9A9892", thin);
+    s += line(left, yS, M + usable, yS, "9A9892", 0.6);
+    b.cols.forEach((_, ci) => {
+      for (let l = 1; l < fit.lanes[ci]; l++) {
+        const x = xs[ci] + l * laneW(ci);
+        s += line(x, yS, x, bottom, "B4B2AA", 0.4, "1.2 1.4");
+      }
+      if (ci === 0) return;
+      const split = ci % nS === 0;
+      s += line(xs[ci], split ? TOP : yC, xs[ci], bottom, split ? "333333" : "9A9892", split ? 1.8 : 0.4);
+    });
+    s += line(left, TOP, left, bottom, "333333", fit.seq ? 1.8 : 1);
+    if (fit.seq) s += line(M, yS, left, yS, "9A9892", 0.6);
     s += box(M, bottom, usable, TOP - bottom, "222222", 1);
 
     // Footer: signatures on the last page, page number on every page.
-    if (pi === pages.length - 1) {
+    if (pi === fit.pages - 1) {
       const sy = bottom - 26, sw = (usable - 40) / 3;
       ["Prepared by", "Received by", "Cancelled in Shopify by"].forEach((lbl, k) => {
         const x = M + k * (sw + 20);
         s += line(x, sy, x + sw, sy, "000000", 0.7) + T(x, sy - 10, "F1", 8.5, lbl, "111111");
       });
     }
-    s += T(W - M - 60, M - 12, "F1", 7.5, `Page ${pi + 1} of ${pages.length}`, "666666");
+    s += T(W - M - 60, M - 12, "F1", 7.5, `Page ${pi + 1} of ${fit.pages}`, "666666");
     return s;
   });
 
   const objs: string[] = [];
   objs.push("<< /Type /Catalog /Pages 2 0 R >>");
-  objs.push(`<< /Type /Pages /Kids [${pages.map((_, i) => `${3 + i} 0 R`).join(" ")}] /Count ${pages.length} >>`);
-  const first = 3 + pages.length;
-  pages.forEach((_, i) => objs.push(
-    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${W} ${H}] /Resources << /Font << /F1 ${first + pages.length} 0 R /F2 ${first + pages.length + 1} 0 R >> >> /Contents ${first + i} 0 R >>`));
+  objs.push(`<< /Type /Pages /Kids [${streams.map((_, i) => `${3 + i} 0 R`).join(" ")}] /Count ${streams.length} >>`);
+  const first = 3 + streams.length;
+  streams.forEach((_, i) => objs.push(
+    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${W} ${H}] /Resources << /Font << /F1 ${first + streams.length} 0 R /F2 ${first + streams.length + 1} 0 R >> >> /Contents ${first + i} 0 R >>`));
   streams.forEach((st) => objs.push(`<< /Length ${st.length} >>\nstream\n${st}endstream`));
   objs.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>");
   objs.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>");
@@ -463,83 +561,154 @@ export function boardHead(rows: PrintRow[], o: BoardOpts) {
   </div>`;
 }
 
-/* -------------------------------------------------------------- the board */
+/* -------------------------------------------------------------- the board
+   ONE SHEET, LIKE THE PDF. The page is A4 landscape with 26pt margins, so the
+   board is laid out for exactly 790 x 543 points, in points, with the same
+   fitBoard() arithmetic as the PDF. Two nets underneath it:
+     - a few lines of script measure the sheet once it is drawn and shrink it
+       (CSS zoom) if a font came out larger than the sums expected;
+     - a phone or printer that insists on portrait gets the sheet scaled to
+       the narrower page instead of cut in two. */
+const SHEET_W = 790, SHEET_H = 543;
+/* Heading 48 + gap 6 + bands 44 + key 15 + signatures 29, and 10 to spare. */
+const HTML_ROWS_H = SHEET_H - 48 - 6 - 44 - 15 - 29 - 10;
+
 export function boardHtml(rows: PrintRow[], o: BoardOpts) {
-  const couriers = o.courier === "Both" ? ["PostEx", "OwnEx"] : [o.courier];
-  // A courier or store outside the usual set is still printed, never dropped.
-  for (const r of rows) { const c = r.courier || "Other"; if (!couriers.includes(c)) couriers.push(c); }
-  const stores = o.store === "ALL" ? [...STORES] : [o.store];
-  for (const r of rows) { const s = r.store_code || "—"; if (!stores.includes(s)) stores.push(s); }
-
-  type HtmlCol = { courier: string; store: string; list: PrintRow[] };
-  const cols: HtmlCol[] = [];
-  for (const c of couriers) for (const s of stores) {
-    cols.push({
-      courier: c, store: s,
-      list: rows.filter((r) => (r.courier || "Other") === c && (r.store_code || "—") === s)
-        .sort((a, b) => String(b.return_date ?? "").localeCompare(String(a.return_date ?? ""))
-                     || String(b.order_number ?? "").localeCompare(String(a.order_number ?? ""))),
-    });
-  }
-  const depth = Math.max(0, ...cols.map((c) => c.list.length));
+  const b = build(rows, o);
+  const fit = fitBoard(b.cols, SHEET_W - 2, HTML_ROWS_H);
+  const { at, rowsOn } = placeAll(b.cols, fit);
   const tone = (c: string) => TONE_HTML[c] ?? TONE_HTML.Other;
-  const isPend = (r: PrintRow) => o.scope === "pending" || !r.person_received;
+  const L = fit.lanes, nS = b.stores.length;
+  const allLanes = L.reduce((a, x) => a + x, 0);
+  const pt = (n: number) => `${n.toFixed(2)}pt`;
 
-  const courierRow = `<th rowspan="2" class="seq">#</th>` + couriers.map((c) => {
-    const inC = rows.filter((r) => (r.courier || "Other") === c);
+  const now = new Date();
+  const printed = now.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+  const time = now.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+  const what = o.scope === "pending"
+    ? "Not yet received or cancelled — the same list as the Pending tab"
+    : `Returned ${o.from && o.to ? `${longDate(o.from)} – ${longDate(o.to)}` : "at any time"}`;
+  const scope = `${STORE_NAME[o.store] ?? o.store} · ${o.courier === "Both" ? "PostEx & OwnEx" : o.courier}`;
+  const head = `
+    <div class="hd">
+      <div><h1>${escHtml(b.title)}</h1><div class="sub">Grohub Solutions · ${escHtml(scope)}</div><div class="sub">${escHtml(what)}</div></div>
+      <div class="cards">
+        <div class="card pend"><div class="k">${o.scope === "pending" ? "PENDING" : "PENDING OF " + b.total}</div><div class="v">${b.pendingCount}</div></div>
+        <div class="card pr"><div class="k">PRINTED ON</div><div class="v">${escHtml(printed)}, ${escHtml(time)}</div></div>
+      </div>
+    </div>`;
+
+  const cols = (fit.seq ? `<col style="width:${pt(SEQ_W)}">` : "")
+    + b.cols.map((_, c) => `<col style="width:${pt(fit.widths[c] / L[c])}">`.repeat(L[c])).join("");
+  const courierRow = (fit.seq ? `<th rowspan="2" class="seq">#</th>` : "") + b.couriers.map((c, ci) => {
+    const mine = b.cols.slice(ci * nS, ci * nS + nS);
+    const span = L.slice(ci * nS, ci * nS + nS).reduce((a, x) => a + x, 0);
+    const pend = mine.reduce((a, k) => a + k.list.filter(b.pend).length, 0);
+    const total = mine.reduce((a, k) => a + k.list.length, 0);
     const t = tone(c);
-    return `<th colspan="${stores.length}" class="courier split" style="background:${t.fill};border-color:${t.line};color:${t.ink}">
-      ${escHtml(c)} <span class="cnt">· ${inC.filter(isPend).length}${o.scope === "period" ? ` pending of ${inC.length}` : " pending"}</span></th>`;
+    return `<th colspan="${span}" class="courier split" style="background:${t.fill};color:${t.ink}">${escHtml(c)}
+      <span class="cnt">· ${pend}${o.scope === "period" ? ` pending of ${total}` : " pending"}</span></th>`;
+  }).join("");
+  const storeRow = b.cols.map((k, i) => {
+    const t = tone(k.courier);
+    return `<th colspan="${L[i]}" class="store${i % nS === 0 ? " split" : ""}" style="background:${t.fill};color:${t.ink}">
+      <div class="sn">${escHtml(STORE_NAME[k.store] ?? k.store)}</div><div class="sc">${k.list.filter(b.pend).length}</div></th>`;
   }).join("");
 
-  const storeRow = cols.map((col, i) => {
-    const t = tone(col.courier);
-    const first = i % stores.length === 0;
-    return `<th class="store${first ? " split" : ""}" style="background:${t.fill};color:${t.ink}">
-      <div class="sn">${escHtml(STORE_NAME[col.store] ?? col.store)}</div><div class="sc">${col.list.filter(isPend).length}</div></th>`;
+  const footer = `
+    <div class="key"><b>&#9744;</b> tick when the parcel arrives &nbsp;·&nbsp; strike the order through once it is in hand and cancelled in Shopify
+      &nbsp;·&nbsp; each column newest first${fit.seq ? "" : ", down one list then the next"} &nbsp;·&nbsp; date = the day the courier returned it</div>
+    <div class="sign"><div>Prepared by</div><div>Received by</div><div>Cancelled in Shopify by</div></div>`;
+
+  const sheets = rowsOn.map((n, p) => {
+    let body = "";
+    for (let r = 0; r < n; r++) {
+      body += `<tr>${fit.seq ? `<td class="seq">${r + 1}</td>` : ""}` + b.cols.map((_, c) => {
+        let cells = "";
+        for (let l = 0; l < L[c]; l++) {
+          const e = at.get(`${p}:${r}:${c}:${l}`);
+          const cls = `cell${l === 0 && c % nS === 0 ? " split" : ""}${l > 0 ? " lane" : ""}`;
+          if (!e) { cells += `<td class="${cls}"></td>`; continue; }
+          const got = !b.pend(e);
+          cells += `<td class="${cls}${got ? " got" : ""}"><span class="bx">${got ? "&#10003;" : ""}</span><span class="on">${escHtml(e.order_number ?? e.tracking_id)}</span><span class="dt">${escHtml(dd(e.return_date))}</span></td>`;
+        }
+        return cells;
+      }).join("") + "</tr>";
+    }
+    if (!b.depth) body = `<tr><td class="cell empty" colspan="${allLanes + (fit.seq ? 1 : 0)}">No pending returns. Nothing to chase.</td></tr>`;
+    return `<div class="sheet">${head}
+      <table class="board"><colgroup>${cols}</colgroup>
+        <thead><tr>${courierRow}</tr><tr>${storeRow}</tr></thead>
+        <tbody>${body}</tbody>
+      </table>
+      ${p === rowsOn.length - 1 ? footer : `<div class="key">Continued on page ${p + 2} of ${rowsOn.length}.</div>`}
+    </div>`;
   }).join("");
 
-  let body = "";
-  for (let i = 0; i < depth; i++) {
-    body += `<tr><td class="seq">${i + 1}</td>` + cols.map((col, ci) => {
-      const r = col.list[i];
-      const split = ci % stores.length === 0 ? " split" : "";
-      if (!r) return `<td class="cell${split}"></td>`;
-      const got = !isPend(r);
-      return `<td class="cell${got ? " got" : ""}${split}">
-        <span class="bx">${got ? "&#10003;" : ""}</span><span class="on">${escHtml(r.order_number ?? r.tracking_id)}</span><span class="dt">${escHtml(dd(r.return_date))}</span>
-      </td>`;
-    }).join("") + "</tr>";
-  }
-  if (!depth) body = `<tr><td class="cell" colspan="${cols.length + 1}" style="text-align:center;padding:24px">No pending returns. Nothing to chase.</td></tr>`;
-
-  return `<!doctype html><html><head><meta charset="utf-8"><title>${o.scope === "pending" ? "Pending returns" : "Returns"}</title>
-<style>${BASE_CSS}
-  table.board { table-layout: fixed; }
-  th, td { border: 1px solid #9a9892; }
-  th.seq, td.seq { width: 30px; text-align: center; background: #F1EFE8; font-weight: 700; color: #444; }
-  th.courier { font-size: 14px; padding: 6px 8px; text-align: center; border-width: 1.5px; }
-  th.courier .cnt { font-size: 11px; font-weight: 600; }
-  th.store { padding: 4px 6px; text-align: center; }
-  th.store .sn { font-size: 11.5px; font-weight: 800; }
-  th.store .sc { font-size: 10px; font-weight: 600; }
-  td.cell { padding: 4px 6px; height: 24px; white-space: nowrap; overflow: hidden; vertical-align: middle; }
-  td.cell .bx { display: inline-block; width: 11px; height: 11px; border: 1px solid #222; margin-right: 6px; vertical-align: -1px; font-size: 9px; line-height: 10px; text-align: center; }
-  td.cell .on { font-weight: 700; font-size: 11.5px; }
-  td.cell .dt { color: #555; font-size: 9.5px; margin-left: 6px; }
-  td.cell.got { background: #EAF3DE; }
-  td.cell.got .on { text-decoration: line-through; color: #27500A; }
-  .split { border-left: 2.5px solid #333 !important; }
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${escHtml(b.title)}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  @page { size: A4 landscape; margin: 26pt; }
+  * { box-sizing: border-box; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  html, body { margin: 0; padding: 0; background: #fff; }
+  body { font-family: Arial, Helvetica, sans-serif; color: #111; }
+  @media screen { body { padding: 16px; } }
+  .sheet { width: ${SHEET_W}pt; zoom: var(--fit, 1); break-inside: avoid; page-break-inside: avoid; }
+  .sheet + .sheet { break-before: page; page-break-before: always; margin-top: 16px; }
+  @media print and (orientation: portrait) { .sheet { zoom: calc(var(--fit, 1) * 0.68); } }
+  .hd { display: flex; justify-content: space-between; align-items: flex-start; gap: 10pt; height: 48pt; overflow: hidden; }
+  .hd h1 { font-size: 17pt; line-height: 1.05; margin: 0; }
+  .hd .sub { font-size: 8.5pt; line-height: 1.25; color: #444; margin-top: 2pt; }
+  .cards { display: flex; gap: 8pt; }
+  .card { height: 38pt; border: 0.8pt solid #5F5E5A; background: #F1EFE8; border-radius: 5pt; padding: 0 10pt;
+          display: flex; flex-direction: column; justify-content: center; text-align: center; }
+  .card .k { font-size: 7.5pt; font-weight: 700; color: #444441; }
+  .card .v { font-size: 9.5pt; font-weight: 800; margin-top: 2pt; }
+  .card.pend { min-width: 96pt; background: #EEEDFE; border-color: #534AB7; color: #3C3489; }
+  .card.pend .k { color: #3C3489; } .card.pend .v { font-size: 16pt; line-height: 1; }
+  .card.pr { min-width: 190pt; }
+  table.board { width: 100%; border-collapse: collapse; table-layout: fixed; margin-top: 6pt; }
+  .board th, .board td { border: 0.5pt solid #9a9892; padding: 0; overflow: hidden; }
+  .board th.courier { height: 20pt; font-size: 11.5pt; font-weight: 800; text-align: center; white-space: nowrap; }
+  .board th.courier .cnt { font-size: 9pt; font-weight: 600; }
+  .board th.store { height: 24pt; text-align: center; line-height: 1.1; white-space: nowrap; }
+  .board .sn { font-size: 8.5pt; font-weight: 800; } .board .sc { font-size: 7.5pt; font-weight: 700; }
+  .board .seq { background: #F1EFE8; color: #444; font-weight: 700; text-align: center; font-size: ${pt(Math.min(7.5, fit.f))}; }
+  .board tbody tr { height: ${pt(fit.rh)}; }
+  /* The cell's own text size is the fitted one: left at the page default
+     (16px) it props every row open to 17px, whatever the board asked for. */
+  .board td { font-size: ${pt(fit.f)}; line-height: 1; }
+  .board td.cell { white-space: nowrap; padding: 0 3pt; vertical-align: middle; }
+  .board td.lane { border-left: 0.5pt dashed #b4b2aa; }
+  .board td.got { background: #EAF3DE; }
+  .board td.empty { text-align: center; font-size: 9pt; color: #444; }
+  .bx { display: inline-block; width: ${pt(fit.bs)}; height: ${pt(fit.bs)}; border: ${fit.bs > 5 ? "0.6pt" : "0.45pt"} solid #222;
+        margin-right: 3.5pt; vertical-align: middle; font-size: ${pt(fit.bs * 0.8)}; line-height: ${pt(fit.bs)}; text-align: center; }
+  .on { font-size: ${pt(fit.f)}; font-weight: 700; vertical-align: middle; }
+  .dt { font-size: ${pt(fit.fd)}; color: #555; margin-left: 4pt; vertical-align: middle; }
+  .got .on { text-decoration: line-through; color: #27500A; }
+  .board .split { border-left: 1.8pt solid #333; }
+  .key { height: 10pt; margin-top: 5pt; font-size: 7.5pt; line-height: 10pt; color: #333; white-space: nowrap; overflow: hidden; }
+  .sign { display: flex; gap: 20pt; margin-top: 16pt; font-size: 8.5pt; }
+  .sign div { flex: 1; border-top: 0.7pt solid #000; padding-top: 3pt; }
 </style></head><body>
-  ${boardHead(rows, o)}
-  <table class="board">
-    <thead><tr>${courierRow}</tr><tr>${storeRow}</tr></thead>
-    <tbody>${body}</tbody>
-  </table>
-  <div class="key"><b>&#9744;</b> tick when the parcel arrives &nbsp;·&nbsp; strike the order through once it is in hand and cancelled in Shopify
-    &nbsp;·&nbsp; each column newest first &nbsp;·&nbsp; date = the day the courier returned it</div>
-  <div class="sign"><div>Prepared by</div><div>Received by</div><div>Cancelled in Shopify by</div></div>
+${sheets}
+<script>
+(function () {
+  /* The safety net: if the drawn sheet came out taller or wider than the page,
+     shrink it to fit rather than let the printer start a second sheet. */
+  var H = ${SHEET_H} * 96 / 72 - 3, W = ${SHEET_W} * 96 / 72;
+  function fit() {
+    var all = document.querySelectorAll('.sheet');
+    for (var i = 0; i < all.length; i++) {
+      var s = all[i]; s.style.setProperty('--fit', '1');
+      var r = s.getBoundingClientRect(), k = Math.min(1, H / r.height, W / r.width);
+      if (k < 0.999) s.style.setProperty('--fit', String(Math.floor(k * 1000) / 1000));
+    }
+  }
+  fit();
+  window.addEventListener('beforeprint', fit);
+})();
+</script>
 </body></html>`;
 }
-
-

@@ -6,6 +6,7 @@ import { Plus, RefreshCw, Search, Loader2, PackagePlus, UserPlus, CheckCircle2, 
 import { PageActions, Segmented } from "@/components/HubUI";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { rs } from "@/lib/dateRange";
+import TeamTaskBoard from "@/components/TeamTaskBoard";
 
 /* ARTICLES — the boss's list.
  *
@@ -149,6 +150,10 @@ export default function ArticlesPage() {
     setLoading(false);
   }, []);
   useEffect(() => { load(); }, [load]);
+  /* The team board at the top counts the same tasks; anything that changes a
+     task here (assign, record, undo, Refresh) asks it to count again. */
+  const [teamKey, setTeamKey] = useState(0);
+  const reload = useCallback(() => { load(); setTeamKey((n) => n + 1); }, [load]);
 
   /* Search waits until typing pauses, and only the newest answer is used. */
   const searchId = useRef(0);
@@ -185,7 +190,7 @@ export default function ArticlesPage() {
     setAssigning(false);
     setTask({ user_id: "", title: "", detail: "" });
     setShowAssigned(true);
-    load();
+    reload();
   }
 
   async function recordTask(taskId: string) {
@@ -203,7 +208,7 @@ export default function ArticlesPage() {
     if (res && res.ok === false) { setErr(res.error ?? "Refused."); return; }
     setMarkTask(null);
     setMarkT({ note: "", done_on: today() });
-    load();
+    reload();
   }
 
   async function reopenTask(taskId: string) {
@@ -217,7 +222,7 @@ export default function ArticlesPage() {
     if (error) { setErr(error.message); return; }
     if (res && res.ok === false) { setErr(res.error ?? "Refused."); return; }
     setUndoTask(null); setUndoWhy("");
-    load();
+    reload();
   }
 
   async function create() {
@@ -237,7 +242,7 @@ export default function ArticlesPage() {
     if (res && res.ok === false) { setErr(res.error ?? "Refused."); return; }
     setAdding(false);
     setForm({ rough_name: "", exact_cost: "", retail_price: "", ads_budget: "", brief: "", ads_basis: "total" });
-    load();
+    reload();
   }
 
   /* Counted over EVERY article, whatever tab or search is showing. */
@@ -271,12 +276,16 @@ export default function ArticlesPage() {
             className="flex items-center justify-center gap-2 rounded-full border border-line bg-surface px-4 py-2 text-[13px] font-semibold text-ink transition hover:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:hover:bg-white/[0.12]">
             <UserPlus size={15} /> Assign a task
           </button>
-          <button onClick={load}
+          <button onClick={reload}
             className="flex items-center justify-center gap-2 rounded-full border border-line bg-surface px-4 py-2 text-[13px] font-semibold text-ink transition hover:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:hover:bg-white/[0.12]">
             <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> Refresh
           </button>
         </PageActions>
       </div>
+
+      {/* THE TEAM FIRST — the owner's "every employee's status": total, done
+          and pending for each person, and his record a tap away (H282). */}
+      <TeamTaskBoard refreshKey={teamKey} />
 
       {/* four numbers, and only four */}
       <div className="mt-4 grid grid-cols-2 gap-3 md:mt-5 lg:grid-cols-4">
