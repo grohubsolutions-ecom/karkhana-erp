@@ -40,9 +40,20 @@ type Pay = {
   present: number; half: number; absent: number; paid_off: number;
   extra_days: number; counted_days: number; gross: number; advances: number;
   payable: number; is_paid: boolean;
+  /* H284: extra days given, what was cut from the advance when paid, and what
+     moved to next month. */
+  given_days?: number; given_pay?: number; advance_cut?: number; carried?: number;
 };
 type Day = { day: number; status: string };
 type Adv = { date: string; amount: number; note: string | null };
+type Extra = { day: string; portion: number; reason: string };
+/* 1.5 → "1½" */
+const dayCount = (v: unknown) => {
+  const n = Number(v) || 0;
+  const w = Math.floor(n);
+  if (Math.abs(n - w - 0.5) < 1e-9) return w ? `${w}½` : "½";
+  return String(Math.round(n * 100) / 100);
+};
 
 const MONTHS = ["", "January", "February", "March", "April", "May", "June",
                 "July", "August", "September", "October", "November", "December"];
@@ -62,6 +73,7 @@ export default function MyPortal() {
   const [pay, setPay] = useState<Pay | null>(null);
   const [days, setDays] = useState<Day[]>([]);
   const [advs, setAdvs] = useState<Adv[]>([]);
+  const [extras, setExtras] = useState<Extra[]>([]);
   /* The calendar has to know about public holidays too.
      It only checked for Sundays, so 14 August — Independence Day, worked —
      showed as an ordinary "present" day while the figures above it said
@@ -105,21 +117,23 @@ export default function MyPortal() {
   const load = useCallback(async () => {
     if (!isSupabaseConfigured || !supabase) { setLoading(false); return; }
     setLoading(true); setErr("");
-    const [m, p, d, a, h] = await Promise.all([
+    const [m, p, d, a, h, x] = await Promise.all([
       supabase.rpc("my_employee"),
       supabase.rpc("my_monthly_payable", { p_year: year, p_month: month }),
       supabase.rpc("my_attendance", { p_year: year, p_month: month }),
       supabase.rpc("my_advances", { p_year: year, p_month: month }),
       supabase.from("online_att_holidays").select("hdate,name"),
+      supabase.rpc("my_extra_days", { p_year: year, p_month: month }),
     ]);
     /* Any failure is said. Only the first one was checked, so a failed pay
        figure showed Rs 0 — as if nothing had been earned this month. */
-    const firstErr = m.error ?? p.error ?? d.error ?? a.error ?? h.error;
+    const firstErr = m.error ?? p.error ?? d.error ?? a.error ?? h.error ?? x.error;
     if (firstErr) setErr(firstErr.message);
     setMe(((m.data as Me[]) ?? [])[0] ?? null);
     setPay(((p.data as Pay[]) ?? [])[0] ?? null);
     setDays((d.data as Day[]) ?? []);
     setAdvs((a.data as Adv[]) ?? []);
+    setExtras((x.data as Extra[]) ?? []);
     setHols(new Set(((h.data as { hdate: string }[]) ?? []).map((x) => x.hdate)));
     setLoading(false);
   }, [year, month]);
@@ -133,11 +147,19 @@ export default function MyPortal() {
   const daysInMonth = new Date(year, month, 0).getDate();
   const firstDow = new Date(year, month - 1, 1).getDay();
   const byDay = new Map(days.map((d) => [d.day, d.status]));
+  const extraByDay = new Map(extras.map((x) => [Number(x.day.slice(8, 10)), Number(x.portion)]));
   const isCurrent = year === today.getFullYear() && month === today.getMonth() + 1;
   /* The gross comes from the database, not from salary ÷ 30 × days here.
      That local sum cannot know a rate changed mid-month, which is precisely how
      Hamza Khan's August was overstated by Rs 7,700. */
   const gross = Number(pay?.gross ?? 0);
+  const given = Number(pay?.given_days ?? 0);
+  /* What actually comes off: the amount chosen when the month was paid, or —
+     before it is paid — the whole advance. */
+  const advCut = Number(pay?.advance_cut ?? pay?.advances ?? 0);
+  const carried = Number(pay?.carried ?? 0);
+  const nextMonth = MONTHS[month === 12 ? 1 : month + 1];
+  const extraLabel = (iso: string) => `${Number(iso.slice(8, 10))} ${MONTHS[month].slice(0, 3)}`;
 
   if (loading || !perms) {
     return <div className="flex min-h-screen items-center justify-center bg-canvas dark:bg-[#17140f]">
@@ -328,13 +350,20 @@ export default function MyPortal() {
                     <span className="mt-0.5 block text-[11.5px] text-hint dark:text-[#8a8175]">
                       each day at that day&rsquo;s rate, over the days in the month
                     </span>
+                    {given > 0 && (
+                      <span className="mt-0.5 block text-[11.5px] font-semibold text-emerald-700">
+                        includes {dayCount(given)} extra day{given > 1 ? "s" : ""} given (+{rs(pay?.given_pay)})
+                      </span>
+                    )}
                   </dt>
                   <dd className="shrink-0 font-semibold tabular-nums text-ink dark:text-[#e7e2d8]">{rs(gross)}</dd>
                 </div>
-                {Number(pay?.advances) > 0 && (
+                {advCut > 0 && (
                   <div className="flex items-baseline justify-between gap-4 border-b border-line px-4 py-2.5 dark:border-white/[0.06] sm:px-5">
-                    <dt className="text-muted dark:text-[#a89f93]">Advances already taken</dt>
-                    <dd className="shrink-0 font-semibold tabular-nums text-amber-700">− {rs(pay?.advances)}</dd>
+                    <dt className="text-muted dark:text-[#a89f93]">
+                      {carried > 0 ? "Advance cut from this month" : "Advances already taken"}
+                    </dt>
+                    <dd className="shrink-0 font-semibold tabular-nums text-amber-700">− {rs(advCut)}</dd>
                   </div>
                 )}
                 <div className="flex items-baseline justify-between gap-4 bg-panel px-4 py-3 dark:bg-white/[0.04] sm:px-5">
@@ -343,6 +372,15 @@ export default function MyPortal() {
                     {rs(pay?.payable ?? 0)}
                   </dd>
                 </div>
+                {carried > 0 && (
+                  <div className="flex items-baseline justify-between gap-4 border-t border-line px-4 py-2.5 dark:border-white/[0.06] sm:px-5">
+                    <dt className="text-muted dark:text-[#a89f93]">
+                      Advance carried forward to {nextMonth}
+                      <span className="mt-0.5 block text-[11.5px] text-hint dark:text-[#8a8175]">not cut this month — it comes off {nextMonth}&rsquo;s pay</span>
+                    </dt>
+                    <dd className="shrink-0 font-semibold tabular-nums text-amber-700">{rs(carried)}</dd>
+                  </div>
+                )}
               </dl>
             </section>
 
@@ -360,10 +398,22 @@ export default function MyPortal() {
                   ["Absent — not counted", String(pay?.absent ?? 0), "text-red-700", Number(pay?.absent) > 0],
                   ["Sundays & holidays — paid", String(pay?.paid_off ?? 0), "text-ink dark:text-[#e7e2d8]", true],
                   ["Days off you worked", `+${pay?.extra_days ?? 0}`, "text-emerald-700", Number(pay?.extra_days) > 0],
+                  ["Extra days given to you", `+${dayCount(given)}`, "text-emerald-700", given > 0],
                 ] as [string, string, string, boolean][]).filter(([, , , show]) => show).map(([label, value, tone], i) => (
                   <div key={i} className="flex items-baseline justify-between gap-4 border-b border-line px-4 py-2.5 dark:border-white/[0.06] sm:px-5">
                     <dt className="text-muted dark:text-[#a89f93]">{label}</dt>
                     <dd className={`shrink-0 text-[14px] font-bold tabular-nums ${tone}`}>{value}</dd>
+                  </div>
+                ))}
+                {/* Each extra day with its reason — the person sees why, not
+                    just that a number went up. */}
+                {extras.map((x) => (
+                  <div key={x.day} className="flex items-baseline gap-3 border-b border-line bg-success-soft/40 px-4 py-2 text-[12.5px] dark:border-white/[0.06] dark:bg-white/[0.02] sm:px-5">
+                    <dt className="flex shrink-0 gap-3">
+                      <span className="w-[48px] font-semibold tabular-nums text-ink dark:text-[#e7e2d8]">{extraLabel(x.day)}</span>
+                      <span className="font-semibold text-emerald-700">{Number(x.portion) === 1 ? "Full day" : "Half day"}</span>
+                    </dt>
+                    <dd className="min-w-0 flex-1 text-muted [overflow-wrap:anywhere] dark:text-[#a89f93]">{x.reason}</dd>
                   </div>
                 ))}
                 <div className="flex items-baseline justify-between gap-4 bg-panel px-4 py-3 dark:bg-white/[0.04] sm:px-5">
@@ -407,11 +457,13 @@ export default function MyPortal() {
                   const word = workedOff ? "worked" : st === "P" ? "present" : st === "H" ? "half"
                     : st === "L" ? "leave" : st === "A" ? "absent"
                     : holiday ? "holiday" : sunday ? "off" : "";
+                  const ext = extraByDay.get(dnum);
                   return (
-                    <div key={dnum} title={`${dnum} ${MONTHS[month]}${holiday ? " · public holiday" : ""} — ${word || "not marked"}`}
-                         className={`rounded-xl py-2 ${cls}`}>
+                    <div key={dnum} title={`${dnum} ${MONTHS[month]}${holiday ? " · public holiday" : ""} — ${word || "not marked"}${ext ? ` · ${ext === 1 ? "full" : "half"} extra day given` : ""}`}
+                         className={`rounded-xl py-2 ${cls} ${ext ? "ring-2 ring-inset ring-emerald-500" : ""}`}>
                       <div className="text-[12.5px] font-bold tabular-nums leading-none">{dnum}</div>
                       <div className="mt-1 text-[8.5px] font-semibold uppercase leading-none tracking-wide opacity-75">{word}</div>
+                      {ext ? <div className="mt-0.5 text-[8.5px] font-bold leading-none text-emerald-700">+{ext === 1 ? "1" : "½"}</div> : null}
                     </div>
                   );
                 })}
@@ -439,8 +491,14 @@ export default function MyPortal() {
                   ))}
                   <div className="flex items-baseline justify-between gap-4 bg-panel px-4 py-3 dark:bg-white/[0.04] sm:px-5">
                     <dt className="font-bold text-ink dark:text-[#f4f1ea]">Deducted this month</dt>
-                    <dd className="shrink-0 font-extrabold tabular-nums text-amber-700">− {rs(pay?.advances ?? 0)}</dd>
+                    <dd className="shrink-0 font-extrabold tabular-nums text-amber-700">− {rs(advCut)}</dd>
                   </div>
+                  {carried > 0 && (
+                    <div className="flex items-baseline justify-between gap-4 border-t border-line px-4 py-2.5 dark:border-white/[0.06] sm:px-5">
+                      <dt className="text-muted dark:text-[#a89f93]">Carried forward to {nextMonth}</dt>
+                      <dd className="shrink-0 font-semibold tabular-nums text-ink dark:text-[#e7e2d8]">{rs(carried)}</dd>
+                    </div>
+                  )}
                 </dl>
               )}
             </section>
@@ -449,8 +507,10 @@ export default function MyPortal() {
         </div>
 
         <p className={`mt-5 px-1 text-[11.5px] leading-relaxed text-hint dark:text-[#8a8175] ${shown === "pay" ? "" : "hidden"}`}>
-          Sundays and public holidays are paid. Working one adds a day. An absent day is
-          not counted, and it is the only thing that reduces what you earn.
+          Sundays and public holidays are paid. Working one adds a day, and an extra day
+          given to you is paid the same way. An absent day is not counted, and it is the
+          only thing that reduces what you earn. Advance not cut in a month moves to the
+          next month as &ldquo;Advance carried forward&rdquo;.
           {isCurrent && " This month is still running, so the figure grows each day you are marked present."}
           {" "}Something look wrong? Speak to whoever marks attendance for your department.
         </p>

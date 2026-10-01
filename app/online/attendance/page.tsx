@@ -131,7 +131,7 @@ export default function AttendancePage() {
       setRows((list.data as Row[]) ?? []);
       setAttCounts({ all: cAll.count ?? 0, P: cP.count ?? 0, A: cA.count ?? 0, L: cL.count ?? 0 });
     } else if (which === "advances") {
-      const { data, error } = await supabase.from("online_att_advances").select("id,emp_id,amount,date,note,deduct_month,deduct_year,settled").order("date", { ascending: false }).limit(1000);
+      const { data, error } = await supabase.from("online_att_advances").select("id,emp_id,amount,date,note,deduct_month,deduct_year,settled,carried_from").order("date", { ascending: false }).limit(1000);
       if (my !== reqId.current) return;
       if (error) setErr(error.message); setRows((data as Row[]) ?? []);
     } else {
@@ -180,9 +180,11 @@ export default function AttendancePage() {
       ];
     }
     const uns = rows.filter((r) => !r.settled);
+    /* H284: an advance carried forward from one month's pay to the next is the
+       same money, not more of it — counted once, where it was given. */
     return [
       { label: "Advances", value: rows.length.toLocaleString(), Icon: HandCoins, bg: "bg-periwinkle-soft" },
-      { label: "Total amount", value: money(rows.reduce((t, r) => t + (Number(r.amount) || 0), 0)), Icon: Wallet, bg: "bg-success-soft" },
+      { label: "Total given", value: money(rows.filter((r) => !r.carried_from).reduce((t, r) => t + (Number(r.amount) || 0), 0)), Icon: Wallet, bg: "bg-success-soft" },
       { label: "Unsettled", value: uns.length.toLocaleString(), Icon: HandCoins, bg: "bg-amber-soft" },
     ];
   }, [tab, rows, emps, attCounts]);

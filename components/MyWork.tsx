@@ -27,6 +27,20 @@ type ArticleFacts = {
   retail_price: number | null; brief: string | null;
   packs: { label: string; units: number; price: number | null }[];
   ads_budget: number | null; ads_basis: string | null;
+  /* H284: what everybody on this article wrote when they pressed Submit. */
+  comments?: Comment[];
+};
+/* The owner, 1 Oct: "in article management everyone should see each other's
+   comments — where they write done". One line per submitted note on the
+   article, by anyone, oldest first; a quality-check send-back is one too. */
+type Comment = {
+  task_id: string; stage: string | null; title: string | null; by: string;
+  mine: boolean; at: string | null; kind: "done" | "sent_back"; note: string;
+  recorded_by: string | null;
+};
+const STAGE: Record<string, string> = {
+  product: "Product & upload", qc: "Quality check", video: "Video",
+  social: "Social media", ads: "Ads",
 };
 const rs = (v: number | null | undefined) => (v == null ? "—" : "Rs " + Math.round(Number(v)).toLocaleString("en-PK"));
 
@@ -168,6 +182,12 @@ export default function MyWork() {
             <p className="mt-2 text-[12.5px] leading-relaxed text-muted dark:text-[#a89f93]">{t.detail}</p>
           ) : null}
 
+          {/* Right above the box where he writes his own — so he sees what the
+              others on this article already said before he says his. */}
+          {t.article_id && (facts[t.article_id]?.comments?.length ?? 0) > 0 && (
+            <Comments list={facts[t.article_id].comments!} />
+          )}
+
           {t.waiting_for ? (
             /* THE CHECK IS VISIBLE, NOT YET ACTIONABLE.
                The buttons would only be refused — there is no product to check
@@ -235,6 +255,46 @@ export default function MyWork() {
         </div>
       )}
     </section>
+  );
+}
+
+/* WHAT THE TEAM WROTE ON THIS ARTICLE. Links (a Shopify product page is the
+   usual note) open in a new tab; everything else is plain text. */
+const URL_RE = /(https?:\/\/[^\s<>"']+)/g;
+function Linked({ text }: { text: string }) {
+  const parts = text.split(URL_RE);
+  return <>{parts.map((p, i) => (i % 2 === 1
+    ? <a key={i} href={p} target="_blank" rel="noopener noreferrer"
+         className="font-semibold text-periwinkle-strong underline underline-offset-2 [overflow-wrap:anywhere] dark:text-periwinkle">{p}</a>
+    : <span key={i}>{p}</span>))}</>;
+}
+
+function Comments({ list }: { list: Comment[] }) {
+  const when = (iso: string | null) => iso
+    ? new Date(iso).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit", hour12: true, timeZone: "Asia/Karachi" })
+    : "";
+  return (
+    <div className="mt-2 rounded-xl2 border border-line px-3 py-2.5 dark:border-white/10">
+      <div className="mb-1.5 text-[11px] font-bold uppercase tracking-wide text-hint dark:text-[#8a8175]">
+        What the team wrote · {list.length}
+      </div>
+      <ul className="space-y-2">
+        {list.map((c) => (
+          <li key={`${c.task_id}-${c.kind}`} className="text-[12.5px] leading-relaxed">
+            <div className="flex flex-wrap items-baseline gap-x-1.5">
+              <span className="font-bold text-ink dark:text-[#f4f1ea]">{c.mine ? "You" : c.by}</span>
+              <span className="text-muted dark:text-[#a89f93]">· {STAGE[c.stage ?? ""] ?? c.title ?? "Task"}</span>
+              {c.kind === "sent_back" && <span className="font-semibold text-red-700 dark:text-salmon">· sent it back</span>}
+              <span className="text-[11.5px] text-hint dark:text-[#8a8175]">· {when(c.at)}</span>
+              {c.recorded_by && <span className="text-[11.5px] text-periwinkle-strong dark:text-periwinkle">· recorded by {c.recorded_by}</span>}
+            </div>
+            <p className={`whitespace-pre-line [overflow-wrap:anywhere] ${c.kind === "sent_back" ? "text-red-900 dark:text-salmon" : "text-ink dark:text-[#e7e2d8]"}`}>
+              <Linked text={c.note} />
+            </p>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

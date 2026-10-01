@@ -12,65 +12,98 @@
  * Same calculation as the summary — hub_monthly_payable — because a detail view
  * that recomputed would eventually disagree with the list it opened from, and
  * whichever number was wrong, nobody would know which.
+ *
+ * H284 (1 Oct 2026): Paid goes through the same dialog as the summary (how
+ * much advance to cut; the rest carried forward), extra days given are listed
+ * with their reason and can be taken off while the month is unpaid, and the
+ * breakdown shows the cut and what moved to next month. The row comes from
+ * the summary each time it reloads, so the figures here follow every change.
  */
 import { useCallback, useEffect, useState } from "react";
-import { X, Loader2, Check, AlertTriangle } from "lucide-react";
+import { X, Loader2, Check, AlertTriangle, CalendarPlus, Trash2, ArrowRight } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
+import { useConfirm } from "@/components/ConfirmDialog";
+import type { SummaryRow } from "@/components/MonthlySummary";
 
-type Row = {
-  emp_id: string; name: string; designation: string | null; salary: number;
-  present: number; half: number; absent: number; leave_days: number;
-  absent_deduction: number; paid_off: number; extra_days: number;
-  counted_days: number; gross: number; advances: number; payable: number; is_paid: boolean;
-};
+type Row = SummaryRow;
 type Day = { day: number; status: string; time_in?: string | null; time_out?: string | null };
-type Adv = { date: string; amount: number; note: string | null };
+type Adv = { id: string; date: string; amount: number; note: string | null; carried_from: string | null };
+type Extra = { id: string; day: string; portion: number; reason: string; given_by_name: string | null };
 
 const MONTHS = ["", "January", "February", "March", "April", "May", "June",
                 "July", "August", "September", "October", "November", "December"];
+const SHORT = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const rs = (v: unknown) => "Rs " + Math.round(Number(v) || 0).toLocaleString("en-PK");
+const dayCount = (v: unknown) => {
+  const n = Number(v) || 0;
+  const w = Math.floor(n);
+  if (Math.abs(n - w - 0.5) < 1e-9) return w ? `${w}½` : "½";
+  return String(Math.round(n * 100) / 100);
+};
 
 export default function EmployeeMonthDetail({
-  row, year, month, onClose, onChanged,
-}: { row: Row; year: number; month: number; onClose: () => void; onChanged: () => void }) {
+  row, year, month, canManage = false, busy = false,
+  onPaid, onUndo, onGiveExtra, onClose, onChanged,
+}: {
+  row: Row; year: number; month: number; canManage?: boolean; busy?: boolean;
+  onPaid: () => void; onUndo: () => void; onGiveExtra: () => void;
+  onClose: () => void; onChanged: (msg?: string) => void;
+}) {
   const [days, setDays] = useState<Day[]>([]);
   const [advs, setAdvs] = useState<Adv[]>([]);
+  const [extras, setExtras] = useState<Extra[]>([]);
   const [loading, setLoading] = useState(true);
   /* The calendar has to know about public holidays, not just Sundays.
      Without them 14 August — Independence Day, worked — renders as an ordinary
      "P" while the cards above it say "Extra days +2". The figures were right;
      the calendar was the one disagreeing. */
   const [hols, setHols] = useState<Set<string>>(new Set());
-  const [busy, setBusy] = useState(false);
-  const [paid, setPaid] = useState(row.is_paid);
   const [err, setErr] = useState("");
+  const [removing, setRemoving] = useState<string | null>(null);
+  const confirm = useConfirm();
+
+  const from = `${year}-${String(month).padStart(2, "0")}-01`;
+  const to = `${year}-${String(month).padStart(2, "0")}-${String(new Date(year, month, 0).getDate()).padStart(2, "0")}`;
 
   const load = useCallback(async () => {
     if (!isSupabaseConfigured || !supabase) { setLoading(false); return; }
     setLoading(true);
-    const [d, a, h] = await Promise.all([
+    const [d, a, h, x] = await Promise.all([
       supabase.from("online_att_records").select("day,status,time_in,time_out")
         .eq("emp_id", row.emp_id).eq("year", year).eq("month", month).order("day"),
-      supabase.from("online_att_advances").select("date,amount,note")
+      supabase.from("online_att_advances").select("id,date,amount,note,carried_from")
         .eq("emp_id", row.emp_id).eq("deduct_year", year).eq("deduct_month", month).order("date"),
       supabase.from("online_att_holidays").select("hdate"),
+      supabase.from("online_att_extra_days").select("id,day,portion,reason,given_by_name")
+        .eq("emp_id", row.emp_id).gte("day", from).lte("day", to).order("day"),
     ]);
-    if (d.error) setErr(d.error.message);
+    const e = d.error ?? a.error ?? x.error;
+    if (e) setErr(e.message);
     setDays((d.data as Day[]) ?? []);
     setAdvs((a.data as Adv[]) ?? []);
-    setHols(new Set(((h.data as { hdate: string }[]) ?? []).map((x) => x.hdate)));
+    setHols(new Set(((h.data as { hdate: string }[]) ?? []).map((v) => v.hdate)));
+    setExtras((x.data as Extra[]) ?? []);
     setLoading(false);
-  }, [row.emp_id, year, month]);
+    /* Reloaded whenever the summary's figures for this person change — a day
+       given, a payment marked or undone. */
+  }, [row.emp_id, year, month, from, to, row.given_days, row.advances, row.is_paid, row.carried]);
   useEffect(() => { load(); }, [load]);
 
-  async function togglePaid() {
+  async function removeExtra(x: Extra) {
     if (!supabase) return;
-    setBusy(true); setErr("");
-    const { error } = await supabase.from("online_att_salary_status")
-      .upsert({ id: `${row.emp_id}-${year}-${month}`, emp_id: row.emp_id,
-                year, month, paid: !paid }, { onConflict: "id" });
-    if (error) setErr(error.message); else { setPaid(!paid); onChanged(); }
-    setBusy(false);
+    const label = new Date(x.day + "T00:00:00").toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+    if (!(await confirm({
+      title: `Take off the extra day on ${label}?`,
+      body: `${row.name} will not be paid for it in ${MONTHS[month]}.`,
+      confirmLabel: "Take it off",
+    }))) return;
+    setRemoving(x.id); setErr("");
+    const { data, error } = await supabase.rpc("hub_remove_extra_day", { p_id: x.id });
+    setRemoving(null);
+    const res = data as { ok?: boolean; error?: string; report?: string } | null;
+    if (error) { setErr(error.message); return; }
+    if (!res?.ok) { setErr(res?.error ?? "It was not removed and no reason was given."); return; }
+    onChanged(res.report);
   }
 
   const daysInMonth = new Date(year, month, 0).getDate();
@@ -81,8 +114,14 @@ export default function EmployeeMonthDetail({
   const timesByDay = new Map(days.map((d) => [d.day, {
     in: (d.time_in ?? "").trim(), out: (d.time_out ?? "").trim(),
   }]));
+  const extraByDay = new Map(extras.map((x) => [Number(x.day.slice(8, 10)), Number(x.portion)]));
   // From the database: a local salary ÷ 30 × days cannot see a mid-month raise.
   const gross = Number(row.gross ?? 0);
+  const given = Number(row.given_days ?? 0);
+  const cut = Number(row.advance_cut ?? row.advances ?? 0);
+  const carried = Number(row.carried ?? 0);
+  const nextName = MONTHS[month === 12 ? 1 : month + 1];
+  const mayEdit = canManage && !row.is_paid;
 
   const cards: [string, string, string][] = [
     ["Present", String(row.present), "text-emerald-700"],
@@ -90,8 +129,8 @@ export default function EmployeeMonthDetail({
     ["Leave", String(row.leave_days ?? 0), "text-sky-700"],
     ["Absent", String(row.absent), "text-red-700"],
     ["Paid off", String(row.paid_off), "text-ink dark:text-[#f4f1ea]"],
-    ["Extra days", `+${row.extra_days}`, "text-emerald-700"],
-    ["Counted", String(row.counted_days), "text-ink dark:text-[#f4f1ea]"],
+    ["Extra days", `+${dayCount(Number(row.extra_days) + given)}`, "text-emerald-700"],
+    ["Counted", dayCount(row.counted_days), "text-ink dark:text-[#f4f1ea]"],
     ["Payable", rs(row.payable), "text-ink dark:text-[#f4f1ea]"],
   ];
 
@@ -109,13 +148,20 @@ export default function EmployeeMonthDetail({
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <button onClick={togglePaid} disabled={busy}
-              className={`rounded-full px-3.5 py-1.5 text-[12.5px] font-semibold transition disabled:opacity-50 ${
-                paid ? "bg-success-soft text-emerald-800"
-                     : "bg-ink text-white dark:bg-white dark:text-[#141414]"}`}>
-              {busy ? <Loader2 size={12} className="animate-spin" />
-                : paid ? <><Check size={12} className="mr-1 inline" />Paid</> : "Mark paid"}
-            </button>
+            {canManage ? (
+              <button onClick={() => (row.is_paid ? onUndo() : onPaid())} disabled={busy}
+                className={`rounded-full px-3.5 py-1.5 text-[12.5px] font-semibold transition disabled:opacity-50 ${
+                  row.is_paid ? "bg-success-soft text-emerald-800"
+                              : "bg-ink text-white dark:bg-white dark:text-[#141414]"}`}>
+                {busy ? <Loader2 size={12} className="animate-spin" />
+                  : row.is_paid ? <><Check size={12} className="mr-1 inline" />Paid</> : "Mark paid"}
+              </button>
+            ) : (
+              <span className={`rounded-full px-3.5 py-1.5 text-[12.5px] font-semibold ${
+                row.is_paid ? "bg-success-soft text-emerald-800" : "bg-panel text-muted dark:bg-white/[0.06] dark:text-[#a89f93]"}`}>
+                {row.is_paid ? "Paid" : "Not paid yet"}
+              </span>
+            )}
             <button onClick={onClose} aria-label="Close"
                     className="rounded-full p-1.5 text-muted hover:bg-panel dark:hover:bg-white/10"><X size={17} /></button>
           </div>
@@ -140,7 +186,7 @@ export default function EmployeeMonthDetail({
           <div className="mb-2 text-[13px] font-semibold text-ink dark:text-[#f4f1ea]">
             Attendance — {MONTHS[month]} {year}
           </div>
-          {loading ? (
+          {loading && days.length === 0 ? (
             <div className="flex items-center gap-2 py-6 text-[13px] text-muted">
               <Loader2 size={14} className="animate-spin" /> Loading…
             </div>
@@ -157,6 +203,7 @@ export default function EmployeeMonthDetail({
                   const holiday = hols.has(iso);
                   const off = sunday || holiday;
                   const workedOff = off && (st === "P" || st === "H" || st === "L");
+                  const ext = extraByDay.get(dnum);
                   const cls =
                     workedOff ? "bg-success-soft text-emerald-800 font-bold"
                     : st === "P" ? "bg-success-soft text-emerald-800"
@@ -166,11 +213,13 @@ export default function EmployeeMonthDetail({
                     : off ? "bg-panel text-muted dark:bg-white/[0.06]"
                     : "text-hint";
                   return (
-                    <div key={dnum} className={`rounded-lg py-1.5 text-[11.5px] font-semibold ${cls}`}>
+                    <div key={dnum} className={`rounded-lg py-1.5 text-[11.5px] font-semibold ${cls} ${ext ? "ring-2 ring-inset ring-emerald-500" : ""}`}
+                         title={ext ? `${ext === 1 ? "Full" : "Half"} extra day given` : undefined}>
                       <div>{dnum}</div>
                       <div className="text-[9px] font-normal">
                         {workedOff ? (holiday ? "Hol+" : "Sun+") : st ?? (holiday ? "Hol" : sunday ? "Sun" : "")}
                       </div>
+                      {ext ? <div className="text-[9px] font-bold text-emerald-700">+{ext === 1 ? "1" : "½"}</div> : null}
                       {(() => {
                         const t = timesByDay.get(dnum);
                         if (!t || (!t.in && !t.out)) return null;
@@ -186,16 +235,57 @@ export default function EmployeeMonthDetail({
               </div>
               <div className="mt-2 text-[10.5px] text-hint dark:text-[#8a8175]">
                 P present · H half · L leave (paid) · A absent · Sun paid Sunday ·
-                Sun+ worked a day off (+1) · blank not marked.
+                Sun+ worked a day off (+1) · <span className="font-semibold text-emerald-700">+1 / +½ extra day given</span> · blank not marked.
                 Times below a day are clock-in · clock-out, where they were recorded.
               </div>
             </>
           )}
         </div>
 
+        {/* EXTRA DAYS GIVEN — each with its reason and who gave it. */}
+        <div className="mt-4">
+          <div className="mb-1.5 flex items-center justify-between gap-2">
+            <span className="text-[13px] font-semibold text-ink dark:text-[#f4f1ea]">Extra days given</span>
+            {mayEdit && (
+              <button onClick={onGiveExtra}
+                className="flex items-center gap-1.5 rounded-full border border-line px-3 py-1 text-[12px] font-semibold text-ink hover:bg-panel dark:border-white/15 dark:text-white dark:hover:bg-white/10">
+                <CalendarPlus size={13} /> Give extra day
+              </button>
+            )}
+          </div>
+          {extras.length === 0 ? (
+            <p className="text-[13px] text-muted dark:text-[#a89f93]">None.</p>
+          ) : (
+            <div className="overflow-hidden rounded-card border border-line dark:border-white/10">
+              <ul className="divide-y divide-line dark:divide-white/[0.05]">
+                {extras.map((x) => (
+                  <li key={x.id} className="flex items-start gap-3 px-3 py-2 text-[12.5px]">
+                    <span className="w-[52px] shrink-0 pt-0.5 font-semibold tabular-nums text-ink dark:text-[#e7e2d8]">
+                      {Number(x.day.slice(8, 10))} {SHORT[month]}
+                    </span>
+                    <span className="shrink-0 rounded-full bg-success-soft px-2 py-0.5 text-[11.5px] font-bold text-emerald-800">
+                      {Number(x.portion) === 1 ? "Full day" : "Half day"}
+                    </span>
+                    <span className="min-w-0 flex-1 text-ink [overflow-wrap:anywhere] dark:text-[#e7e2d8]">
+                      {x.reason}
+                      {x.given_by_name && <span className="text-muted dark:text-[#a89f93]"> · by {x.given_by_name}</span>}
+                    </span>
+                    {mayEdit && (
+                      <button onClick={() => removeExtra(x)} disabled={removing === x.id} aria-label={`Take off the extra day on ${Number(x.day.slice(8, 10))} ${SHORT[month]}`}
+                        className="-my-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-red-700 hover:bg-red-50 disabled:opacity-40 dark:hover:bg-white/10">
+                        {removing === x.id ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+                      </button>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+
         <div className="mt-4">
           <div className="mb-1.5 text-[13px] font-semibold text-ink dark:text-[#f4f1ea]">
-            Advances deducted this month
+            Advances due this month
           </div>
           {advs.length === 0 ? (
             <p className="text-[13px] text-muted dark:text-[#a89f93]">None.</p>
@@ -203,16 +293,21 @@ export default function EmployeeMonthDetail({
             <div className="overflow-hidden rounded-card border border-line dark:border-white/10">
               <table className="w-full text-[12.5px]">
                 <tbody className="divide-y divide-line dark:divide-white/[0.05]">
-                  {advs.map((a, i) => (
-                    <tr key={i}>
+                  {advs.map((a) => (
+                    <tr key={a.id}>
                       <td className="px-3 py-2 text-muted dark:text-[#a89f93]">{a.date}</td>
                       <td className="px-3 py-2 font-semibold tabular-nums">{rs(a.amount)}</td>
-                      <td className="px-3 py-2 text-muted dark:text-[#a89f93]">{a.note ?? ""}</td>
+                      <td className={`px-3 py-2 ${a.carried_from ? "font-semibold text-ink dark:text-[#e7e2d8]" : "text-muted dark:text-[#a89f93]"}`}>{a.note ?? ""}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
+          )}
+          {!row.is_paid && Number(row.advances) > 0 && (
+            <p className="mt-1.5 text-[11.5px] text-hint dark:text-[#8a8175]">
+              Marking {MONTHS[month]} paid asks how much of this to cut; whatever is not cut moves to {nextName}.
+            </p>
           )}
         </div>
 
@@ -222,12 +317,17 @@ export default function EmployeeMonthDetail({
           <div className="mb-1.5 font-semibold text-ink dark:text-[#f4f1ea]">Payable breakdown</div>
           <div className="space-y-1 text-muted dark:text-[#a89f93]">
             <div className="flex justify-between">
-              <span>Earned over {row.counted_days} counted days, at each day&rsquo;s own rate</span>
+              <span>Earned over {dayCount(row.counted_days)} counted days, at each day&rsquo;s own rate</span>
               <span className="tabular-nums">{rs(gross)}</span>
             </div>
             {Number(row.extra_days) > 0 && (
               <div className="text-[11.5px] text-emerald-700">
                 includes {row.extra_days} day{Number(row.extra_days) > 1 ? "s" : ""} off worked (+{row.extra_days})
+              </div>
+            )}
+            {given > 0 && (
+              <div className="text-[11.5px] text-emerald-700">
+                includes {dayCount(given)} extra day{given > 1 ? "s" : ""} given (+{rs(row.given_pay)})
               </div>
             )}
             {Number(row.absent) > 0 && (
@@ -237,12 +337,18 @@ export default function EmployeeMonthDetail({
               </div>
             )}
             <div className="flex justify-between">
-              <span>Less advances</span>
-              <span className="tabular-nums">− {rs(row.advances)}</span>
+              <span>Less advance{row.is_paid && carried > 0 ? ` (${rs(cut)} of ${rs(row.advances)})` : "s"}</span>
+              <span className="tabular-nums">− {rs(cut)}</span>
             </div>
             <div className="flex justify-between border-t border-line pt-1.5 text-[14px] font-bold text-ink dark:border-white/10 dark:text-[#f4f1ea]">
               <span>Net payable</span><span className="tabular-nums">{rs(row.payable)}</span>
             </div>
+            {carried > 0 && (
+              <div className="flex justify-between pt-1 text-[12px] font-semibold text-amber-700">
+                <span className="flex items-center gap-1"><ArrowRight size={12} /> Carried forward to {nextName} (not cut now)</span>
+                <span className="tabular-nums">{rs(carried)}</span>
+              </div>
+            )}
           </div>
         </div>
 
