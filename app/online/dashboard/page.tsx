@@ -1,7 +1,7 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLiveTables } from "@/lib/useLiveTables";
-import { ShoppingBag, Clock, Undo2, Wallet, TrendingUp, Truck, RefreshCw, MapPin } from "lucide-react";
+import { ShoppingBag, Clock, Undo2, Wallet, TrendingUp, Truck, RefreshCw, MapPin, Ban, PackageX } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { HubRange, PageActions, Segmented, useIsPhone } from "@/components/HubUI";
 import { rangeDates, rs } from "@/lib/dateRange";
@@ -54,6 +54,15 @@ type DashSummary = {
   delivered: number; in_transit: number;
   order_value: number; avg_order: number; delivery_rate: number;
   cod_received: number; cod_receivable: number; receivable_count: number;
+};
+
+/* H285: the order counts on top — every order in exactly one of pending /
+   dispatched / cancelled-before-dispatch (the courier's parcel decides), plus
+   Shopify's own cancelled figures: cancelled before it was ever fulfilled, and
+   cancelled at all (that also takes in returns closed off once they came back). */
+type DashCounts = {
+  total_orders: number; pending: number; dispatched: number; returned: number;
+  cancelled_unfulfilled: number; cancelled_all: number;
 };
 
 type RateRow = { month_label: string; courier: string; returned: number;
@@ -120,6 +129,7 @@ export default function HubDashboard() {
   const [preset, setPreset] = useState("30d");
   const [cf, setCf] = useState(""); const [ct, setCt] = useState("");
   const [summary, setSummary] = useState<DashSummary | null>(null);
+  const [counts, setCounts] = useState<DashCounts | null>(null);
 
   /* EVERY FIGURE ON THIS PAGE IS COUNTED IN THE DATABASE.
      This page used to fetch 1,000 orders and 1,000 parcels and add them up
@@ -139,15 +149,17 @@ export default function HubDashboard() {
     const [from, to] = rangeDates(preset, cf, ct);
     const args = { p_from: from, p_to: to, p_store: store === "ALL" ? null : store };
 
-    const [sum, br, rt] = await Promise.all([
+    const [sum, br, rt, cnt] = await Promise.all([
       supabase.rpc("hub_dashboard_summary", args),
       supabase.rpc("hub_dashboard_breakdown", args),
       supabase.rpc("hub_return_rates", { p_months: 3 }),
+      supabase.rpc("hub_dashboard_counts", args),
     ]);
     if (my !== reqId.current) return;          // superseded by a newer request
-    const firstErr = sum.error ?? br.error;
+    const firstErr = sum.error ?? br.error ?? cnt.error;
     if (firstErr) setErr(firstErr.message);
     setSummary((sum.data as DashSummary[])?.[0] ?? null);
+    setCounts((cnt.data as DashCounts[])?.[0] ?? null);
     setBreakdown((br.data as Breakdown) ?? null);
     setRates((rt.data as RateRow[]) ?? []);
     setLoading(false);
@@ -163,9 +175,12 @@ export default function HubDashboard() {
   );
 
   const M = useMemo(() => {
-    const total = Number(summary?.total_orders ?? 0);
-    const pending = Number(summary?.pending ?? 0);
-    const retCanc = Number(summary?.returned_cancel ?? 0);
+    const total = Number(counts?.total_orders ?? summary?.total_orders ?? 0);
+    const pending = Number(counts?.pending ?? summary?.pending ?? 0);
+    const dispatched = Number(counts?.dispatched ?? 0);
+    const returned = Number(counts?.returned ?? 0);
+    const cancUnfulfilled = Number(counts?.cancelled_unfulfilled ?? 0);
+    const cancAll = Number(counts?.cancelled_all ?? 0);
     const delivered = Number(summary?.delivered ?? 0);
     const transit = Number(summary?.in_transit ?? 0);
     const totalAmt = Number(summary?.order_value ?? 0);
@@ -189,11 +204,11 @@ export default function HubDashboard() {
     const storeCols = codes.map((c) => got.find((r) => r.store_code === c) ?? zero(c));
 
     return {
-      total, pending, retCanc, delivered, transit, totalAmt, avgAmt, deliveryRate,
+      total, pending, dispatched, returned, cancUnfulfilled, cancAll, delivered, transit, totalAmt, avgAmt, deliveryRate,
       received, receivable, receivableCount, storeCols,
       cities: breakdown?.cities ?? [], couriers: breakdown?.couriers ?? [],
     };
-  }, [summary, breakdown, store]);
+  }, [summary, counts, breakdown, store]);
 
   const pct = (n: number) => (M.total ? Math.round((n / M.total) * 100) : 0);
   /* Return rate per courier, this month against last. The dashboard already
@@ -204,13 +219,23 @@ export default function HubDashboard() {
     return acc;
   }, []);
 
+  /* THE ORDERS, COUNTED (H285). Total = pending + dispatched + cancelled before
+     dispatch. The two cancelled cards are Shopify's own word: cancelled before
+     it was ever fulfilled, and cancelled at all — the second also counts
+     returns that were closed off in Shopify once they came back. */
+  const after = Math.max(0, M.cancAll - M.cancUnfulfilled);
   const cards = [
     { label: "Total orders", value: M.total.toLocaleString(), sub: "in period", Icon: ShoppingBag, bg: "bg-periwinkle-soft" },
-    { label: "Pending (not dispatched)", value: M.pending.toLocaleString(), sub: `${pct(M.pending)}% of orders`, Icon: Clock, bg: "bg-amber-soft" },
-    { label: "Returned & cancelled", value: M.retCanc.toLocaleString(), sub: `${pct(M.retCanc)}% of orders`, Icon: Undo2, bg: "bg-salmon-soft" },
-    { label: "Order value", value: rs(M.totalAmt), sub: "in period", Icon: Wallet, bg: "bg-success-soft" },
-    { label: "Average order", value: rs(M.avgAmt), sub: "per order", Icon: TrendingUp, bg: "bg-lavender-soft" },
-    { label: "Delivery rate", value: `${M.deliveryRate.toFixed(1)}%`, sub: `${M.delivered.toLocaleString()} delivered`, Icon: Truck, bg: "bg-pink-soft" },
+    { label: "Pending", value: M.pending.toLocaleString(), sub: `${pct(M.pending)}% · not dispatched yet`, Icon: Clock, bg: "bg-amber-soft" },
+    { label: "Dispatched", value: M.dispatched.toLocaleString(), sub: `${pct(M.dispatched)}% · handed to a courier`, Icon: Truck, bg: "bg-success-soft" },
+    { label: "Returned", value: M.returned.toLocaleString(), sub: `${M.dispatched ? Math.round((M.returned / M.dispatched) * 100) : 0}% of dispatched`, Icon: Undo2, bg: "bg-salmon-soft" },
+    { label: "Cancelled, not fulfilled", value: M.cancUnfulfilled.toLocaleString(), sub: `${pct(M.cancUnfulfilled)}% · cancelled in Shopify before fulfilment`, Icon: Ban, bg: "bg-pink-soft" },
+    { label: "All cancelled", value: M.cancAll.toLocaleString(), sub: `${M.cancUnfulfilled.toLocaleString()} before + ${after.toLocaleString()} after fulfilment`, Icon: PackageX, bg: "bg-lavender-soft" },
+  ];
+  const money = [
+    { label: "Order value", value: rs(M.totalAmt), sub: "every order except cancelled", Icon: Wallet, tone: "text-ink dark:text-[#f4f1ea]" },
+    { label: "Average order", value: rs(M.avgAmt), sub: "per order", Icon: TrendingUp, tone: "text-ink dark:text-[#f4f1ea]" },
+    { label: "Delivery rate", value: `${M.deliveryRate.toFixed(1)}%`, sub: `${M.delivered.toLocaleString()} delivered`, Icon: Truck, tone: "text-success" },
   ];
 
   return (
@@ -246,7 +271,18 @@ export default function HubDashboard() {
             <span className="hidden h-9 w-9 items-center justify-center rounded-full bg-ink text-white sm:flex dark:bg-white dark:text-[#141414]"><Icon size={16} /></span>
             <div className="max-sm:truncate text-[16px] font-extrabold tabular-nums text-ink sm:mt-3 sm:text-[18px] dark:text-[#f4f1ea]">{loading ? "—" : value}</div>
             <div className="text-[12px] font-medium text-muted dark:text-[#a89f93]">{label}</div>
-            <div className="mt-0.5 text-[11px] leading-tight text-hint dark:text-[#8a8175]">{sub}</div>
+            <div className="mt-0.5 text-[11px] leading-tight text-hint dark:text-[#8a8175]">{loading ? "" : sub}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* The money behind those orders — one row, under the counts. */}
+      <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3">
+        {money.map(({ label, value, sub, Icon, tone }, i) => (
+          <div key={label} className={`min-w-0 rounded-card border border-line bg-surface p-3.5 sm:p-4 dark:border-white/[0.06] dark:bg-[#201c17] ${i === 2 ? "col-span-2 sm:col-span-1" : ""}`}>
+            <div className="flex items-center gap-2 text-[12px] font-medium text-muted dark:text-[#a89f93]"><Icon size={14} className="shrink-0" /> {label}</div>
+            <div className={`mt-1 max-sm:truncate text-[18px] font-extrabold tabular-nums sm:text-[19px] ${tone}`}>{loading ? "—" : value}</div>
+            <div className="mt-0.5 text-[11px] leading-tight text-hint dark:text-[#8a8175]">{loading ? "" : sub}</div>
           </div>
         ))}
       </div>
@@ -501,14 +537,14 @@ export default function HubDashboard() {
       </div>
 
       <div className="mt-4 grid gap-4 lg:grid-cols-2">
-        <div className="rounded-card border border-line bg-surface p-4 sm:p-5 dark:border-white/[0.06] dark:bg-[#201c17]">
+        <div className="min-w-0 rounded-card border border-line bg-surface p-4 sm:p-5 dark:border-white/[0.06] dark:bg-[#201c17]">
           <h3 className="mb-4 flex items-center gap-2 text-[14px] font-bold text-ink dark:text-[#f4f1ea]"><MapPin size={16} /> Top cities</h3>
           {loading ? <div className="py-10 text-center text-[13px] text-muted dark:text-[#a89f93]">Loading…</div> : <Pie data={M.cities} />}
         </div>
 
         {/* Dispatched parcels per courier in the chosen dates. The old chips
             counted the first 1,000 parcels of all time, whatever dates were set. */}
-        <div className="rounded-card border border-line bg-surface p-4 sm:p-5 dark:border-white/[0.06] dark:bg-[#201c17]">
+        <div className="min-w-0 rounded-card border border-line bg-surface p-4 sm:p-5 dark:border-white/[0.06] dark:bg-[#201c17]">
           <h3 className="mb-4 flex items-center gap-2 text-[14px] font-bold text-ink dark:text-[#f4f1ea]"><Truck size={16} /> By courier</h3>
           {loading ? <div className="py-10 text-center text-[13px] text-muted dark:text-[#a89f93]">Loading…</div>
           : M.couriers.length === 0 ? <div className="py-10 text-center text-[13px] text-muted dark:text-[#a89f93]">Nothing dispatched in this period.</div>
