@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { Plus, RefreshCw, Search, Loader2, PackagePlus, UserPlus, CheckCircle2, ChevronDown, LayoutGrid, Rows3 } from "lucide-react";
 import { PageActions, Segmented } from "@/components/HubUI";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
-import { rs } from "@/lib/dateRange";
+import { rs, todayPk, doneOnIso } from "@/lib/dateRange";
 import TeamTaskBoard from "@/components/TeamTaskBoard";
 
 /* ARTICLES — the boss's list.
@@ -66,17 +66,20 @@ type Assigned = {
 /* Two states, both derived from the work: in progress until the last man has
    submitted, completed after. There is no Approved and no Rejected — a word
    somebody sets by hand can disagree with the five stages underneath it, and
-   then nobody can say which is right. */
+   then nobody can say which is right.
+   H286: an article completes only when Qaswar presses Live, so "completed" is
+   shown as Live — the owner's word for it. The stored status is unchanged. */
 const TABS = [
   { key: "all", label: "All" },
   { key: "in_progress", label: "In progress" },
-  { key: "completed", label: "Completed" },
+  { key: "completed", label: "Live" },
 ];
 
 function statusChip(s: string) {
   if (s === "completed") return "bg-success-soft text-success dark:bg-white/[0.10]";
   return "bg-amber-soft text-amber-strong dark:bg-white/[0.10] dark:text-amber";
 }
+const statusLabel = (s: string) => (s === "completed" ? "live" : s.replace("_", " "));
 
 /* CARDS OR TABLE — the same rows, two ways to read them.
    Cards answer "where is each article" at a glance; the table lines the same
@@ -124,7 +127,7 @@ export default function ArticlesPage() {
      with the date it really happened. The man is told it was written for him —
      nothing gets marked done behind his back. */
   const [markTask, setMarkTask] = useState<string | null>(null);
-  const today = () => new Date().toISOString().slice(0, 10);
+  const today = todayPk;   // Pakistan, not UTC (it was a day behind until 5 am)
   const [markT, setMarkT] = useState({ note: "", done_on: today() });
 
   /* Which submitted task is being put back, and why. */
@@ -198,9 +201,9 @@ export default function ArticlesPage() {
     setBusy(true); setErr("");
     const { data, error } = await supabase.rpc("hub_task_submit", {
       p_task_id: taskId, p_note: markT.note,
-      /* Midday, so the date reads the same whichever way the timezone leans.
-         Nobody is recording an hour here, only a day. */
-      p_done_on: new Date(`${markT.done_on}T12:00:00`).toISOString(),
+      /* Today → now; an earlier day → noon that day in Pakistan. Noon of
+         today was "in the future" every morning and was refused. */
+      p_done_on: doneOnIso(markT.done_on),
     });
     setBusy(false);
     const res = data as { ok?: boolean; error?: string } | null;
@@ -525,7 +528,7 @@ export default function ArticlesPage() {
                     <td className="whitespace-nowrap px-3 py-3 text-[12.5px] text-muted dark:text-[#a89f93]">{r.age}</td>
                     <td className="px-4 py-3">
                       <span className={`whitespace-nowrap rounded-full px-2.5 py-1 text-[11.5px] font-semibold ${statusChip(r.status)}`}>
-                        {r.status.replace("_", " ")}
+                        {statusLabel(r.status)}
                       </span>
                     </td>
                   </tr>
@@ -596,7 +599,7 @@ export default function ArticlesPage() {
               </div>
 
               <span className={`shrink-0 rounded-full px-2.5 py-1 text-[11.5px] font-semibold ${statusChip(r.status)}`}>
-                {r.status.replace("_", " ")}
+                {statusLabel(r.status)}
               </span>
             </div>
           </Link>

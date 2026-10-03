@@ -2,10 +2,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import {
-  ArrowLeft, Pencil, Trash2, Clock3, CornerUpLeft, Loader2, Plus, Wallet, CheckCircle2, Undo2,
+  ArrowLeft, Pencil, Trash2, Clock3, CornerUpLeft, Loader2, Plus, Wallet, CheckCircle2, Undo2, Rocket,
 } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
-import { rs } from "@/lib/dateRange";
+import { rs, todayPk, doneOnIso } from "@/lib/dateRange";
 
 /* ONE ARTICLE, END TO END.
  *
@@ -32,6 +32,12 @@ type Stage = {
   submitted_by_name: string | null; on_behalf: boolean;
   /* An open quality check whose product is not in yet: who it waits for. */
   waiting_for?: string | null;
+  /* H286: set when Qaswar (or the administration) sent this step back from
+     the ads card; the note is also in returned_note as "Sent back by …". */
+  sent_back_by_name?: string | null; sent_back_note?: string | null;
+};
+const STAGE_NAME: Record<string, string> = {
+  product: "Product", video: "Video", qc: "Quality check", social: "Social media", ads: "Ads",
 };
 type Ads = {
   id: number; spent_on: string; amount: number; platform: string | null;
@@ -74,7 +80,7 @@ export default function ArticleDetail() {
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const [addSpend, setAddSpend] = useState(false);
-  const [spend, setSpend] = useState({ spent_on: new Date().toISOString().slice(0, 10), amount: "", campaign_name: "", campaign_id: "", notes: "" });
+  const [spend, setSpend] = useState({ spent_on: todayPk(), amount: "", campaign_name: "", campaign_id: "", notes: "" });
   const [editing, setEditing] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [edit, setEdit] = useState({ rough_name: "", final_name: "", exact_cost: "", retail_price: "", ads_budget: "", brief: "", ads_basis: "total" });
@@ -86,7 +92,7 @@ export default function ArticleDetail() {
      date it was really done. The database records whose hand was on the
      button, and the article routes on exactly as if he had pressed it. */
   const [marking, setMarking] = useState<string | null>(null);   // task_id being recorded
-  const [mark, setMark] = useState({ note: "", done_on: new Date().toISOString().slice(0, 10) });
+  const [mark, setMark] = useState({ note: "", done_on: todayPk() });
 
   /* Which submitted task is being undone, and why. */
   const [undoing, setUndoing] = useState<string | null>(null);
@@ -471,6 +477,14 @@ export default function ArticleDetail() {
           const open = s.status === "open" && !waiting;
           const doneOk = s.status === "submitted";
           const back = s.status === "returned";
+          /* H286: the ads row finishes with Live, which opens only when the
+             other four are done — the database refuses it otherwise, so the
+             button says who it is waiting for instead of failing. */
+          const isAds = s.stage === "ads";
+          const liveWait = isAds
+            ? d.stages.filter((x) => x.stage !== "ads" && x.status !== "submitted")
+                .map((x) => `${x.person ?? "nobody"} (${STAGE_NAME[x.stage] ?? x.label})`)
+            : [];
           return (
             <div key={s.stage}
               className={`rounded-card border bg-surface px-4 py-3 dark:bg-[#201c17] ${open ? "border-ink/40 dark:border-white/25" : "border-line dark:border-white/[0.06]"}`}>
@@ -493,7 +507,7 @@ export default function ArticleDetail() {
                     : back ? "bg-salmon-soft text-red-800 dark:bg-white/[0.10] dark:text-salmon"
                     : open ? "bg-amber-soft text-amber-strong dark:bg-white/[0.10] dark:text-amber"
                     : "bg-panel text-hint dark:bg-white/[0.06]"}`}>
-                    {doneOk ? "submitted" : back ? "sent back" : open ? "with him now"
+                    {doneOk ? (isAds ? "live" : "submitted") : back ? "sent back" : open ? "with him now"
                       : waiting ? `waiting for ${s.waiting_for}` : "not started"}
                   </span>
                 </div>
@@ -519,7 +533,7 @@ export default function ArticleDetail() {
                 undoing === s.task_id ? (
                   <div className="mt-3 rounded-xl2 border border-salmon-soft bg-salmon-soft/40 p-3 dark:border-white/10 dark:bg-white/[0.04]">
                     <label className="block text-[12px] font-semibold text-red-800 dark:text-salmon">
-                      Put this back with {s.person}. Why?
+                      {isAds ? `Undo Live — reopen it for ${s.person}. Why?` : `Put this back with ${s.person}. Why?`}
                     </label>
                     <input autoFocus value={undoWhy} onChange={(e) => setUndoWhy(e.target.value)}
                       placeholder="He had not actually posted anything"
@@ -529,7 +543,7 @@ export default function ArticleDetail() {
                         onClick={() => call("hub_task_reopen", { p_task_id: s.task_id, p_reason: undoWhy })
                           .then((ok) => { if (ok) { setUndoing(null); setUndoWhy(""); } })}
                         className="rounded-full bg-danger px-4 py-1.5 text-[12.5px] font-semibold text-white disabled:opacity-40">
-                        {busy ? "Undoing…" : `Put it back with ${s.person}`}
+                        {busy ? "Undoing…" : isAds ? `Reopen for ${s.person}` : `Put it back with ${s.person}`}
                       </button>
                       <button disabled={busy} onClick={() => setUndoing(null)}
                         className="rounded-full border border-line px-4 py-1.5 text-[12.5px] font-semibold text-ink dark:border-white/15 dark:text-white">
@@ -537,8 +551,9 @@ export default function ArticleDetail() {
                       </button>
                     </div>
                     <p className="mt-1.5 text-[11.5px] leading-relaxed text-hint dark:text-[#8a8175]">
-                      The submission is removed and the stage goes back to him with this reason on it.
-                      It stays in the history under your name.
+                      {isAds
+                        ? "The article goes back to In progress. He can send steps back again or press Live again. It stays in the history under your name."
+                        : "The submission is removed and the stage goes back to him with this reason on it. It stays in the history under your name."}
                       {s.stage !== "social" && s.stage !== "ads" &&
                         " Anything that opened because of this submission stays open — undoing a click should not throw away work somebody has already started."}
                     </p>
@@ -546,7 +561,7 @@ export default function ArticleDetail() {
                 ) : (
                   <button onClick={() => { setUndoing(s.task_id); setUndoWhy(""); }}
                     className="mt-2 flex items-center gap-1.5 rounded-full border border-line px-3.5 py-1.5 text-[12px] font-semibold text-muted transition hover:border-danger/40 hover:bg-salmon-soft hover:text-danger dark:border-white/15 dark:text-[#a89f93]">
-                    <Undo2 size={13} /> Undo — it wasn&rsquo;t done
+                    <Undo2 size={13} /> {isAds ? "Undo Live" : <>Undo — it wasn&rsquo;t done</>}
                   </button>
                 )
               )}
@@ -556,26 +571,26 @@ export default function ArticleDetail() {
                 marking === s.task_id ? (
                   <div className="mt-3 rounded-xl2 border border-line bg-canvas p-3 dark:border-white/10 dark:bg-white/[0.03]">
                     <label className="block text-[12px] font-semibold text-muted dark:text-[#a89f93]">
-                      What did {s.person} do?
+                      {isAds ? `Final comment for ${s.person}'s Live (optional)` : `What did ${s.person} do?`}
                     </label>
                     <textarea autoFocus rows={2} value={mark.note}
                       onChange={(e) => setMark({ ...mark, note: e.target.value })}
-                      placeholder="Pictures, sizes and size chart done, uploaded to Shopify"
+                      placeholder={isAds ? "Campaign live on Meta" : "Pictures, sizes and size chart done, uploaded to Shopify"}
                       className="mt-1 w-full rounded-xl2 border border-line bg-surface px-3 py-2 text-[13px] text-ink outline-none placeholder:text-hint dark:border-white/10 dark:bg-white/[0.04] dark:text-[#f4f1ea]" />
                     <div className="mt-2 flex flex-wrap items-center gap-2">
                       <label className="text-[12px] font-semibold text-muted dark:text-[#a89f93]">Done on</label>
-                      <input type="date" value={mark.done_on} max={new Date().toISOString().slice(0, 10)}
+                      <input type="date" value={mark.done_on} max={todayPk()}
                         onChange={(e) => setMark({ ...mark, done_on: e.target.value })}
                         className="rounded-xl2 border border-line bg-surface px-3 py-1.5 text-[13px] text-ink outline-none dark:border-white/10 dark:bg-white/[0.04] dark:text-[#f4f1ea]" />
-                      <button disabled={busy || !mark.note.trim()}
-                        onClick={() => call("hub_task_submit", {
-                          p_task_id: s.task_id, p_note: mark.note,
-                          /* Midday, so the date reads the same whichever way the
-                             timezone leans. Nobody is recording an hour here. */
-                          p_done_on: new Date(`${mark.done_on}T12:00:00`).toISOString(),
-                        }).then((ok) => { if (ok) { setMarking(null); setMark({ note: "", done_on: new Date().toISOString().slice(0, 10) }); } })}
+                      <button disabled={busy || (isAds ? liveWait.length > 0 : !mark.note.trim())}
+                        onClick={() => call(isAds ? "hub_task_go_live" : "hub_task_submit", {
+                          p_task_id: s.task_id, p_note: isAds ? (mark.note.trim() || null) : mark.note,
+                          /* Today → now; an earlier day → noon that day in Pakistan.
+                             (Noon of today was "in the future" every morning.) */
+                          p_done_on: doneOnIso(mark.done_on),
+                        }).then((ok) => { if (ok) { setMarking(null); setMark({ note: "", done_on: todayPk() }); } })}
                         className="rounded-full bg-ink px-4 py-1.5 text-[12.5px] font-semibold text-white disabled:opacity-40 dark:bg-white dark:text-[#141414]">
-                        {busy ? "Saving…" : "Record it"}
+                        {busy ? "Saving…" : isAds ? "Mark live" : "Record it"}
                       </button>
                       <button disabled={busy} onClick={() => setMarking(null)}
                         className="rounded-full border border-line px-4 py-1.5 text-[12.5px] font-semibold text-ink dark:border-white/15 dark:text-white">
@@ -583,15 +598,24 @@ export default function ArticleDetail() {
                       </button>
                     </div>
                     <p className="mt-1.5 text-[11.5px] text-hint dark:text-[#8a8175]">
-                      Saved under your name as recorded for {s.person}, and {s.person} is told. The article moves on exactly as if he had pressed it.
+                      {isAds && liveWait.length > 0
+                        ? `Live opens when everyone else is done — waiting for ${liveWait.join(", ")}.`
+                        : isAds
+                          ? `Saved under your name as recorded for ${s.person}, and ${s.person} is told. The article is completed and closed, exactly as if he had pressed Live.`
+                          : `Saved under your name as recorded for ${s.person}, and ${s.person} is told. The article moves on exactly as if he had pressed it.`}
                     </p>
                   </div>
                 ) : (
-                  <button onClick={() => { setMarking(s.task_id); setMark({ note: "", done_on: new Date().toISOString().slice(0, 10) }); }}
+                  <button onClick={() => { setMarking(s.task_id); setMark({ note: "", done_on: todayPk() }); }}
                     className="mt-2 flex items-center gap-1.5 rounded-full border border-line px-3.5 py-1.5 text-[12px] font-semibold text-ink transition hover:bg-panel dark:border-white/15 dark:text-white dark:hover:bg-white/[0.06]">
-                    <CheckCircle2 size={13} /> Mark done for {s.person}
+                    {isAds ? <><Rocket size={13} /> Mark live for {s.person}</> : <><CheckCircle2 size={13} /> Mark done for {s.person}</>}
                   </button>
                 )
+              )}
+              {isAds && open && liveWait.length > 0 && marking !== s.task_id && (
+                <p className="mt-1.5 text-[11.5px] text-muted dark:text-[#a89f93]">
+                  Live waits for {liveWait.join(", ")}.
+                </p>
               )}
               {s.returned_note && (
                 <p className="mt-1.5 flex items-start gap-1.5 text-[12.5px] text-red-800 dark:text-salmon">

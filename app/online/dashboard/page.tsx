@@ -1,7 +1,7 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLiveTables } from "@/lib/useLiveTables";
-import { ShoppingBag, Clock, Undo2, Wallet, TrendingUp, Truck, RefreshCw, MapPin, Ban, PackageX } from "lucide-react";
+import { ShoppingBag, Clock, Undo2, Wallet, TrendingUp, Truck, RefreshCw, MapPin, Ban } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { HubRange, PageActions, Segmented, useIsPhone } from "@/components/HubUI";
 import { rangeDates, rs } from "@/lib/dateRange";
@@ -56,14 +56,22 @@ type DashSummary = {
   cod_received: number; cod_receivable: number; receivable_count: number;
 };
 
-/* H285: the order counts on top — every order in exactly one of pending /
-   dispatched / cancelled-before-dispatch (the courier's parcel decides), plus
-   Shopify's own cancelled figures: cancelled before it was ever fulfilled, and
-   cancelled at all (that also takes in returns closed off once they came back). */
+/* H285: the order counts on top, all from Shopify, so every order is in
+   exactly one card and they add up to the total: pending (not fulfilled),
+   dispatched (fulfilled), returned (fulfilled, then cancelled — only those,
+   not every parcel the courier brought back) and cancelled (cancelled without
+   ever being fulfilled). Pending and Dispatched equal the Orders page. */
 type DashCounts = {
   total_orders: number; pending: number; dispatched: number; returned: number;
   cancelled_unfulfilled: number; cancelled_all: number;
 };
+
+/* H287: the other question about cancellations — not "of the orders placed in
+   these dates, how many are cancelled now" (the cards) but "what did Shopify
+   cancel IN these dates", whenever the order was placed. On 2 Oct Shopify
+   cancelled 38 orders and only 2 of them had been placed that day, which is
+   why "Today" looked as if cancellations were not arriving. */
+type DashCancels = { cancelled: number; not_fulfilled: number; fulfilled: number; placed_earlier: number };
 
 type RateRow = { month_label: string; courier: string; returned: number;
                  return_pct: number | null; change_pts: number | null;
@@ -130,6 +138,7 @@ export default function HubDashboard() {
   const [cf, setCf] = useState(""); const [ct, setCt] = useState("");
   const [summary, setSummary] = useState<DashSummary | null>(null);
   const [counts, setCounts] = useState<DashCounts | null>(null);
+  const [cancels, setCancels] = useState<DashCancels | null>(null);
 
   /* EVERY FIGURE ON THIS PAGE IS COUNTED IN THE DATABASE.
      This page used to fetch 1,000 orders and 1,000 parcels and add them up
@@ -149,17 +158,21 @@ export default function HubDashboard() {
     const [from, to] = rangeDates(preset, cf, ct);
     const args = { p_from: from, p_to: to, p_store: store === "ALL" ? null : store };
 
-    const [sum, br, rt, cnt] = await Promise.all([
+    const [sum, br, rt, cnt, cx] = await Promise.all([
       supabase.rpc("hub_dashboard_summary", args),
       supabase.rpc("hub_dashboard_breakdown", args),
       supabase.rpc("hub_return_rates", { p_months: 3 }),
       supabase.rpc("hub_dashboard_counts", args),
+      supabase.rpc("hub_dashboard_cancellations", args),
     ]);
     if (my !== reqId.current) return;          // superseded by a newer request
     const firstErr = sum.error ?? br.error ?? cnt.error;
     if (firstErr) setErr(firstErr.message);
     setSummary((sum.data as DashSummary[])?.[0] ?? null);
     setCounts((cnt.data as DashCounts[])?.[0] ?? null);
+    /* A missing function (H287 not run yet) hides the row instead of
+       putting an error over the whole dashboard. */
+    setCancels(cx.error ? null : ((cx.data as DashCancels[])?.[0] ?? null));
     setBreakdown((br.data as Breakdown) ?? null);
     setRates((rt.data as RateRow[]) ?? []);
     setLoading(false);
@@ -176,11 +189,10 @@ export default function HubDashboard() {
 
   const M = useMemo(() => {
     const total = Number(counts?.total_orders ?? summary?.total_orders ?? 0);
-    const pending = Number(counts?.pending ?? summary?.pending ?? 0);
+    const pending = Number(counts?.pending ?? 0);
     const dispatched = Number(counts?.dispatched ?? 0);
     const returned = Number(counts?.returned ?? 0);
-    const cancUnfulfilled = Number(counts?.cancelled_unfulfilled ?? 0);
-    const cancAll = Number(counts?.cancelled_all ?? 0);
+    const cancelled = Number(counts?.cancelled_unfulfilled ?? 0);
     const delivered = Number(summary?.delivered ?? 0);
     const transit = Number(summary?.in_transit ?? 0);
     const totalAmt = Number(summary?.order_value ?? 0);
@@ -204,7 +216,7 @@ export default function HubDashboard() {
     const storeCols = codes.map((c) => got.find((r) => r.store_code === c) ?? zero(c));
 
     return {
-      total, pending, dispatched, returned, cancUnfulfilled, cancAll, delivered, transit, totalAmt, avgAmt, deliveryRate,
+      total, pending, dispatched, returned, cancelled, delivered, transit, totalAmt, avgAmt, deliveryRate,
       received, receivable, receivableCount, storeCols,
       cities: breakdown?.cities ?? [], couriers: breakdown?.couriers ?? [],
     };
@@ -219,18 +231,16 @@ export default function HubDashboard() {
     return acc;
   }, []);
 
-  /* THE ORDERS, COUNTED (H285). Total = pending + dispatched + cancelled before
-     dispatch. The two cancelled cards are Shopify's own word: cancelled before
-     it was ever fulfilled, and cancelled at all — the second also counts
-     returns that were closed off in Shopify once they came back. */
-  const after = Math.max(0, M.cancAll - M.cancUnfulfilled);
+  /* THE ORDERS, COUNTED (H285), the owner's way — all from Shopify, each order
+     in one card only, so Pending + Dispatched + Returned + Cancelled = Total:
+       Returned  = fulfilled in Shopify, then cancelled
+       Cancelled = cancelled without ever being fulfilled */
   const cards = [
     { label: "Total orders", value: M.total.toLocaleString(), sub: "in period", Icon: ShoppingBag, bg: "bg-periwinkle-soft" },
-    { label: "Pending", value: M.pending.toLocaleString(), sub: `${pct(M.pending)}% · not dispatched yet`, Icon: Clock, bg: "bg-amber-soft" },
-    { label: "Dispatched", value: M.dispatched.toLocaleString(), sub: `${pct(M.dispatched)}% · handed to a courier`, Icon: Truck, bg: "bg-success-soft" },
-    { label: "Returned", value: M.returned.toLocaleString(), sub: `${M.dispatched ? Math.round((M.returned / M.dispatched) * 100) : 0}% of dispatched`, Icon: Undo2, bg: "bg-salmon-soft" },
-    { label: "Cancelled, not fulfilled", value: M.cancUnfulfilled.toLocaleString(), sub: `${pct(M.cancUnfulfilled)}% · cancelled in Shopify before fulfilment`, Icon: Ban, bg: "bg-pink-soft" },
-    { label: "All cancelled", value: M.cancAll.toLocaleString(), sub: `${M.cancUnfulfilled.toLocaleString()} before + ${after.toLocaleString()} after fulfilment`, Icon: PackageX, bg: "bg-lavender-soft" },
+    { label: "Pending", value: M.pending.toLocaleString(), sub: `${pct(M.pending)}% · not fulfilled yet`, Icon: Clock, bg: "bg-amber-soft" },
+    { label: "Dispatched", value: M.dispatched.toLocaleString(), sub: `${pct(M.dispatched)}% · fulfilled in Shopify`, Icon: Truck, bg: "bg-success-soft" },
+    { label: "Returned", value: M.returned.toLocaleString(), sub: `${pct(M.returned)}% · fulfilled, then cancelled`, Icon: Undo2, bg: "bg-salmon-soft" },
+    { label: "Cancelled", value: M.cancelled.toLocaleString(), sub: `${pct(M.cancelled)}% · cancelled before fulfilment`, Icon: Ban, bg: "bg-pink-soft" },
   ];
   const money = [
     { label: "Order value", value: rs(M.totalAmt), sub: "every order except cancelled", Icon: Wallet, tone: "text-ink dark:text-[#f4f1ea]" },
@@ -265,9 +275,10 @@ export default function HubDashboard() {
           </select>
         } />
 
-      <div className="mt-5 grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
-        {cards.map(({ label, value, sub, Icon, bg }) => (
-          <div key={label} className={`min-w-0 rounded-card border border-line ${bg} p-3.5 sm:p-4 dark:border-white/[0.06] dark:bg-[#201c17]`}>
+      {/* Total across the top on a phone and a tablet, then two by two; one row of five on a computer. */}
+      <div className="mt-5 grid grid-cols-2 gap-3 lg:grid-cols-5">
+        {cards.map(({ label, value, sub, Icon, bg }, i) => (
+          <div key={label} className={`min-w-0 rounded-card border border-line ${bg} p-3.5 sm:p-4 dark:border-white/[0.06] dark:bg-[#201c17] ${i === 0 ? "col-span-2 lg:col-span-1" : ""}`}>
             <span className="hidden h-9 w-9 items-center justify-center rounded-full bg-ink text-white sm:flex dark:bg-white dark:text-[#141414]"><Icon size={16} /></span>
             <div className="max-sm:truncate text-[16px] font-extrabold tabular-nums text-ink sm:mt-3 sm:text-[18px] dark:text-[#f4f1ea]">{loading ? "—" : value}</div>
             <div className="text-[12px] font-medium text-muted dark:text-[#a89f93]">{label}</div>
@@ -275,6 +286,39 @@ export default function HubDashboard() {
           </div>
         ))}
       </div>
+
+      <p className="mt-2 px-1 text-[11.5px] text-hint dark:text-[#8a8175]">
+        From Shopify: Pending + Dispatched + Returned + Cancelled = Total orders · each order under the day it was placed.
+      </p>
+
+      {/* H287 — WHAT SHOPIFY CANCELLED IN THESE DATES, by the day it was
+          cancelled. Most cancellations are older orders, so the cards above
+          (by the day an order was placed) can read 2 on a day Shopify
+          cancelled 38. This row is the number to compare with Shopify. */}
+      {cancels && (() => {
+        const when = preset === "today" ? "today" : preset === "yesterday" ? "yesterday" : "in these dates";
+        const before = preset === "today" ? "before today" : preset === "yesterday" ? "before yesterday" : "before these dates";
+        const n = (v: number) => Number(v || 0).toLocaleString();
+        return (
+          <div className="mt-2 min-w-0 rounded-card border border-line bg-surface px-3.5 py-2.5 dark:border-white/[0.06] dark:bg-[#201c17]">
+            <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-[12.5px]">
+              <span className="inline-flex items-center gap-1.5 font-semibold text-ink dark:text-[#f4f1ea]">
+                <Ban size={13} className="shrink-0 self-center" /> Cancelled in Shopify {when}
+              </span>
+              <b className="text-[14px] tabular-nums text-ink dark:text-[#f4f1ea]">{loading ? "—" : n(cancels.cancelled)}</b>
+              {!loading && (
+                <span className="text-muted dark:text-[#a89f93]">
+                  {n(cancels.not_fulfilled)} never fulfilled · {n(cancels.fulfilled)} after fulfilment
+                  {Number(cancels.placed_earlier) > 0 && ` · ${n(cancels.placed_earlier)} placed ${before}`}
+                </span>
+              )}
+            </div>
+            <div className="mt-0.5 text-[11px] leading-snug text-hint dark:text-[#8a8175]">
+              Counted on the day Shopify cancelled them — compare this with Shopify. The cards above count by the day an order was placed.
+            </div>
+          </div>
+        );
+      })()}
 
       {/* The money behind those orders — one row, under the counts. */}
       <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3">
