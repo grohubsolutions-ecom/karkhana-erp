@@ -124,7 +124,11 @@ type Progress = {
   article_id: string; code: string; status: string; completed_at: string | null;
   live: { at: string | null; by: string | null; note: string | null } | null;
   steps: PStep[]; posts: Posts;
+  /* H291: the "Campaign setup" ticks, beside the "Posted on" ticks. */
+  setup: Posts;
 };
+/* H291: the two kinds of per-account tick — campaign set up, and posted. */
+type TickKind = "setup" | "posted";
 /* The box that takes a finished card's place: what was finished, and the
    card that was next after it. */
 type Flash = {
@@ -213,7 +217,7 @@ export default function MyWork() {
     }
     if (!pr.error) {
       const map: Record<string, Progress> = {};
-      for (const p of ((pr.data as Progress[]) ?? [])) map[p.article_id] = { ...p, posts: p.posts ?? {} };
+      for (const p of ((pr.data as Progress[]) ?? [])) map[p.article_id] = { ...p, posts: p.posts ?? {}, setup: p.setup ?? {} };
       setProg(map);
     }
     setLoading(false);
@@ -304,20 +308,41 @@ export default function MyWork() {
   }
 
   /* A tick saves on its own and answers with the article's ticks, so only
-     those are redrawn — no reload of the whole list for one tick. */
-  async function tick(t: Task, platform: Platform, on: boolean) {
+     those are redrawn — no reload of the whole list for one tick. H291: the
+     same path drives both kinds — "posted" (hub_article_post_set) and the
+     campaign "setup" (hub_article_setup_set). */
+  async function tick(t: Task, platform: Platform, on: boolean, kind: TickKind = "posted") {
     if (!supabase || !t.article_id) return;
     const art = t.article_id;
-    setBusy(`${t.task_id}:${platform}`); setErr("");
-    const { data, error } = await supabase.rpc("hub_article_post_set",
-      { p_task_id: t.task_id, p_platform: platform, p_posted: on });
-    const res = data as { ok?: boolean; error?: string; posts?: Posts } | null;
+    setBusy(`${t.task_id}:${kind}:${platform}`); setErr("");
+    const fn = kind === "setup" ? "hub_article_setup_set" : "hub_article_post_set";
+    const { data, error } = await supabase.rpc(fn, { p_task_id: t.task_id, p_platform: platform, p_posted: on });
+    const res = data as { ok?: boolean; error?: string; posts?: Posts; setup?: Posts } | null;
     if (error) setErr(error.message);
     else if (res && res.ok === false) setErr(res.error ?? "Refused.");
-    else if (res?.posts) {
-      const posts = res.posts;
-      setProg((m) => (m[art] ? { ...m, [art]: { ...m[art], posts } } : m));
+    else {
+      const next = kind === "setup" ? res?.setup : res?.posts;
+      if (next) setProg((m) => (m[art] ? { ...m, [art]: { ...m[art], [kind === "setup" ? "setup" : "posts"]: next } } : m));
     }
+    setBusy(null);
+  }
+
+  /* "Mark all" — tick (or untick) all three accounts of one kind at once. */
+  async function tickAll(t: Task, kind: TickKind, on: boolean) {
+    if (!supabase || !t.article_id) return;
+    const art = t.article_id;
+    setBusy(`${t.task_id}:${kind}:all`); setErr("");
+    const fn = kind === "setup" ? "hub_article_setup_set" : "hub_article_post_set";
+    type PostRes = { ok?: boolean; error?: string; posts?: Posts; setup?: Posts };
+    let last: PostRes | null = null;
+    for (const pl of PLATFORMS) {
+      const { data, error } = await supabase.rpc(fn, { p_task_id: t.task_id, p_platform: pl.key, p_posted: on });
+      if (error) { setErr(error.message); setBusy(null); return; }
+      last = data as PostRes | null;
+      if (last && last.ok === false) { setErr(last.error ?? "Refused."); setBusy(null); return; }
+    }
+    const next = kind === "setup" ? last?.setup : last?.posts;
+    if (next) setProg((m) => (m[art] ? { ...m, [art]: { ...m[art], [kind === "setup" ? "setup" : "posts"]: next } } : m));
     setBusy(null);
   }
 
@@ -402,9 +427,9 @@ export default function MyWork() {
           onSend={sendCustom} onClose={() => { setCustomOpen(false); setForm(EMPTY_FORM); }} />
       )}
 
-      {/* H290: the articles sit in a tray with a real gap between them, each its
-          own card, instead of one block split by hairlines. */}
-      <div className="space-y-3 bg-panel/40 p-3 dark:bg-white/[0.02] sm:p-4">
+      {/* H290/H291: the articles sit in a tray with a clear gap between them,
+          each its own card led by WHICH campaign it is. */}
+      <div className="space-y-4 bg-panel/40 p-3 dark:bg-white/[0.02] sm:p-4">
       {open.length === 0 ? (<>
         {banner}
         {!flash && (
@@ -435,19 +460,22 @@ export default function MyWork() {
         <div id={`task-${t.task_id}`} data-code={t.code ?? undefined} tabIndex={-1}
           className={`rounded-2xl border bg-surface px-4 py-4 shadow-sm outline-none transition-colors dark:bg-[#211d17] sm:px-5 ${
             glow === t.task_id ? "border-periwinkle-strong ring-2 ring-inset ring-periwinkle-strong bg-periwinkle-soft/30 dark:bg-white/[0.05]" : "border-line dark:border-white/[0.07]"}`}>
-          <div className="flex flex-wrap items-baseline justify-between gap-2">
+          {/* H291: lead with WHICH campaign this is — the code and the article
+              name, big — so two cards never look like one. The role (what this
+              person does on it) is the quieter line under it. */}
+          <div className="flex flex-wrap items-start justify-between gap-2">
             <div className="min-w-0">
-              <span className="text-[14px] font-bold text-ink dark:text-[#f4f1ea]">{tc(t.title)}</span>
-              {t.code && (
-                <span className="ml-2 text-[12.5px] text-muted dark:text-[#a89f93]">
-                  {t.code} · {tc(t.article_name)}
+              <div className="flex flex-wrap items-baseline gap-x-2">
+                {t.code && <span className="text-[15px] font-extrabold tracking-tight text-ink dark:text-[#f4f1ea]">{t.code}</span>}
+                <span className="text-[15px] font-extrabold tracking-tight text-ink [overflow-wrap:anywhere] dark:text-[#f4f1ea]">
+                  {t.code ? tc(t.article_name ?? "—") : tc(t.title)}
                 </span>
-              )}
+              </div>
+              <div className="mt-0.5 text-[12px] font-semibold text-muted dark:text-[#a89f93]">{tc(t.title)}</div>
             </div>
             {/* While he is waiting, no clock is shown — the days belong to the
-                man making the product, not to him. */}
-            {/* An ads card that cannot go Live yet is waiting on other people,
-                not sitting with Qaswar — so it says who, like the QC card does. */}
+                man making the product, not to him. An ads card that cannot go
+                Live yet is waiting on other people, so it says who. */}
             <span className={`shrink-0 rounded-full px-2.5 py-1 text-[11.5px] font-semibold ${t.waiting_for || (isAds && !ready)
                 ? "bg-amber-soft text-amber-strong dark:bg-white/[0.08] dark:text-amber"
                 : "bg-panel text-muted dark:bg-white/[0.06] dark:text-[#a89f93]"}`}>
@@ -537,8 +565,8 @@ export default function MyWork() {
                         </span>
                       ) : null}
                     </div>
-                    {/* H288: what Awais has ticked, as he ticked it. */}
-                    {s.stage === "social" && p && <PostsLine posts={p.posts} />}
+                    {/* H288/H291: what Awais ticked — campaign setup and posted. */}
+                    {s.stage === "social" && p && <PostsLine posts={p.posts} setup={p.setup} />}
                     {s.status === "open" && s.sent_back_by && s.sent_back_note && (
                       <p className="mt-1 text-[11.5px] text-red-800 [overflow-wrap:anywhere] dark:text-salmon">“{s.sent_back_note}”</p>
                     )}
@@ -571,11 +599,18 @@ export default function MyWork() {
             </div>
           )}
 
-          {/* H288: Awais's three ticks, right where he writes what he did. */}
-          {isSocial && p && (
-            <SocialTicks posts={p.posts} busy={busy} taskId={t.task_id} locked={p.status === "completed"}
-              onToggle={(pl, on) => tick(t, pl, on)} />
-          )}
+          {/* H288/H291: Awais's two tick blocks — Campaign setup, then Posted on.
+              Each has a Mark all. Posting is compulsory before he can submit. */}
+          {isSocial && p && (<>
+            <SocialTicks kind="setup" title="Campaign Setup"
+              hint="Tick each account once the campaign is set up on it." posts={p.setup} busy={busy}
+              taskId={t.task_id} locked={p.status === "completed"}
+              onToggle={(pl, on) => tick(t, pl, on, "setup")} onAll={(on) => tickAll(t, "setup", on)} />
+            <SocialTicks kind="posted" title="Posted On"
+              hint="Tick each one when the post is up — Qaswar sees these. All three are needed before you submit."
+              posts={p.posts} busy={busy} taskId={t.task_id} locked={p.status === "completed"}
+              onToggle={(pl, on) => tick(t, pl, on, "posted")} onAll={(on) => tickAll(t, "posted", on)} />
+          </>)}
 
           {t.waiting_for ? (
             /* THE CHECK IS VISIBLE, NOT YET ACTIONABLE.
@@ -631,8 +666,14 @@ export default function MyWork() {
             className="mt-3 min-h-[92px] w-full rounded-xl2 sm:min-h-0 border border-line bg-canvas px-3 py-2 text-[13px] text-ink outline-none placeholder:text-hint dark:border-white/10 dark:bg-white/[0.04] dark:text-[#f4f1ea]"
           />
 
+          {(() => {
+            /* H291: Awais must tick all three "Posted on" accounts before he can
+               submit. The button stays dead and says which are still missing. */
+            const need = isSocial && p ? PLATFORMS.filter((pl) => !p.posts[pl.key]).map((pl) => pl.name) : [];
+            const blocked = need.length > 0;
+            return (
           <div className="mt-2 flex flex-wrap items-center gap-2">
-            <button disabled={busy === t.task_id || !(note[t.task_id] ?? "").trim()}
+            <button disabled={busy === t.task_id || !(note[t.task_id] ?? "").trim() || blocked}
               onClick={() => act(t, "submit")}
               className="rounded-full bg-ink px-4 py-2 text-[12.5px] font-semibold text-white disabled:opacity-40 dark:bg-white dark:text-[#141414]">
               {busy === t.task_id ? "Saving…" : "Submit"}
@@ -647,11 +688,15 @@ export default function MyWork() {
             )}
 
             <span className="text-[11.5px] text-hint dark:text-[#8a8175]">
-              {t.stage === "qc"
+              {blocked
+                ? <b className="font-semibold text-[#7a4f12] dark:text-amber">Tick {need.join(", ")} under &ldquo;Posted on&rdquo; before you submit.</b>
+                : t.stage === "qc"
                 ? "Write what you checked, or what is wrong if you are sending it back."
                 : "Write what you did — it goes to the administration with your name on it."}
             </span>
           </div>
+            );
+          })()}
           </>)}
 
           {/* ARTICLE PROGRESS (H288) — the space at the bottom of every card:
@@ -709,8 +754,8 @@ export default function MyWork() {
                   )}
                 </div>
                 {ticksOnDone.has(t.task_id) && p && (
-                  <SocialTicks compact posts={p.posts} busy={busy} taskId={t.task_id} locked={false}
-                    onToggle={(pl, on) => tick(t, pl, on)} />
+                  <SocialTicks compact kind="posted" posts={p.posts} busy={busy} taskId={t.task_id} locked={false}
+                    onToggle={(pl, on) => tick(t, pl, on, "posted")} />
                 )}
               </li>
               );
@@ -867,22 +912,26 @@ function StepChip({ s }: { s: PStep }) {
   );
 }
 
-/* AWAIS'S TICKS (H288). Ticked or unticked, nothing more — each one is his
-   signature that the post is up on that platform, saved the moment he taps
-   it, with his name and the time. Closed once the article is Live. */
-function SocialTicks({ posts, busy, taskId, locked, compact, onToggle }: {
+/* AWAIS'S TICKS (H288 posted; H291 campaign setup). Each is his signature that
+   the account is set up / the post is up, saved the moment he taps it. A
+   "Mark all" ticks or unticks all three at once. Closed once the article is
+   Live. The compact form (recently submitted) has no header or Mark all. */
+function SocialTicks({ kind, title, hint, posts, busy, taskId, locked, compact, onToggle, onAll }: {
+  kind: TickKind; title?: string; hint?: string;
   posts: Posts; busy: string | null; taskId: string; locked: boolean; compact?: boolean;
-  onToggle: (platform: Platform, on: boolean) => void;
+  onToggle: (platform: Platform, on: boolean) => void; onAll?: (on: boolean) => void;
 }) {
+  const allOn = PLATFORMS.every((pl) => !!posts[pl.key]);
+  const allBusy = busy === `${taskId}:${kind}:all`;
   const buttons = (
-    <div className="flex flex-wrap gap-2" role="group" aria-label="Posted on">
+    <div className="flex flex-wrap gap-2" role="group" aria-label={title ?? "Posted on"}>
       {PLATFORMS.map((pl) => {
         const on = !!posts[pl.key];
-        const mine = busy === `${taskId}:${pl.key}`;
+        const mine = busy === `${taskId}:${kind}:${pl.key}`;
         return (
           <button key={pl.key} type="button" role="checkbox" aria-checked={on} disabled={!!busy || locked}
             onClick={() => onToggle(pl.key, !on)}
-            title={on ? `Ticked by ${posts[pl.key]?.by ?? "someone"} · ${stamp(posts[pl.key]?.at)}` : `Tick when the ${pl.name} post is up`}
+            title={on ? `Ticked by ${posts[pl.key]?.by ?? "someone"} · ${stamp(posts[pl.key]?.at)}` : `Tick ${pl.name}`}
             className={`inline-flex items-center gap-1.5 rounded-full border font-semibold transition disabled:opacity-50 ${compact
               ? "min-h-[36px] px-2.5 text-[11.5px] sm:min-h-0 sm:py-1" : "min-h-[40px] px-3 text-[12.5px] sm:min-h-0 sm:py-1.5"} ${on
               ? "border-[#2f7a3d]/40 bg-success-soft text-[#2f7a3d] dark:text-[#8fd39a] dark:border-[#8fd39a]/40 dark:bg-white/[0.10]"
@@ -895,15 +944,25 @@ function SocialTicks({ posts, busy, taskId, locked, compact, onToggle }: {
           </button>
         );
       })}
+      {/* Mark all — ticks all three, or clears them if they are all on. */}
+      {onAll && !compact && (
+        <button type="button" disabled={!!busy || locked} onClick={() => onAll(!allOn)}
+          className={`inline-flex min-h-[40px] items-center gap-1.5 rounded-full border border-dashed px-3 text-[12.5px] font-semibold transition disabled:opacity-50 sm:min-h-0 sm:py-1.5 ${
+            allOn ? "border-line text-muted hover:bg-panel dark:border-white/15 dark:text-[#a89f93]"
+                  : "border-ink/40 text-ink hover:bg-panel dark:border-white/30 dark:text-white dark:hover:bg-white/[0.06]"}`}>
+          {allBusy ? <Loader2 size={13} className="shrink-0 animate-spin" /> : <CheckSquare size={13} className="shrink-0" />}
+          {allOn ? "Clear all" : "Mark all"}
+        </button>
+      )}
     </div>
   );
   if (compact) return <div className="mt-1.5 pl-5">{buttons}</div>;
   return (
     <div className="mt-3 rounded-xl2 border border-line px-3 py-2.5 dark:border-white/10">
       <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
-        <span className="text-[12px] font-bold text-ink dark:text-[#f4f1ea]">Posted On</span>
+        <span className="text-[12px] font-bold text-ink dark:text-[#f4f1ea]">{title ?? "Posted On"}</span>
         <span className="text-[11.5px] text-hint dark:text-[#8a8175]">
-          {locked ? "The article is live — the ticks are closed." : "Tick each one when the post is up — Qaswar sees these on his card."}
+          {locked ? "The article is live — the ticks are closed." : hint}
         </span>
       </div>
       {buttons}
@@ -911,25 +970,32 @@ function SocialTicks({ posts, busy, taskId, locked, compact, onToggle }: {
   );
 }
 
-/* What Awais ticked, read-only — on the Social row of Qaswar's checkpoints. */
-function PostsLine({ posts }: { posts: Posts }) {
-  return (
-    <ul className="mt-1.5 flex flex-wrap gap-1.5" aria-label="Posted on">
+/* What Awais ticked, read-only — on the Social row of Qaswar's checkpoints:
+   campaign setup and posted, each account. */
+function PostsLine({ posts, setup }: { posts: Posts; setup?: Posts }) {
+  const line = (label: string, map: Posts) => (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <span className="text-[10.5px] font-bold uppercase tracking-wide text-hint dark:text-[#8a8175]">{label}</span>
       {PLATFORMS.map((pl) => {
-        const p = posts[pl.key];
+        const p = map[pl.key];
         return (
-          <li key={pl.key} title={p ? `Ticked by ${p.by ?? "someone"} · ${stamp(p.at)}` : "Not ticked yet"}
+          <span key={pl.key} title={p ? `Ticked by ${p.by ?? "someone"} · ${stamp(p.at)}` : "Not ticked yet"}
             className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold ${p
               ? "bg-success-soft text-[#2f7a3d] dark:text-[#8fd39a] dark:bg-white/[0.10]"
               : "bg-panel text-muted dark:bg-white/[0.05] dark:text-[#8a8175]"}`}>
             {p ? <CheckSquare size={11} className="shrink-0" />
               : <span aria-hidden className="h-[10px] w-[10px] shrink-0 rounded-[2px] border-[1.5px] border-current" />}
             {pl.name}
-            <span className="sr-only">{p ? " — posted" : " — not ticked yet"}</span>
-          </li>
+          </span>
         );
       })}
-    </ul>
+    </div>
+  );
+  return (
+    <div className="mt-1.5 space-y-1">
+      {setup && line("Setup", setup)}
+      {line("Posted", posts)}
+    </div>
   );
 }
 
