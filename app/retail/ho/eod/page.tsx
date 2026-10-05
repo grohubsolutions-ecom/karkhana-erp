@@ -43,7 +43,7 @@ import { Banknote, Coins, Scale, Save, CalendarDays } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { btnPrimary } from "@/components/Modal";
 import {
-  Shell, PageHeader, StatCards, DataTable, Pill, Diff, PreviewNote, SourceNote,
+  Shell, PageHeader, StatCards, DataTable, Pill, Diff, PreviewNote, SourceNote, RowCard,
   money, num, text, today, fetchAll, type Col,
 } from "@/components/retail/kit";
 
@@ -154,10 +154,17 @@ export default function EndOfDayPage() {
     setLoading(true); setErr(""); setSavedAt("");
 
     /* The whole ledger up to the chosen day, paged. A `.limit()` here would cap
-       the sum silently and expected would drift low for ever after. */
+       the sum silently and expected would drift low for ever after.
+
+       `flow_date` alone is not enough to page on: a day with several entries is
+       a tie, and paging is LIMIT/OFFSET over separate requests, so Postgres may
+       hand back one of those tied rows on two pages and another on none. Every
+       figure on this screen is a sum of these rows, so a duplicate reads as cash
+       that was never there and a dropped row as cash that has gone missing.
+       `id` is unique and goes last, so the day order on screen is unchanged. */
     const ledgerP = fetchAll<Flow>((lo, hi) =>
       supabase!.from("retail_ho_cashflow").select("flow_date,direction,amount")
-        .lte("flow_date", date).order("flow_date").range(lo, hi));
+        .lte("flow_date", date).order("flow_date").order("id").range(lo, hi));
 
     /* Ask for updated_at; fall back once if this database does not have it, and
        remember, so Refresh does not keep firing a request that cannot succeed. */
@@ -280,20 +287,43 @@ export default function EndOfDayPage() {
             {carried.on} closed {money(Math.abs(carried.diff))} {carried.diff < 0 ? "short" : "over"} — that difference is still inside this one.
           </span>
         )}
-        <span className="ml-auto text-[12px] text-hint dark:text-[#8a8175]">
+        {/* Pushed right on a computer, its own line on a phone — `ml-auto` in a
+            wrapped row leaves it hanging off the right edge of a line of its
+            own, which reads as a stray fragment. */}
+        <span className="ml-auto text-[12px] text-hint dark:text-[#8a8175] max-md:ml-0 max-md:w-full">
           {savedAt ? `${hasUpdatedAt ? "Last saved" : "First saved"} ${savedAt}` : "Not saved yet"}
         </span>
       </div>
 
-      <div className="mt-4 grid gap-3 md:grid-cols-2">
-        <Grid title="Notes" list={NOTE_GROUP} />
-        <Grid title="Coins" list={COIN_GROUP} />
+      {/* A DENOMINATION COUNT STAYS A GRID. It is a column of denominations
+          against a column of counts, and ten cards you scroll through is a worse
+          way to add up a drawer than ten short rows. `rt-scroll-x` means that if
+          a row ever outgrows 390px it scrolls inside this box instead of dragging
+          the whole page sideways; the rule lives in a phone-only media query in
+          retail-mobile.css, so nothing about it reaches 1024px.
+          Every count input carries inputMode="numeric" — see Grid below; there is
+          one input in one place, which is also why the Rs 10 double-count cannot
+          come back. */}
+      <div className="rt-scroll-x mt-4">
+        <div className="grid gap-3 md:grid-cols-2">
+          <Grid title="Notes" list={NOTE_GROUP} />
+          <Grid title="Coins" list={COIN_GROUP} />
+        </div>
       </div>
 
       <div className="mt-3">
         <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Note — anything that explains a difference"
           className="w-full rounded-card border border-line bg-surface px-4 py-3 text-[13px] text-ink outline-none transition focus:border-ink/30 dark:border-white/[0.06] dark:bg-[#201c17] dark:text-white" />
       </div>
+
+      {/* SAVE, AGAIN, AT THE BOTTOM — phone only. By the time the last coin is
+          keyed in, the header's Save button is two screens up, and a count that
+          is finished but not saved is a count somebody re-does tomorrow. Same
+          handler and same disabled state as the one above: one way to save, two
+          places to reach it. */}
+      <button onClick={save} disabled={saving} className={`${btnPrimary} mt-3 w-full md:hidden`}>
+        <Save size={15} /> {saving ? "Saving…" : "Save count"}
+      </button>
 
       {err && <p className="mt-3 text-[12.5px] font-semibold text-danger">Couldn&apos;t save: {err}</p>}
 
@@ -306,8 +336,27 @@ export default function EndOfDayPage() {
       </SourceNote>
 
       <h3 className="mt-8 text-[14px] font-bold text-ink dark:text-[#f4f1ea]">Cash history</h3>
+      {/* THE CARD IS SPELLED OUT HERE because the automatic one got it backwards.
+          No column in this table is both right-aligned and bold, so the kit falls
+          back to the LAST right-aligned column as the card's big figure — and
+          that column is the View BUTTON. The cash counted was demoted to a
+          labelled pair and a button was printed where the money should be. On a
+          phone the whole card is the View control instead — tap a day to load it
+          — which gives the money its slot back and lets the day you are already
+          looking at say so rather than offering to open itself. */}
       <DataTable cols={histCols} rows={history} loading={loading} minWidth={420}
-        empty="No cash counts saved yet." />
+        empty="No cash counts saved yet."
+        card={(r) => {
+          const viewing = String(r.count_date) === date;
+          return (
+            <RowCard
+              title={text(r.count_date)}
+              right={money(r.total)}
+              pills={viewing ? <Pill tone="info">Viewing</Pill> : undefined}
+              onTap={viewing ? undefined : () => { setDate(String(r.count_date)); window.scrollTo({ top: 0, behavior: "smooth" }); }}
+            />
+          );
+        }} />
       <p className="mt-2 text-[12px] text-hint dark:text-[#8a8175]">
         The last {history.length.toLocaleString()} counts. These are balances, not takings — they are
         deliberately not added up, because adding a Monday safe to a Tuesday safe counts the same

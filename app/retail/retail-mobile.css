@@ -1,0 +1,140 @@
+/* FS TRADERS — PHONE RULES ONLY.
+ *
+ * Every rule is under `html.retail` AND a phone media query. The class is added
+ * by app/retail/layout.tsx on mount and removed on unmount, so none of this can
+ * reach Karkhana, the Hub, or the login page — and nothing here is in
+ * globals.css, which every department shares.
+ *
+ * Mirrors app/online/hub-mobile.css. Separate file, same reasoning.
+ */
+
+/* ── 0. THE LANDSCAPE BAND ────────────────────────────────────────────────
+   Everything below 768px is the phone layout. But a phone held SIDEWAYS is
+   768–1023px, where the layout is the computer's — and iOS still zooms on a
+   13px input there, and a 24px button is still 24px under a thumb. Measured at
+   900px: 144 inputs under 16px and 592 targets under 40px.
+
+   So the two rules that are about the DEVICE rather than the layout — the input
+   font size and the minimum tap target — run all the way to 1023.98px, and
+   everything that is about the phone LAYOUT stays below 768px. 1024px and up is
+   the computer and is untouched, which is the whole rule. */
+@media (min-width: 768px) and (max-width: 1023.98px) {
+  html.retail input,
+  html.retail select,
+  html.retail textarea {
+    font-size: 16px !important;
+  }
+  html.retail button:not(.rt-tight):not([class*="min-h-"]),
+  html.retail a.rounded-full:not([class*="min-h-"]) {
+    min-height: 40px;
+  }
+  html.retail button[aria-label]:not(.rt-tight):not([class*="min-w-"]) {
+    min-width: 40px;
+  }
+  html.retail {
+    touch-action: manipulation;
+  }
+}
+
+@media (max-width: 767.98px) {
+
+  /* ── 1. iOS ZOOMS ON ANY INPUT UNDER 16px ──────────────────────────────
+     Not "sometimes". Focus a 13px input on an iPhone and Safari scales the
+     whole page to make it readable, which leaves every other tap target
+     somewhere other than where it looks. The FS screens were built at
+     12.5–13px throughout, so this one rule removes the single worst phone
+     bug on the department.
+
+     16px EXACTLY, not larger: bigger text reflows the forms. */
+  html.retail input,
+  html.retail select,
+  html.retail textarea {
+    font-size: 16px !important;
+  }
+
+  /* ── 2. NOTHING SCROLLS SIDEWAYS ───────────────────────────────────────
+     `clip` not `hidden`: `hidden` on a container makes it a scroll port, which
+     breaks `position: sticky` on the table headers inside it. */
+  html.retail body,
+  html.retail .rt-clip {
+    overflow-x: clip;
+  }
+
+  /* ── 3. TAP TARGETS ────────────────────────────────────────────────────
+     Apple's floor is 44px; 40 is the smallest that is reliably hittable with
+     a thumb on a moving bus, which is where these screens get used. Dialog
+     buttons get the full 44 because a mis-tap there writes something. */
+  /* `:not([class*="min-h-"])` is not decoration — it is the whole point.
+     This selector is (0,3,2); Tailwind's `.min-h-[44px]` is (0,1,0). Without the
+     guard this rule WINS, so a button that had deliberately asked for 44px was
+     being pushed back DOWN to 40 — measured on 56 buttons across the employee
+     cards and 14 on repayments. A floor that lowers things is not a floor. */
+  html.retail .rt-clip button.rounded-full:not([class*="min-h-"]),
+  html.retail .rt-clip a.rounded-full:not([class*="min-h-"]) {
+    min-height: 40px;
+  }
+  /* An icon-only round button needs width too, or it is a 40×24 sliver. */
+  html.retail .rt-clip button.rounded-full[aria-label]:not([class*="min-w-"]),
+  html.retail .rt-clip button.rounded-full[title]:not([class*="min-w-"]) {
+    min-width: 40px;
+  }
+  html.retail .fixed.inset-0 button:not(.rt-tight):not([class*="min-h-"]) {
+    min-height: 44px;
+  }
+  /* A dialog's close button is square and icon-only, so height alone leaves a
+     40×44 sliver — and the one in the More sheet measured 34×34, the smallest
+     target in the whole phone chrome. Width too. */
+  html.retail .fixed.inset-0 button[aria-label]:not([class*="min-w-"]) {
+    min-width: 44px;
+  }
+
+  /* No grey flash on tap, and no 300ms wait before the tap registers. */
+  html.retail .rt-clip,
+  html.retail .fixed.inset-0 {
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+  }
+
+  /* ── 4. A DIALOG LOCKS THE PAGE BEHIND IT ──────────────────────────────
+     Without this the page scrolls under an open sheet, so dismissing it
+     returns you somewhere other than where you were. `:has()` means no
+     JavaScript has to remember to add and remove a class — a class that gets
+     left behind freezes the whole app. */
+  html.retail:has(.fixed.inset-0) {
+    overflow: hidden;
+  }
+  html.retail .fixed.inset-0 {
+    overscroll-behavior: contain;
+  }
+
+  /* ── 5. ROOM FOR THE TAB BAR ───────────────────────────────────────────
+     The bar is fixed at the bottom, so the last row of every list would sit
+     under it. 60px of bar plus whatever the phone's home indicator needs. */
+  html.retail .rt-page {
+    padding-bottom: calc(76px + env(safe-area-inset-bottom));
+  }
+
+  /* While a field is focused the keyboard is up and the bar is both useless
+     and in the way. */
+  html.retail:has(input:focus, textarea:focus, select:focus) .rt-tabbar {
+    display: none;
+  }
+
+  /* ── 6. TABLES THAT SURVIVED AS TABLES ─────────────────────────────────
+     Most lists become cards on a phone. The few that stay tables — a
+     denomination count, a month grid — scroll inside their own box rather
+     than dragging the page sideways, and their first column stays put so the
+     row can still be identified. */
+  html.retail .rt-scroll-x {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
+  }
+}
+
+/* ── PRINT ────────────────────────────────────────────────────────────────
+   Salary slips and the day book print from a portal at body level. Chrome on
+   Android prints the tab bar over the sheet otherwise. */
+@media print {
+  html.retail .rt-tabbar, html.retail .rt-topbar { display: none !important; }
+}

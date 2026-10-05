@@ -56,7 +56,8 @@ import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import Modal, { Field, inputCls, btnPrimary, btnGhost } from "@/components/Modal";
 import {
   Shell, PageHeader, StatCards, DataTable, Tabs, Pill, Select, PreviewNote, SourceNote,
-  money, num, text, today, iso, fetchAll, commBonus,
+  money, num, text, today, addDays, fetchAll, commBonus,
+  useIsPhone, RowCard,
   type CommCfg, type Row, type Col,
 } from "@/components/retail/kit";
 
@@ -84,14 +85,28 @@ type Rec = { no: string; short: number; pp: number; total: number; codes: string
 
 /* ── small local helpers ─────────────────────────────────────────────────── */
 
-/** Next calendar day. Parsed as UTC and formatted as UTC so the two agree —
- *  a local-midnight parse formatted back through toISOString() lands on the
- *  previous day everywhere east of Greenwich, which in Karachi silently drops
- *  a day off every range. */
-const addDays = (ds: string, n: number) => iso(new Date(Date.parse(ds + "T00:00:00Z") + n * 86400000));
+/* Next calendar day now comes from the kit's `addDays`, which does the whole
+   thing from the string's own parts — Date.UTC in, getUTC* out, no local
+   midnight ever formed. The version that used to live here parsed as UTC and
+   formatted as UTC so the two agreed, which was right only as long as `iso()`
+   was also UTC. `iso()` is now the local calendar day (it had been reporting
+   yesterday between midnight and 5am in Karachi), so this had to stop depending
+   on it. Same result in Pakistan, and now the same result everywhere. */
 /** Grid cells are dense; "Rs" in every one of them is noise. Totals keep it. */
 const n0 = (v: number) => Math.round(v).toLocaleString("en-PK");
 const dayLabel = (ds: string) => `${ds.slice(8, 10)}/${ds.slice(5, 7)}`;
+/** A grid column is 108px wide, so a day there is "05/10". A phone card has the
+ *  whole screen, and somebody checking their own shop's money reads a weekday.
+ *  Parsed AND formatted in UTC so the two agree: a date string has no
+ *  timezone, so reading it as UTC and printing it as UTC is the only pair that
+ *  cannot name a different day than the string does. */
+const dayFull = (ds: string) => new Date(ds + "T00:00:00Z")
+  .toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", timeZone: "UTC" });
+
+/** Which shop a phone was last looking at. A COLUMN CHOICE, not a figure —
+ *  nothing that carries money goes near storage, and if it comes back empty or
+ *  blocked the first shop is used instead. */
+const PHONE_BRANCH_KEY = "fs.commissions.phoneBranch";
 
 /** A typo'd year ("2026" → "2016") would otherwise ask the database for a
  *  decade of sale lines and the browser for 3,600 table rows. */
@@ -119,6 +134,7 @@ type DhaForm = { isEdit: boolean; item_code: string; commission: string };
 /* ── page ────────────────────────────────────────────────────────────────── */
 
 export default function CommissionsPage() {
+  const phone = useIsPhone();
   const [tab, setTab] = useState<Tab>("grid");
   const [loading, setLoading] = useState(true);
   const [refLoading, setRefLoading] = useState(true);
@@ -136,6 +152,16 @@ export default function CommissionsPage() {
   const [to, setTo] = useState(t0);
   const [chainFilter, setChainFilter] = useState("");
   const [lines, setLines] = useState<Row[]>([]);
+  /* Reads storage in the initialiser, inside a try, so a private window or
+     blocked site data just starts on the first shop. Only ever rendered under
+     `phone`, which is false on the server, so there is nothing to mismatch. */
+  const [phoneBid, setPhoneBid] = useState<string>(() => {
+    try { return localStorage.getItem(PHONE_BRANCH_KEY) ?? ""; } catch { return ""; }
+  });
+  const pickPhoneBranch = (v: string) => {
+    setPhoneBid(v);
+    try { localStorage.setItem(PHONE_BRANCH_KEY, v); } catch { /* the pick just won't stick */ }
+  };
 
   /* drill-down */
   const [drill, setDrill] = useState<{ bid: number; ds: string; name: string } | null>(null);
@@ -183,7 +209,12 @@ export default function CommissionsPage() {
     ]);
     /* Both rate sheets are paged. An un-paged master stops at row 1000 and
        every item past it silently earns nothing — the failure looks exactly
-       like "that article has no commission set". */
+       like "that article has no commission set".
+
+       These two need no `id` tiebreak and must not be given one: `item_code` is
+       the PRIMARY KEY of both tables — there is no `id` column to order by — so
+       `.order("item_code")` is already a unique total order and the pages cannot
+       repeat or skip a row. */
     const [m, f] = await Promise.all([
       fetchAll<Master>((lo, hi) => db.from("retail_commission_master")
         .select("item_code,item_name,retail_price,commission,percentage").order("item_code").range(lo, hi)),
@@ -217,9 +248,20 @@ export default function CommissionsPage() {
     if (!hasDays) { setLines([]); setLoading(false); return; }
     setLoading(true); setErr("");
     const db = supabase;
+    /* ORDERED BY id, AND THAT IS NOT COSMETIC — IT IS THE PAYOUT.
+       fetchAll pages with .range(), which is LIMIT/OFFSET: each page is a
+       separate request. Postgres guarantees nothing about the order of rows
+       between two such requests unless the query names a total order, so with no
+       ORDER BY at all a row could arrive on page 3 and again on page 4, or fall
+       between the two and never arrive — and retail_sale_lines is appended to by
+       imports while somebody is reading it, which is exactly when offsets shift.
+       These lines ARE staff commission: a repeated line overpays somebody, a
+       skipped line underpays them, and both look like a plausible number on a
+       payout sheet. `id` is unique, so ordering on it makes the sequence of
+       pages one stable list. */
     const { rows, error } = await fetchAll<Row>((lo, hi) => db.from("retail_sale_lines")
       .select("branch_id,sale_date,item_code,quantity,sales_amount,receipt_txn")
-      .gte("sale_date", from).lte("sale_date", qTo).range(lo, hi));
+      .gte("sale_date", from).lte("sale_date", qTo).order("id").range(lo, hi));
     if (error) setErr(error);
     setLines(rows);
     setLoading(false);
@@ -319,6 +361,29 @@ export default function CommissionsPage() {
       .filter((blk) => blk.brs.length > 0);
   }, [chains, chainFilter, shownBranches, days, cell]);
 
+  /* ── ONE COLUMN OF THE GRID, FOR A PHONE ───────────────────────────────
+   * The grid is days down and branches across: with nine shops it is 1,162px
+   * wide, and a phone is 390. A matrix cannot be flattened into a list without
+   * losing the thing it is for, so a phone shows ONE SHOP at a time and lays
+   * its days out as cards instead.
+   *
+   * It is read straight off `blocks` — the same rows, the same `vals[i]`, the
+   * same `colTot[i]` the computer grid draws — so the figure a shop reads on a
+   * phone cannot differ from the figure head office reads at a desk. Nothing
+   * about the payout is recalculated here.
+   */
+  const phoneBranches = useMemo(() => blocks.flatMap((blk) => blk.brs), [blocks]);
+  const phoneSel = phoneBranches.some((b) => String(b.id) === phoneBid)
+    ? phoneBid
+    : (phoneBranches[0] ? String(phoneBranches[0].id) : "");
+  const phoneCol = useMemo(() => {
+    for (const blk of blocks) {
+      const i = blk.brs.findIndex((b) => String(b.id) === phoneSel);
+      if (i >= 0) return { chain: blk.chain, br: blk.brs[i], rows: blk.rows, i, total: blk.colTot[i] };
+    }
+    return null;
+  }, [blocks, phoneSel]);
+
   /* Tiles sum the raw pp/bonus, as the original does, so Per-piece + Bonus is
      exactly Total. The grid rounds each cell, so the two can differ by a rupee
      or two over a long range. The cell is the payout; the tile is the summary. */
@@ -346,9 +411,13 @@ export default function CommissionsPage() {
       if (!isSupabaseConfigured || !supabase) { setDrillRows([]); return; }
       const db = supabase;
       setDrillRows(null);
+      /* Ordered on id for the same reason as the grid read above. One shop and
+         one day is rarely more than a page, so this one is unlikely to be bitten
+         — but "unlikely" is not a property of a paged read, and the figure this
+         drill-down shows is the one somebody checks a payout against. */
       const { rows, error } = await fetchAll<Row>((lo, hi) => db.from("retail_sale_lines")
         .select("receipt_no,receipt_txn,item_code,quantity,sales_amount")
-        .eq("branch_id", drill.bid).eq("sale_date", drill.ds).range(lo, hi));
+        .eq("branch_id", drill.bid).eq("sale_date", drill.ds).order("id").range(lo, hi));
       if (!live) return;
       if (error) { setErr(error); setDrillRows([]); return; }
 
@@ -496,27 +565,41 @@ export default function CommissionsPage() {
 
   /* ── columns ───────────────────────────────────────────────────────────── */
 
+  /* The editors, as functions rather than inline handlers, because on a phone
+     the whole card opens them and on a computer the pencil does — one place to
+     read, so the two cannot drift apart. */
+  const editRate = (r: Master) => setRateForm({
+    isEdit: true, item_code: String(r.item_code), item_name: String(r.item_name ?? ""),
+    retail_price: String(r.retail_price ?? ""), commission: String(r.commission ?? ""),
+    percentage: String(r.percentage ?? 5),
+  });
+  const editDha = (r: FcRate) => setDhaForm({
+    isEdit: true, item_code: String(r.item_code), commission: String(r.commission ?? ""),
+  });
+
   const rateCols: Col<Master>[] = [
     { head: "Item code", bold: true, cell: (r) => r.item_code },
     { head: "Name", muted: true, cell: (r) => text(r.item_name) },
     { head: "Retail price", right: true, cell: (r) => money(r.retail_price) },
     { head: "%", right: true, bold: true, cell: (r) => `${num(r.percentage)}%` },
-    { head: "Earns / piece", right: true, cell: (r) => money(num(r.retail_price) * (num(r.percentage) / 100)) },
+    /* The big figure on a phone card is what the item PAYS, not its percentage:
+       the percentage is how the payout is worked out, "Earns / piece" is the
+       payout, and that is what somebody checks a rate sheet for. */
+    { head: "Earns / piece", right: true, phone: "lead", cell: (r) => money(num(r.retail_price) * (num(r.percentage) / 100)) },
     { head: "Comm. column", right: true, muted: true, cell: (r) => <span title="Reference only — never used in a payout">{money(r.commission)}</span> },
-    { head: "", right: true, cell: (r) => (
-        <button onClick={() => setRateForm({
-          isEdit: true, item_code: String(r.item_code), item_name: String(r.item_name ?? ""),
-          retail_price: String(r.retail_price ?? ""), commission: String(r.commission ?? ""),
-          percentage: String(r.percentage ?? 5),
-        })} className="rounded-full p-1.5 text-muted transition hover:bg-panel hover:text-ink dark:text-[#a89f93] dark:hover:bg-white/[0.06] dark:hover:text-white" aria-label="Edit"><Pencil size={14} /></button>
+    /* Hidden on a phone, where tapping the card itself opens the editor — a
+       pencil in the card's figure slot reads as the row's value. */
+    { head: "", right: true, phone: "hide", cell: (r) => (
+        <button onClick={() => editRate(r)}
+          className="rounded-full p-1.5 text-muted transition hover:bg-panel hover:text-ink dark:text-[#a89f93] dark:hover:bg-white/[0.06] dark:hover:text-white" aria-label="Edit"><Pencil size={14} /></button>
       ) },
   ];
 
   const fcCols: Col<FcRate>[] = [
     { head: "Barcode", bold: true, cell: (r) => r.item_code },
     { head: "Commission per piece", right: true, cell: (r) => money(r.commission) },
-    { head: "", right: true, cell: (r) => (
-        <button onClick={() => setDhaForm({ isEdit: true, item_code: String(r.item_code), commission: String(r.commission ?? "") })}
+    { head: "", right: true, phone: "hide", cell: (r) => (
+        <button onClick={() => editDha(r)}
           className="rounded-full p-1.5 text-muted transition hover:bg-panel hover:text-ink dark:text-[#a89f93] dark:hover:bg-white/[0.06] dark:hover:text-white" aria-label="Edit"><Pencil size={14} /></button>
       ) },
   ];
@@ -574,15 +657,24 @@ export default function CommissionsPage() {
       {/* ══ THE GRID ══════════════════════════════════════════════════════ */}
       {tab === "grid" && (
         <>
+          {/* Each label and its date input are one group, so on a phone the pair
+              takes a full row and the input fills it. Two 16px date fields side
+              by side at 390px is a field you cannot read the year in. At 1024px
+              and up the groups sit in the same flex row with the same 8px gap,
+              so the row is unchanged. */}
           <div className="mt-5 flex flex-wrap items-center gap-2">
-            <span className="text-[12.5px] font-semibold text-muted dark:text-[#a89f93]">From</span>
-            <input type="date" value={from} max={t0} onChange={(e) => setFrom(e.target.value)} className={pillCls} />
-            <span className="text-[12.5px] font-semibold text-muted dark:text-[#a89f93]">To</span>
-            {/* Clamped to today: a range ending in the future adds empty rows
-                and invites somebody to read them as "no commission earned". */}
-            <input type="date" value={dTo} max={t0} onChange={(e) => setTo(e.target.value)} className={pillCls} />
+            <div className="flex items-center gap-2 max-md:w-full">
+              <span className="text-[12.5px] font-semibold text-muted dark:text-[#a89f93]">From</span>
+              <input type="date" value={from} max={t0} onChange={(e) => setFrom(e.target.value)} className={`${pillCls} max-md:flex-1`} />
+            </div>
+            <div className="flex items-center gap-2 max-md:w-full">
+              <span className="text-[12.5px] font-semibold text-muted dark:text-[#a89f93]">To</span>
+              {/* Clamped to today: a range ending in the future adds empty rows
+                  and invites somebody to read them as "no commission earned". */}
+              <input type="date" value={dTo} max={t0} onChange={(e) => setTo(e.target.value)} className={`${pillCls} max-md:flex-1`} />
+            </div>
             {chains.length > 1 && (
-              <Select value={chainFilter} onChange={setChainFilter} className="ml-auto">
+              <Select value={chainFilter} onChange={setChainFilter} className="ml-auto max-md:ml-0 max-md:w-full">
                 <option value="">All chains</option>
                 {chains.map((c) => <option key={c} value={c}>{c}</option>)}
               </Select>
@@ -608,7 +700,71 @@ export default function CommissionsPage() {
             </div>
           )}
 
-          {blocks.map((blk) => {
+          {/* ── THE PHONE VIEW: ONE SHOP, ITS DAYS AS CARDS ───────────────
+              The shop is picked from a native select (grouped by chain, so six
+              Top Shop branches and two FC shops stay told apart), and every
+              figure comes off the same `blocks` the matrix below draws.
+
+              Per-piece and bonus are printed under each day because a phone card
+              has room for them and the grid cell never did — which is the one
+              question a shop actually asks about a commission figure, after the
+              bonus spent a release reading zero. Tapping a day still opens the
+              receipt-by-receipt audit trail. */}
+          {phone ? (
+            <>
+              {phoneBranches.length > 1 && (
+                <select value={phoneSel} onChange={(e) => pickPhoneBranch(e.target.value)} aria-label="Shop"
+                  className="mt-4 w-full rounded-xl2 border border-line bg-surface px-3.5 py-3 font-semibold text-ink dark:border-white/10 dark:bg-white/[0.06] dark:text-white">
+                  {blocks.map((blk) => (
+                    <optgroup key={blk.chain} label={blk.chain}>
+                      {blk.brs.map((b) => <option key={b.id} value={String(b.id)}>{shortName(b.name, b.chain)}</option>)}
+                    </optgroup>
+                  ))}
+                </select>
+              )}
+
+              {phoneCol && (
+                <>
+                  <div className="mt-3 rounded-card border border-line bg-surface p-4 dark:border-white/[0.06] dark:bg-[#201c17]">
+                    <div className="text-[12px] font-medium text-muted dark:text-[#a89f93]">{phoneCol.br.name} · {phoneCol.chain}</div>
+                    <div className="mt-1 text-[24px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">{money(phoneCol.total)}</div>
+                    <div className="mt-0.5 text-[12px] text-hint dark:text-[#8a8175]">
+                      {from} to {qTo} · {days.length} day{days.length === 1 ? "" : "s"}
+                    </div>
+                  </div>
+
+                  {loading ? (
+                    <div className="mt-3 space-y-2">
+                      {Array.from({ length: 6 }).map((_, i) => <div key={i} className="h-[66px] animate-pulse rounded-card bg-panel/70 dark:bg-white/[0.05]" />)}
+                    </div>
+                  ) : phoneCol.rows.length === 0 ? (
+                    <p className="mt-3 rounded-card border border-line bg-surface p-8 text-center text-[13px] text-muted dark:border-white/[0.06] dark:bg-[#201c17] dark:text-[#a89f93]">
+                      Pick a date range to see the days.
+                    </p>
+                  ) : (
+                    <div className="mt-3 space-y-2">
+                      {phoneCol.rows.map((r) => {
+                        const v = r.vals[phoneCol.i];
+                        const c = cell[`${phoneCol.br.id}|${r.ds}`];
+                        return (
+                          <RowCard key={r.ds}
+                            title={dayFull(r.ds)}
+                            meta={c && (c.pp || c.bonus)
+                              ? <>Per-piece {money(c.pp)} · bonus {money(c.bonus)}</>
+                              : undefined}
+                            right={<span className={v < 0 ? "text-danger" : undefined}>{money(v)}</span>}
+                            /* Tappable only when there is something behind it —
+                               the same test the grid uses to make a cell a button. */
+                            onTap={v ? () => setDrill({ bid: phoneCol.br.id, ds: r.ds, name: phoneCol.br.name }) : undefined}
+                          />
+                        );
+                      })}
+                    </div>
+                  )}
+                </>
+              )}
+            </>
+          ) : blocks.map((blk) => {
             const cols: Col<DayRow>[] = [
               { head: "Date", muted: true, cell: (r) => dayLabel(r.ds) },
               ...blk.brs.map((b, i): Col<DayRow> => ({
@@ -672,14 +828,17 @@ export default function CommissionsPage() {
             <div className="text-[12.5px] text-muted dark:text-[#a89f93]">
               {master.length.toLocaleString()} items{q && ` · ${filteredMaster.length.toLocaleString()} matching`}
             </div>
-            <div className="flex items-center gap-2 rounded-full border border-line bg-surface px-3.5 py-2 dark:border-white/10 dark:bg-white/[0.05]">
-              <Search size={15} className="text-hint dark:text-[#8a8175]" />
+            {/* Full width on a phone: a 192px field inside a 358px row leaves a
+                dead strip you keep tapping by mistake. */}
+            <div className="flex items-center gap-2 rounded-full border border-line bg-surface px-3.5 py-2 max-md:w-full dark:border-white/10 dark:bg-white/[0.05]">
+              <Search size={15} className="flex-none text-hint dark:text-[#8a8175]" />
               <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search code or name"
-                className="w-48 bg-transparent text-[13px] outline-none placeholder:text-hint dark:text-[#f4f1ea] dark:placeholder:text-[#6f675c]" />
+                className="w-48 bg-transparent text-[13px] outline-none placeholder:text-hint max-md:w-full max-md:flex-1 dark:text-[#f4f1ea] dark:placeholder:text-[#6f675c]" />
             </div>
           </div>
           <DataTable cols={rateCols} rows={filteredMaster.slice(0, 600)} loading={refLoading} minWidth={880}
-            empty="No item rates yet — add one, or import a Commission Master CSV." />
+            empty="No item rates yet — add one, or import a Commission Master CSV."
+            onRowTap={editRate} />
           {filteredMaster.length > 600 && (
             <p className="mt-2 text-[12px] text-hint dark:text-[#8a8175]">
               Showing the first 600 of {filteredMaster.length.toLocaleString()} — search for a specific code.
@@ -704,10 +863,10 @@ export default function CommissionsPage() {
                 : <Pill tone="bad">no DHA branch found</Pill>}
               {dhaMatches.length > 1 && <Pill tone="warn">{dhaMatches.length} branches match &ldquo;DHA&rdquo;</Pill>}
             </div>
-            <div className="flex items-center gap-2 rounded-full border border-line bg-surface px-3.5 py-2 dark:border-white/10 dark:bg-white/[0.05]">
-              <Search size={15} className="text-hint dark:text-[#8a8175]" />
+            <div className="flex items-center gap-2 rounded-full border border-line bg-surface px-3.5 py-2 max-md:w-full dark:border-white/10 dark:bg-white/[0.05]">
+              <Search size={15} className="flex-none text-hint dark:text-[#8a8175]" />
               <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search barcode"
-                className="w-48 bg-transparent text-[13px] outline-none placeholder:text-hint dark:text-[#f4f1ea] dark:placeholder:text-[#6f675c]" />
+                className="w-48 bg-transparent text-[13px] outline-none placeholder:text-hint max-md:w-full max-md:flex-1 dark:text-[#f4f1ea] dark:placeholder:text-[#6f675c]" />
             </div>
           </div>
 
@@ -721,12 +880,13 @@ export default function CommissionsPage() {
                 <strong>{stale.length}</strong> barcode{stale.length > 1 ? "s have" : " has"} earned no commission at{" "}
                 {dhaBranch?.name ?? "FC DHA"} in the last 3 months.
               </p>
-              <button onClick={() => { setStaleSel([]); setStaleOpen(true); }} className={btnGhost}>Review &amp; clean up</button>
+              <button onClick={() => { setStaleSel([]); setStaleOpen(true); }} className={`${btnGhost} max-md:w-full`}>Review &amp; clean up</button>
             </div>
           )}
 
           <DataTable cols={fcCols} rows={filteredFc.slice(0, 600)} loading={refLoading} minWidth={560}
-            empty="No FC DHA barcodes yet — add one, or import the DHA rate sheet." />
+            empty="No FC DHA barcodes yet — add one, or import the DHA rate sheet."
+            onRowTap={editDha} />
           {filteredFc.length > 600 && (
             <p className="mt-2 text-[12px] text-hint dark:text-[#8a8175]">
               Showing the first 600 of {filteredFc.length.toLocaleString()} — search for a specific barcode.
@@ -743,7 +903,7 @@ export default function CommissionsPage() {
 
       {/* ══ SETTINGS ══════════════════════════════════════════════════════ */}
       {tab === "settings" && (
-        <div className="mt-5 max-w-2xl rounded-card border border-line bg-surface p-6 dark:border-white/[0.06] dark:bg-[#201c17]">
+        <div className="mt-5 max-w-2xl rounded-card border border-line bg-surface p-6 max-md:p-4 dark:border-white/[0.06] dark:bg-[#201c17]">
           <h2 className="text-[15px] font-extrabold tracking-tight text-ink dark:text-[#f4f1ea]">Bonus rules</h2>
           <p className="mt-1 text-[12.5px] leading-relaxed text-muted dark:text-[#a89f93]">
             The bonus is slabbed on <strong>rupees of sales</strong>, on top of the per-piece rate. It is
@@ -765,11 +925,14 @@ export default function CommissionsPage() {
                 <option value="exact">Exact — only exact multiples</option>
               </select>
             </Field>
+            {/* inputMode="decimal" gives the phone's number pad instead of the
+                full keyboard. Rupee fields get it everywhere on these two
+                screens — it is the difference between two taps and six. */}
             <Field label="Slab size (Rs of sales)">
-              <input type="number" value={String(cfg.bonus_slab ?? "")} onChange={(e) => setCfg({ ...cfg, bonus_slab: Number(e.target.value) })} className={inputCls} />
+              <input type="number" inputMode="decimal" value={String(cfg.bonus_slab ?? "")} onChange={(e) => setCfg({ ...cfg, bonus_slab: Number(e.target.value) })} className={inputCls} />
             </Field>
             <Field label="Bonus per slab (Rs)">
-              <input type="number" value={String(cfg.bonus_per_slab ?? "")} onChange={(e) => setCfg({ ...cfg, bonus_per_slab: Number(e.target.value) })} className={inputCls} />
+              <input type="number" inputMode="decimal" value={String(cfg.bonus_per_slab ?? "")} onChange={(e) => setCfg({ ...cfg, bonus_per_slab: Number(e.target.value) })} className={inputCls} />
             </Field>
           </div>
 
@@ -799,20 +962,32 @@ export default function CommissionsPage() {
         subtitle="Receipt by receipt. This is the audit trail behind that figure.">
         <DataTable cols={drillCols} rows={drillRows ?? []} loading={drillRows === null} minWidth={640}
           empty="No commission earned on this day."
-          footer={
+          /* Two cells on a phone. The kit keeps this row when the table becomes
+             cards — it is the figure the day is being checked against — but four
+             cells of padding plus two rupee totals is wider than a 390px dialog,
+             and the box clips instead of scrolling, so the commission total
+             would be the part cut off. */
+          footer={phone ? (
+            <tr className="bg-panel/70 text-ink dark:bg-white/[0.04] dark:text-[#f4f1ea]">
+              <td className="px-3.5 py-3 text-[12.5px] font-bold">
+                {(drillRows ?? []).length} bill{(drillRows ?? []).length === 1 ? "" : "s"} · {money((drillRows ?? []).reduce((a, r) => a + r.total, 0))}
+              </td>
+              <td className="px-3.5 py-3 text-right text-[12.5px] font-extrabold tabular-nums">{money((drillRows ?? []).reduce((a, r) => a + r.comm, 0))}</td>
+            </tr>
+          ) : (
             <tr className="bg-panel/70 text-ink dark:bg-white/[0.04] dark:text-[#f4f1ea]">
               <td className="px-4 py-3 text-[12.5px] font-bold">{(drillRows ?? []).length} bill{(drillRows ?? []).length === 1 ? "" : "s"}</td>
               <td className="px-4 py-3 text-right text-[12.5px] font-bold tabular-nums">{money((drillRows ?? []).reduce((a, r) => a + r.total, 0))}</td>
               <td />
               <td className="px-4 py-3 text-right text-[12.5px] font-extrabold tabular-nums">{money((drillRows ?? []).reduce((a, r) => a + r.comm, 0))}</td>
             </tr>
-          } />
+          )} />
         <p className="mt-3 text-[12px] leading-relaxed text-muted dark:text-[#a89f93]">
           Receipts that earned nothing are left out. <strong>Commission</strong> is this bill&apos;s per-piece total
           {cfg.bonus_basis === "receipt" ? " plus its slab bonus" : ""}, rounded — the day figure in the grid is the sum of these
           {cfg.bonus_basis === "day" ? ", plus one slab bonus on the day's sales total" : ""}.
         </p>
-        <div className="mt-4 flex justify-end"><button onClick={() => setDrill(null)} className={btnGhost}>Close</button></div>
+        <div className="mt-4 flex justify-end"><button onClick={() => setDrill(null)} className={`${btnGhost} max-md:w-full`}>Close</button></div>
       </Modal>
 
       {/* ══ ITEM RATE EDITOR ══════════════════════════════════════════════ */}
@@ -821,32 +996,37 @@ export default function CommissionsPage() {
         subtitle="What gets paid is retail price × percentage × quantity.">
         {rateForm && (
           <div className="space-y-3.5">
-            <div className="grid grid-cols-2 gap-3">
+            {/* One field per row on a phone. Two 16px inputs side by side in a
+                310px dialog leaves ~140px each, which is not enough to see what
+                you typed into a price. */}
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
               <Field label="Item code">
                 <input value={rateForm.item_code} readOnly={rateForm.isEdit}
                   onChange={(e) => setRateForm({ ...rateForm, item_code: e.target.value })}
                   className={`${inputCls} ${rateForm.isEdit ? "opacity-60" : ""}`} autoFocus={!rateForm.isEdit} />
               </Field>
               <Field label="Retail price">
-                <input type="number" value={rateForm.retail_price} onChange={(e) => setRateForm({ ...rateForm, retail_price: e.target.value })} className={inputCls} />
+                <input type="number" inputMode="decimal" value={rateForm.retail_price} onChange={(e) => setRateForm({ ...rateForm, retail_price: e.target.value })} className={inputCls} />
               </Field>
             </div>
             <Field label="Item name">
               <input value={rateForm.item_name} onChange={(e) => setRateForm({ ...rateForm, item_name: e.target.value })} className={inputCls} />
             </Field>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
               <Field label="Percentage (this is what pays)">
-                <input type="number" value={rateForm.percentage} onChange={(e) => setRateForm({ ...rateForm, percentage: e.target.value })} className={inputCls} placeholder="5" />
+                <input type="number" inputMode="decimal" value={rateForm.percentage} onChange={(e) => setRateForm({ ...rateForm, percentage: e.target.value })} className={inputCls} placeholder="5" />
               </Field>
               <Field label="Commission column (reference only)">
-                <input type="number" value={rateForm.commission} onChange={(e) => setRateForm({ ...rateForm, commission: e.target.value })} className={inputCls} />
+                <input type="number" inputMode="decimal" value={rateForm.commission} onChange={(e) => setRateForm({ ...rateForm, commission: e.target.value })} className={inputCls} />
               </Field>
             </div>
             <p className="rounded-xl2 border border-line bg-panel/60 px-3.5 py-2.5 text-[12px] leading-relaxed text-muted dark:border-white/[0.06] dark:bg-white/[0.03] dark:text-[#a89f93]">
               This item earns <strong className="text-ink dark:text-[#e7e2d8]">{money(num(rateForm.retail_price) * ((num(rateForm.percentage) || 5) / 100))}</strong> per piece.
               The commission column is stored for the printed rate sheet and never enters a payout. A blank percentage saves as 5%.
             </p>
-            <div className="flex justify-end gap-2 pt-1">
+            {/* Three buttons at 390px: each takes an equal share of the row and
+                the shared phone CSS already gives everything in a dialog 44px. */}
+            <div className="flex flex-wrap justify-end gap-2 pt-1 max-md:[&>*]:flex-1">
               {rateForm.isEdit && (
                 <button onClick={() => deleteRate(rateForm.item_code)} disabled={saving}
                   className="flex items-center justify-center gap-2 rounded-full border border-danger/30 bg-danger-soft px-4 py-2.5 text-[13px] font-semibold text-danger transition hover:opacity-90 disabled:opacity-50 dark:border-danger/30 dark:bg-danger/10">
@@ -866,17 +1046,17 @@ export default function CommissionsPage() {
         subtitle="A flat amount per barcode. Not on this sheet means Rs 0 at DHA.">
         {dhaForm && (
           <div className="space-y-3.5">
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
               <Field label="Barcode">
                 <input value={dhaForm.item_code} readOnly={dhaForm.isEdit}
                   onChange={(e) => setDhaForm({ ...dhaForm, item_code: e.target.value })}
                   className={`${inputCls} ${dhaForm.isEdit ? "opacity-60" : ""}`} autoFocus={!dhaForm.isEdit} />
               </Field>
               <Field label="Commission (Rs per piece)">
-                <input type="number" value={dhaForm.commission} onChange={(e) => setDhaForm({ ...dhaForm, commission: e.target.value })} className={inputCls} />
+                <input type="number" inputMode="decimal" value={dhaForm.commission} onChange={(e) => setDhaForm({ ...dhaForm, commission: e.target.value })} className={inputCls} />
               </Field>
             </div>
-            <div className="flex justify-end gap-2 pt-1">
+            <div className="flex flex-wrap justify-end gap-2 pt-1 max-md:[&>*]:flex-1">
               {dhaForm.isEdit && (
                 <button onClick={() => deleteDha(dhaForm.item_code)} disabled={saving}
                   className="flex items-center justify-center gap-2 rounded-full border border-danger/30 bg-danger-soft px-4 py-2.5 text-[13px] font-semibold text-danger transition hover:opacity-90 disabled:opacity-50 dark:border-danger/30 dark:bg-danger/10">
@@ -903,7 +1083,9 @@ export default function CommissionsPage() {
             Select all
           </label>
           <span className="text-[12.5px] text-muted dark:text-[#a89f93]">{staleSel.length} selected</span>
-          <div className="ml-auto flex gap-2">
+          {/* Both delete buttons take half the row on a phone instead of
+              trailing off the edge of a 358px dialog. */}
+          <div className="ml-auto flex gap-2 max-md:ml-0 max-md:w-full max-md:[&>*]:flex-1">
             <button disabled={staleBusy || !staleSel.length}
               onClick={() => { if (window.confirm(`Delete ${staleSel.length} barcode(s) from the FC DHA rate sheet?`)) deleteCodes(staleSel); }}
               className="flex items-center justify-center gap-2 rounded-full border border-danger/30 bg-danger-soft px-4 py-2.5 text-[13px] font-semibold text-danger transition hover:opacity-90 disabled:opacity-40 dark:border-danger/30 dark:bg-danger/10">
@@ -916,13 +1098,40 @@ export default function CommissionsPage() {
             </button>
           </div>
         </div>
+        {/* THE AUTOMATIC CARD IS WRONG FOR THIS ONE. Its first plain column is
+            the tick box, so the card title would be a bare checkbox and the big
+            right-hand figure would be the delete button.
+
+            So the phone card is the standard select-a-row pattern instead: the
+            whole row is the tick box's label, and the per-row trash can is left
+            off deliberately. On a computer it deletes a rate with no
+            confirmation, which is fine beside a mouse pointer and is a mis-tap
+            next to a thumb-sized label. Select the row and use Delete selected,
+            which does confirm — same capability, one deliberate step. */}
         <DataTable cols={staleCols} rows={stale ?? []} loading={staleBusy} minWidth={620}
-          empty="Nothing stale — every barcode on the sheet has sold recently." />
+          empty="Nothing stale — every barcode on the sheet has sold recently."
+          card={(r) => {
+            const code = String(r.item_code);
+            const on = staleSel.includes(code);
+            return (
+              <label className={`flex items-center gap-3 rounded-card border bg-surface p-3.5 dark:bg-[#201c17] ${on ? "border-ink dark:border-white/40" : "border-line dark:border-white/[0.06]"}`}>
+                <input type="checkbox" checked={on}
+                  onChange={(e) => setStaleSel((s) => e.target.checked ? [...s, code] : s.filter((x) => x !== code))}
+                  className="h-5 w-5 flex-none accent-current" />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-[14.5px] font-bold text-ink dark:text-[#f4f1ea]">{code}</span>
+                  <span className="block truncate text-[12.5px] text-muted dark:text-[#a89f93]">
+                    {money(r.commission)} per piece · {r.last_sold ? `last sold ${r.last_sold}` : "never sold"}
+                  </span>
+                </span>
+              </label>
+            );
+          }} />
         <p className="mt-3 text-[12px] leading-relaxed text-muted dark:text-[#a89f93]">
           Deleting a barcode only removes its rate; the sales history stays. Removals go 100 at a time because a
           delete that lists thousands of barcodes builds a URL the server refuses.
         </p>
-        <div className="mt-4 flex justify-end"><button onClick={() => setStaleOpen(false)} className={btnGhost}>Close</button></div>
+        <div className="mt-4 flex justify-end"><button onClick={() => setStaleOpen(false)} className={`${btnGhost} max-md:w-full`}>Close</button></div>
       </Modal>
 
       <PreviewNote />

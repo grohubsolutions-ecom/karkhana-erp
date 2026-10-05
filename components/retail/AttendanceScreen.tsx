@@ -23,15 +23,30 @@
  *   They are paid by the hour, so what matters is time in and time out, and a
  *   "present" with no times earns them nothing. They get the time pickers
  *   instead; saving a time marks them present automatically.
+ *
+ * ON A PHONE (Oct 2026) — nothing below 768px changes the computer screen.
+ *   This is the one screen in the department that is used STANDING UP: the
+ *   morning round, ten or fifteen names, one tap each, phone in one hand. So on
+ *   a phone the day list is one card per person with 44px status buttons, the
+ *   previous/next-day arrows live in a bar at the bottom where a thumb already
+ *   is rather than in the header where it has to be reached for, and the names
+ *   nobody is marking — the rest of the shop, who turned up as usual — go
+ *   present in one tap from that same bar.
+ *
+ *   The month grid stays a grid. It is a calendar: 31 columns across the top is
+ *   what makes it readable, and cards would destroy the one thing it is for. It
+ *   scrolls inside its own box (`rt-scroll-x`) with the name column pinned, so
+ *   reading across a row never drags the whole page sideways.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { CalendarCheck, UserCheck, UserX, Clock, Sun } from "lucide-react";
+import { CalendarCheck, UserCheck, UserX, Clock, Sun, ChevronLeft, ChevronRight, CheckCheck } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import Modal, { Field, inputCls, btnPrimary, btnGhost } from "@/components/Modal";
 import {
   Shell, PageHeader, StatCards, Tabs, BranchPicker, MonthPicker, PreviewNote, SourceNote,
+  ActionBar, useIsPhone,
   useEmployees, monthKey, monthBounds, daysInMonth, isHeadOffice, isHourly, attHours, isSunday,
-  money, num, today, type Row, type Employee,
+  money, num, today, iso, type Row, type Employee,
 } from "@/components/retail/kit";
 
 type Scope = "shops" | "ho";
@@ -49,8 +64,11 @@ const CELL: Record<string, string> = {
   half: "bg-amber-soft text-amber-strong dark:bg-amber/20 dark:text-amber",
   absent: "bg-danger-soft text-danger dark:bg-danger/20",
 };
+/** One sentence, in both layouts, so the day list cannot say two things. */
+const NOBODY = "No active staff here — add them under Employee ▸ Employees.";
 
 export default function AttendanceScreen({ scope }: { scope: Scope }) {
+  const phone = useIsPhone();
   const { employees, branches } = useEmployees(scope);
   const [tab, setTab] = useState<"day" | "month">("day");
   const [date, setDate] = useState(today());
@@ -62,6 +80,7 @@ export default function AttendanceScreen({ scope }: { scope: Scope }) {
   const [err, setErr] = useState("");
   const [timeFor, setTimeFor] = useState<Employee | null>(null);
   const [tin, setTin] = useState(""); const [tout, setTout] = useState("");
+  const [bulk, setBulk] = useState(false);
 
   const pickable = useMemo(
     () => branches.filter((b) => (scope === "ho" ? isHeadOffice(b) : !isHeadOffice(b))),
@@ -119,6 +138,59 @@ export default function AttendanceScreen({ scope }: { scope: Scope }) {
     if (error) { setErr(error.message); load(); }
   }
 
+  /* ── the day, moved one step at a time ─────────────────────────────────
+   * The header keeps its date box for jumping to an arbitrary day. This is the
+   * other 95% of the job: yesterday, because somebody forgot, and back again.
+   * `max` on that box stops a future date being typed; the arrows honour the
+   * same limit rather than quietly disagreeing with it.
+   */
+  function shiftDay(n: number) {
+    const d = new Date(date + "T00:00:00");
+    d.setDate(d.getDate() + n);
+    const next = iso(d);
+    if (next > today()) return;
+    setDate(next);
+  }
+
+  /** People on the three buttons who have no status yet. Hourly staff are never
+   *  in here — a "present" with no times pays them nothing, so there is nothing
+   *  to fill in for them. */
+  const unmarked = useMemo(
+    () => people.filter((e) => !isHourly(e) && !day[e.id]?.status),
+    [people, day]
+  );
+  const markedCount = useMemo(
+    () => people.filter((e) => !!day[e.id]?.status).length,
+    [people, day]
+  );
+
+  /* MARK THE REST PRESENT.
+   * The morning round is fifteen names of whom thirteen turned up as usual, and
+   * tapping Present thirteen times is the whole job the phone was supposed to
+   * make shorter. This fills only the people who have NO status yet: somebody
+   * already marked absent or half stays as they are, because that mark was a
+   * decision and this button is a default.
+   *
+   * Same table, same columns and the same conflict target as a single tap — one
+   * request instead of thirteen.
+   */
+  async function markRestPresent() {
+    const rest = unmarked;
+    if (!rest.length) return;
+    setBulk(true); setErr("");
+    setDay((m) => {
+      const c = { ...m };
+      rest.forEach((e) => { c[e.id] = { ...c[e.id], status: "present" }; });
+      return c;
+    });
+    if (!supabase) { setBulk(false); return; }
+    const { error } = await supabase.from("retail_attendance").upsert(
+      rest.map((e) => ({ employee_id: e.id, att_date: date, status: "present" })),
+      { onConflict: "employee_id,att_date" });
+    setBulk(false);
+    if (error) { setErr(error.message); load(); }
+  }
+
   function openTimes(e: Employee) {
     const r = day[e.id] ?? {};
     setTin(r.time_in ?? "09:00"); setTout(r.time_out ?? "18:00"); setTimeFor(e);
@@ -151,6 +223,13 @@ export default function AttendanceScreen({ scope }: { scope: Scope }) {
   const nDays = daysInMonth(month);
   const days = useMemo(() => Array.from({ length: nDays }, (_, i) => i + 1), [nDays]);
 
+  /** "Today · Mon 5 Oct". The word matters: on a phone, half the mistakes on an
+   *  attendance screen are marking the right people on the wrong day. */
+  const dayLabel = useMemo(() => {
+    const d = new Date(date + "T00:00:00").toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" });
+    return date === today() ? `Today · ${d}` : d;
+  }, [date]);
+
   return (
     <Shell>
       <PageHeader
@@ -179,13 +258,85 @@ export default function AttendanceScreen({ scope }: { scope: Scope }) {
         </div>
       )}
 
+      {/* ── DAY, ON A PHONE ───────────────────────────────────────────────
+          ONE CARD PER PERSON, AND THE BUTTONS ARE THE CARD.
+
+          The computer row lays the name and three 36px buttons across 900px.
+          At 390px those three buttons are what is left after the name, which is
+          about 70px each for a target that writes a wage record — and the name
+          they belong to has been squeezed to an ellipsis by then.
+
+          So the card gives the name the top line at 16px with a 44px initial
+          beside it (you are checking a face against a name, not reading a
+          table), and the three statuses a full-width row of 44px buttons
+          underneath. Three taps' worth of target for the same three taps.
+
+          Hourly staff still get one button instead of three — see the note at
+          the top of the file — and it carries the hours it has recorded, which
+          on the computer sits in the subtitle. */}
+      {tab === "day" && phone && (
+        loading ? (
+          <div className="mt-4 space-y-2">
+            {Array.from({ length: 6 }).map((_, i) => <div key={i} className="h-[108px] animate-pulse rounded-card bg-panel/70 dark:bg-white/[0.05]" />)}
+          </div>
+        ) : people.length === 0 ? (
+          <p className="mt-4 rounded-card border border-line bg-surface p-8 text-center text-[13px] text-muted dark:border-white/[0.06] dark:bg-[#201c17] dark:text-[#a89f93]">{NOBODY}</p>
+        ) : (
+          <div className="mt-4 space-y-2">
+            {people.map((e) => {
+              const r = day[e.id] ?? {};
+              const hourly = isHourly(e);
+              return (
+                <div key={e.id} className="rounded-card border border-line bg-surface p-3.5 dark:border-white/[0.06] dark:bg-[#201c17]">
+                  <div className="flex items-center gap-3">
+                    <span className="flex h-11 w-11 flex-none items-center justify-center rounded-xl2 bg-lavender-soft text-[16px] font-extrabold text-ink dark:bg-white/[0.08] dark:text-white">
+                      {(e.name || "?").slice(0, 1).toUpperCase()}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-[16px] font-extrabold leading-tight text-ink dark:text-[#f4f1ea]">{e.name}</div>
+                      <div className="mt-0.5 truncate text-[12px] text-muted dark:text-[#a89f93]">
+                        {pickable.length > 1 && !branch ? `${branchName(e.branch_id)} · ` : ""}
+                        {hourly ? `${money(e.hourly_rate)}/hr` : `${money(e.monthly_salary)}/month`}
+                      </div>
+                    </div>
+                  </div>
+                  {hourly ? (
+                    <button onClick={() => openTimes(e)}
+                      className="mt-3 flex min-h-[44px] w-full items-center justify-center gap-2 rounded-xl2 border border-line bg-surface text-[13.5px] font-semibold text-ink transition active:bg-panel dark:border-white/10 dark:bg-white/[0.04] dark:text-white">
+                      <Clock size={15} />
+                      {r.time_in
+                        ? <>{r.time_in}{r.time_out ? `–${r.time_out}` : ""} · <strong>{attHours(r.time_in, r.time_out).toFixed(1)} h</strong></>
+                        : "Set time in / out"}
+                    </button>
+                  ) : (
+                    /* 44px is Apple's floor and this is the tap that records a
+                       day's wage, so it is not negotiated down. */
+                    <div className="mt-3 grid grid-cols-3 gap-2">
+                      {STATUSES.map((s) => {
+                        const on = r.status === s.key;
+                        return (
+                          <button key={s.key} onClick={() => mark(e.id, s.key)} aria-pressed={on}
+                            className={`min-h-[44px] rounded-xl2 border text-[13.5px] font-bold transition ${on ? s.on : "border-line bg-surface text-ink active:bg-panel dark:border-white/10 dark:bg-white/[0.04] dark:text-white"}`}>
+                            {s.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )
+      )}
+
       {/* ── DAY ─────────────────────────────────────────────────────────── */}
-      {tab === "day" && (
+      {tab === "day" && !phone && (
         <div className="mt-4 overflow-hidden rounded-card border border-line bg-surface dark:border-white/[0.06] dark:bg-[#201c17]">
           {loading ? (
             <div className="space-y-2 p-4">{Array.from({ length: 6 }).map((_, i) => <div key={i} className="h-10 animate-pulse rounded bg-panel/70 dark:bg-white/[0.05]" />)}</div>
           ) : people.length === 0 ? (
-            <p className="px-4 py-16 text-center text-[13px] text-muted dark:text-[#a89f93]">No active staff here — add them under Employee ▸ Employees.</p>
+            <p className="px-4 py-16 text-center text-[13px] text-muted dark:text-[#a89f93]">{NOBODY}</p>
           ) : people.map((e) => {
             const r = day[e.id] ?? {};
             const hourly = isHourly(e);
@@ -228,11 +379,19 @@ export default function AttendanceScreen({ scope }: { scope: Scope }) {
       {/* ── MONTH ───────────────────────────────────────────────────────── */}
       {tab === "month" && (
         <div className="mt-4 overflow-hidden rounded-card border border-line bg-surface dark:border-white/[0.06] dark:bg-[#201c17]">
-          <div className="overflow-x-auto">
+          {/* A MONTH GRID STAYS A GRID — it is a calendar, and 31 columns across
+              the top is the whole point of it. `rt-scroll-x` is what keeps that
+              honest on a phone: the grid scrolls inside this box, with momentum
+              and without handing the swipe on to the page, so reading across one
+              person's month never drags the screen sideways. The name column is
+              already pinned (`sticky left-0`), so the row you are reading still
+              says whose it is at day 29. `overflow-x-auto` stays for the
+              computer, where nothing about this changes. */}
+          <div className="rt-scroll-x overflow-x-auto">
             <table className="w-full text-left text-[13px]">
               <thead>
                 <tr className="border-b border-line text-[11px] uppercase tracking-wide text-hint dark:border-white/[0.06] dark:text-[#8a8175]">
-                  <th className="sticky left-0 z-10 bg-surface px-4 py-3 font-semibold dark:bg-[#201c17]">Name</th>
+                  <th className="sticky left-0 z-10 bg-surface px-4 py-3 font-semibold max-md:px-3 dark:bg-[#201c17]">Name</th>
                   {days.map((d) => {
                     const ds = `${month}-${String(d).padStart(2, "0")}`;
                     return <th key={d} className={`px-1 py-3 text-center font-semibold ${isSunday(ds) ? "text-amber-strong dark:text-amber" : ""}`}>{d}</th>;
@@ -256,7 +415,11 @@ export default function AttendanceScreen({ scope }: { scope: Scope }) {
                       }, 0));
                   return (
                     <tr key={p.id} className="text-ink dark:text-[#e7e2d8]">
-                      <td className="sticky left-0 z-10 whitespace-nowrap bg-surface px-4 py-2 font-semibold dark:bg-[#201c17]">{p.name}</td>
+                      {/* Capped on a phone so the pinned column leaves room for
+                          the days it exists to label. */}
+                      <td className="sticky left-0 z-10 whitespace-nowrap bg-surface px-4 py-2 font-semibold max-md:px-3 dark:bg-[#201c17]">
+                        <span className="block max-md:max-w-[104px] max-md:truncate">{p.name}</span>
+                      </td>
                       {days.map((d) => {
                         const ds = `${month}-${String(d).padStart(2, "0")}`;
                         const r = grid[`${p.id}:${ds}`];
@@ -267,7 +430,11 @@ export default function AttendanceScreen({ scope }: { scope: Scope }) {
                               onClick={() => { if (!hourly) mark(p.id, (s === "present" ? "half" : s === "half" ? "absent" : "present") as Status, ds); }}
                               disabled={hourly}
                               title={hourly ? (r?.time_in ? `${r.time_in}–${r.time_out ?? "?"}` : "Set times on the day view") : (s ?? "Not marked")}
-                              className={`h-7 w-7 rounded-lg text-[11.5px] font-bold transition ${s ? CELL[s] : isSunday(ds) ? "bg-amber-soft/50 text-amber-strong dark:bg-amber/10 dark:text-amber" : "bg-canvas text-hint hover:bg-panel dark:bg-white/[0.03] dark:text-[#6b6358] dark:hover:bg-white/[0.08]"} ${hourly ? "cursor-default opacity-70" : ""}`}>
+                              /* 28px is a mouse target. On a phone the same cell
+                                 is 36px — the grid already scrolls sideways, so
+                                 the extra width costs nothing and a mis-tap here
+                                 writes the wrong status on the wrong day. */
+                              className={`h-7 w-7 rounded-lg text-[11.5px] font-bold transition max-md:h-9 max-md:w-9 max-md:text-[12.5px] ${s ? CELL[s] : isSunday(ds) ? "bg-amber-soft/50 text-amber-strong dark:bg-amber/10 dark:text-amber" : "bg-canvas text-hint hover:bg-panel dark:bg-white/[0.03] dark:text-[#6b6358] dark:hover:bg-white/[0.08]"} ${hourly ? "cursor-default opacity-70" : ""}`}>
                               {s ? CH[s] : isSunday(ds) ? "•" : "·"}
                             </button>
                           </td>
@@ -305,6 +472,10 @@ export default function AttendanceScreen({ scope }: { scope: Scope }) {
         title={timeFor ? `${timeFor.name} — time in / out` : ""}
         subtitle={new Date(date + "T00:00:00").toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long" })}>
         <div className="space-y-3.5">
+          {/* These two stay side by side on a phone. They are one fact read
+              left to right — the shift — and a native time control is about
+              120px wide, so both fit at 390px with room to spare. Stacking
+              them would separate a pair and push Save under the keyboard. */}
           <div className="grid grid-cols-2 gap-3">
             <Field label="Time in"><input type="time" value={tin} onChange={(e) => setTin(e.target.value)} className={inputCls} /></Field>
             <Field label="Time out"><input type="time" value={tout} onChange={(e) => setTout(e.target.value)} className={inputCls} /></Field>
@@ -313,14 +484,72 @@ export default function AttendanceScreen({ scope }: { scope: Scope }) {
             {attHours(tin, tout).toFixed(1)} hours
             {timeFor && num(timeFor.hourly_rate) > 0 && <> · {money(num(timeFor.hourly_rate) * attHours(tin, tout))}</>}
           </p>
-          <div className="flex justify-end gap-2 pt-1">
-            <button onClick={() => { setTin(""); setTout(""); }} className={btnGhost}>Clear both</button>
-            <button onClick={saveTimes} className={btnPrimary}>Save</button>
+          {/* Stacked and full width on a phone, Save last so it is the button
+              nearest the thumb. Two 100px buttons in the bottom corner of a
+              dialog is where a mis-tap clears a shift somebody just typed. */}
+          <div className="flex justify-end gap-2 pt-1 max-md:flex-col">
+            <button onClick={() => { setTin(""); setTout(""); }} className={`${btnGhost} max-md:w-full`}>Clear both</button>
+            <button onClick={saveTimes} className={`${btnPrimary} max-md:w-full`}>Save</button>
           </div>
         </div>
       </Modal>
 
       <PreviewNote />
+
+      {/* ── THE DAY BAR — PHONE ONLY ──────────────────────────────────────
+          Two jobs, both at the bottom because that is where the thumb already
+          is while the other hand is holding the door open:
+
+          1. PREVIOUS / NEXT DAY. The date box is in the header, which on a
+             phone is a stretch to the top of the screen for the commonest
+             action on the screen. Down here it is where the hand rests.
+          2. MARK THE REST PRESENT. Thirteen of fifteen turned up; this says so
+             once instead of thirteen times. It only ever fills people with no
+             status yet, so a mark somebody made by hand is never overwritten.
+
+          Not on a Sunday: Sunday is an automatic paid holiday and is never
+          marked, so a bulk button there would write fifteen rows of noise.
+
+          `ActionBar` sits above the tab bar, never over it; the spacer is this
+          page's `pb-24` so the source note is not left underneath it.
+          The whole thing is behind `phone`, so no part of it exists at 1024px. */}
+      {phone && tab === "day" && (
+        <>
+          <div aria-hidden className="h-24" />
+          <ActionBar>
+            <div className="w-full">
+              {/* Repeated here on purpose. A save started from this bar that
+                  fails puts its message at the top of the page, which on a phone
+                  is several screens above the thumb that pressed the button —
+                  and the marks go back to unmarked with no reason given. */}
+              {err && <p className="mb-2 text-[11.5px] font-semibold text-danger">Couldn&apos;t save: {err}</p>}
+              <div className="flex items-center gap-2">
+                <button type="button" onClick={() => shiftDay(-1)} aria-label="Previous day"
+                  className="flex h-11 w-11 flex-none items-center justify-center rounded-full border border-line bg-surface text-ink transition active:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white">
+                  <ChevronLeft size={18} />
+                </button>
+                <div className="min-w-0 flex-1 text-center">
+                  <div className="truncate text-[13px] font-extrabold text-ink dark:text-[#f4f1ea]">{dayLabel}</div>
+                  <div className="text-[11px] text-muted dark:text-[#a89f93]">
+                    {people.length === 0 ? "nobody in scope" : `${markedCount} of ${people.length} marked`}
+                  </div>
+                </div>
+                <button type="button" onClick={() => shiftDay(1)} disabled={date >= today()} aria-label="Next day"
+                  className="flex h-11 w-11 flex-none items-center justify-center rounded-full border border-line bg-surface text-ink transition active:bg-panel disabled:opacity-40 dark:border-white/10 dark:bg-white/[0.06] dark:text-white">
+                  <ChevronRight size={18} />
+                </button>
+              </div>
+              {!isSunday(date) && unmarked.length > 0 && (
+                <button type="button" onClick={markRestPresent} disabled={bulk}
+                  className="mt-2 flex min-h-[44px] w-full items-center justify-center gap-2 rounded-full bg-ink text-[13.5px] font-semibold text-white transition disabled:opacity-50 dark:bg-white dark:text-[#141414]">
+                  <CheckCheck size={16} />
+                  {bulk ? "Marking…" : `Mark remaining ${unmarked.length} present`}
+                </button>
+              )}
+            </div>
+          </ActionBar>
+        </>
+      )}
     </Shell>
   );
 }

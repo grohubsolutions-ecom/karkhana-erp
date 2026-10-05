@@ -29,6 +29,14 @@
  *   outstanding = Σ (advance + purchase_credit − paid), all time, never stored.
  *   A stored balance and a list of entries WILL disagree eventually, and when
  *   they do nobody can tell which one is lying.
+ *
+ * ON A PHONE (Oct 2026) — nothing below 768px reaches the computer screen.
+ *   "Used standing up, with a cash box" means the phone is the real screen for
+ *   this one, and the eight-column row it is on a computer cannot be it: two
+ *   text boxes, a date, a dropdown and a button laid across 1,140px. So each
+ *   person becomes a card with what they owe as the one big figure, the amount
+ *   and the date side by side, and a full-width Record button that says the
+ *   figure it is about to write.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Coins, HandCoins, Users, CalendarClock, Trash2, Check } from "lucide-react";
@@ -40,6 +48,11 @@ import {
   money, num, text, today, monthKey, monthBounds, monthLabel,
   type Row, type Col, type Employee,
 } from "@/components/retail/kit";
+
+/** The boxes on a phone card. 16px comes from the department's phone CSS — iOS
+ *  zooms the whole page on anything smaller — so this is only the frame. */
+const cardInput = "mt-1 w-full rounded-xl2 border border-line bg-canvas px-2.5 py-2.5 text-[13px] text-ink outline-none transition focus:border-ink/30 disabled:opacity-40 dark:border-white/10 dark:bg-white/[0.04] dark:text-white";
+const cardLabel = "text-[11px] uppercase tracking-wide text-hint dark:text-[#8a8175]";
 
 type Scope = "shops" | "ho";
 
@@ -293,6 +306,85 @@ export default function RepaymentScreen({ scope }: { scope: Scope }) {
       ) },
   ];
 
+  /* ── THE COLLECTION CARD ─────────────────────────────────────────────────
+   * The automatic card cannot do this row: its last column is a button, which
+   * the kit would read as the row's big figure, and two text boxes and a date
+   * picker do not fit in a labelled pair. So this screen hands over its own.
+   *
+   * The order is the order of the job. What they owe (why you stopped at this
+   * name), what you are taking, the button that writes it — and the plan last,
+   * because the arrangement is agreed once and collected against every day.
+   *
+   * The button says the amount it is about to record. On a computer you can see
+   * the box you just typed in next to the button you are about to press; on a
+   * phone the keypad has been over half the screen, and "Record Rs 200" is the
+   * only confirmation there is that 200 is what is going in.
+   */
+  const collectCard = (e: Employee) => {
+    const out = owedBy[e.id] ?? 0;
+    const freq = e.repay_freq ?? "none";
+    const amt = num(amountFor(e));
+    return (
+      <div className="rounded-card border border-line bg-surface p-3.5 dark:border-white/[0.06] dark:bg-[#201c17]">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-[15.5px] font-extrabold text-ink dark:text-[#f4f1ea]">{e.name}</div>
+            {showBranch && <div className="mt-0.5 truncate text-[12.5px] text-muted dark:text-[#a89f93]">{branchName(e.branch_id)}</div>}
+          </div>
+          <div className="flex-none text-right">
+            <div className={cardLabel}>Outstanding</div>
+            {/* Below a rupee there is nothing to collect — the same rule as the
+                table, said the same way. */}
+            {out <= OPEN
+              ? <div className="mt-0.5"><Pill tone="good">Settled</Pill></div>
+              : <div className="text-[17px] font-extrabold tabular-nums text-danger">{money(out)}</div>}
+          </div>
+        </div>
+
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          <label className="block">
+            <span className={cardLabel}>Amount</span>
+            <input type="number" inputMode="numeric" value={amountFor(e)} placeholder="e.g. 200"
+              aria-label={`Amount collected from ${e.name}`}
+              onChange={(ev) => setDraft(e.id, { amount: ev.target.value })}
+              className={`${cardInput} text-right tabular-nums`} />
+          </label>
+          <label className="block">
+            <span className={cardLabel}>Date</span>
+            <input type="date" value={dateFor(e)} max={today()}
+              aria-label={`Date collected from ${e.name}`}
+              onChange={(ev) => setDraft(e.id, { date: ev.target.value })}
+              className={cardInput} />
+          </label>
+        </div>
+
+        <button onClick={() => record(e)} disabled={saving === e.id}
+          className="mt-2.5 flex min-h-[44px] w-full items-center justify-center gap-1.5 rounded-full bg-ink text-[13.5px] font-semibold text-white transition disabled:opacity-50 dark:bg-white dark:text-[#141414]">
+          <Check size={15} /> {saving === e.id ? "Saving…" : amt > 0 ? `Record ${money(amt)}` : "Record"}
+        </button>
+
+        <div className="mt-3 flex items-center gap-2 border-t border-line pt-3 dark:border-white/[0.06]">
+          <span className={`flex-none ${cardLabel}`}>Plan</span>
+          <select value={freq} onChange={(ev) => savePlan(e, { freq: ev.target.value })}
+            aria-label={`Repayment frequency for ${e.name}`}
+            className="min-w-0 flex-1 rounded-xl2 border border-line bg-canvas px-2 py-2 text-[12.5px] font-semibold text-ink outline-none dark:border-white/10 dark:bg-white/[0.04] dark:text-white">
+            {FREQS.map((f) => <option key={f.key} value={f.key}>{f.label}</option>)}
+          </select>
+          <input type="number" inputMode="numeric" value={planAmountFor(e)} disabled={freq === "none"}
+            aria-label={`Repayment amount for ${e.name}`}
+            onChange={(ev) => setPlanDrafts((d) => ({ ...d, [e.id]: ev.target.value }))}
+            /* Saved on blur, exactly as in the table — "200" typed a digit at a
+               time would otherwise write a plan of 2, then 20. */
+            onBlur={() => savePlan(e, { amount: planAmountFor(e) })}
+            onKeyDown={(ev) => { if (ev.key === "Enter") ev.currentTarget.blur(); }}
+            placeholder={freq === "none" ? "—" : "200"}
+            className="w-[80px] flex-none rounded-xl2 border border-line bg-canvas px-2 py-2 text-right text-[12.5px] tabular-nums text-ink outline-none disabled:opacity-40 dark:border-white/10 dark:bg-white/[0.04] dark:text-white" />
+          {freq !== "none" && <span className="flex-none text-[11.5px] text-muted dark:text-[#a89f93]">/{unitOf(freq)}</span>}
+        </div>
+      </div>
+    );
+  };
+
   const recentCols: Col<Row>[] = [
     { head: "Date", muted: true, cell: (l) => text(l.entry_date) },
     { head: "Employee", bold: true, cell: (l) => empName(l.employee_id) },
@@ -305,6 +397,31 @@ export default function RepaymentScreen({ scope }: { scope: Scope }) {
         </button>
       ) },
   ];
+
+  /* The recent list as a card. The automatic one would get the figure right and
+   * then put the delete button in a labelled pair, and deleting is the only
+   * reason this list is interactive: the money was just collected on this phone,
+   * so a mistyped amount is noticed here, by the person who typed it.
+   *
+   * The NAME leads, not the date. On a computer the list is read as a log in
+   * date order; on a phone the question is "did Asif's two hundred go in?".
+   */
+  const recentCard = (l: Row) => (
+    <div className="flex items-center gap-2 rounded-card border border-line bg-surface p-3.5 dark:border-white/[0.06] dark:bg-[#201c17]">
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-[14.5px] font-bold text-ink dark:text-[#f4f1ea]">{empName(l.employee_id)}</div>
+        <div className="mt-0.5 truncate text-[12.5px] text-muted dark:text-[#a89f93]">
+          {text(l.entry_date)} · {text(l.purchase_details, "advance deduction")}
+        </div>
+      </div>
+      <div className="flex-none text-right text-[15px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">{money(l.paid)}</div>
+      <button onClick={() => { setErr(""); setDelFor(l); }}
+        aria-label={`Delete ${money(l.paid)} collected from ${empName(l.employee_id)}`}
+        className="flex h-11 w-11 flex-none items-center justify-center rounded-full text-muted transition active:bg-danger-soft active:text-danger dark:text-[#a89f93]">
+        <Trash2 size={16} />
+      </button>
+    </div>
+  );
 
   return (
     <Shell>
@@ -323,10 +440,12 @@ export default function RepaymentScreen({ scope }: { scope: Scope }) {
 
       <h2 className="mt-7 text-[15px] font-extrabold tracking-tight text-ink dark:text-[#f4f1ea]">Collect today</h2>
       <DataTable cols={cols} rows={due} loading={loading} minWidth={showBranch ? 1140 : 1000}
+        card={collectCard}
         empty="Nobody owes anything and no plan is running. People appear here the moment an advance is given on the Ledger screen." />
 
       <h2 className="mt-8 text-[15px] font-extrabold tracking-tight text-ink dark:text-[#f4f1ea]">Recent repayments</h2>
       <DataTable cols={recentCols} rows={recent} loading={loading} minWidth={720}
+        card={recentCard}
         empty="No repayments recorded yet." />
 
       <SourceNote>
@@ -348,9 +467,13 @@ export default function RepaymentScreen({ scope }: { scope: Scope }) {
             </p>
           )}
           {err && <p className="text-[12.5px] font-semibold text-danger">{err}</p>}
-          <div className="flex justify-end gap-2">
-            <button onClick={() => setDelFor(null)} className={btnGhost}>Keep it</button>
-            <button onClick={removeRepayment} disabled={saving === "del"} className={btnPrimary}>{saving === "del" ? "Deleting…" : "Delete"}</button>
+          {/* Stacked and full width on a phone, and REVERSED: "Keep it" ends up
+              the lower of the two, so the button nearest the thumb is the safe
+              one. Deleting a collection puts the money back onto what somebody
+              owes, which is not a thing to make easy to hit by accident. */}
+          <div className="flex justify-end gap-2 max-md:flex-col-reverse">
+            <button onClick={() => setDelFor(null)} className={`${btnGhost} max-md:w-full`}>Keep it</button>
+            <button onClick={removeRepayment} disabled={saving === "del"} className={`${btnPrimary} max-md:w-full`}>{saving === "del" ? "Deleting…" : "Delete"}</button>
           </div>
         </div>
       </Modal>

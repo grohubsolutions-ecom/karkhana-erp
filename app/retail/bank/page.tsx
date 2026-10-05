@@ -41,12 +41,13 @@ import {
 } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import Modal, { Field, inputCls, btnPrimary, btnGhost } from "@/components/Modal";
-import RangeBar from "@/components/RangeBar";
 import { rangeDates, MONEY_PRESETS } from "@/lib/dateRange";
 import { printTable } from "@/lib/export";
 import {
+  RetailRange,
   Shell, PageHeader, StatCards, DataTable, Tabs, Pill, Select, PreviewNote, SourceNote,
-  useBranches, money, num, text, today, type Row, type Col,
+  RowCard, Sheet, Detail, useIsPhone,
+  useBranches, money, num, text, today, fetchAll, type Row, type Col,
 } from "@/components/retail/kit";
 import {
   bsClean, bsDedupe, bsRuleHit, bsPattern, bsGroupPat, bsRun, bsOpening, bsSortDay,
@@ -92,6 +93,7 @@ type DayPack = {
 
 export default function BankPage() {
   const { branches, branchName } = useBranches();
+  const phone = useIsPhone();
   const [tab, setTab] = useState<Tab>("day");
   const [acct, setAcct] = useState("");
   const [day, setDay] = useState(today());
@@ -104,6 +106,10 @@ export default function BankPage() {
   const [packs, setPacks] = useState<DayPack[]>([]);
   const [loading, setLoading] = useState(true);
   const [dayLoading, setDayLoading] = useState(false);
+  /* True when the range read hit fetchAll's 200,000-row ceiling. The Credits,
+     Debits and Flagged-personal figures are then sums over part of the range,
+     which is a lower bound dressed as a total. */
+  const [partial, setPartial] = useState(false);
   const [err, setErr] = useState("");
   const [note, setNote] = useState("");
   const [saving, setSaving] = useState(false);
@@ -112,6 +118,11 @@ export default function BankPage() {
   const [nameForm, setNameForm] = useState({ ref: "", branch_id: "", category: "", learn: true });
   const [acctOpen, setAcctOpen] = useState(false);
   const [acctForm, setAcctForm] = useState({ bank: "alfalah", label: "", account_no: "", opening_balance: "", opening_date: today(), branch_id: "" });
+  /* One rule's full row, for the phone sheet — including Delete, which is where
+     it belongs: deleting a rule un-names every future statement line it would
+     have matched, so it is not a button that should sit under a thumb by
+     accident. Only a card can open this, and cards only exist below 768px. */
+  const [ruleOpen, setRuleOpen] = useState<RefRule | null>(null);
 
   const fileRef = useRef<HTMLInputElement>(null);
   const [importing, setImporting] = useState(false);
@@ -142,17 +153,33 @@ export default function BankPage() {
 
   const load = useCallback(async () => {
     if (!isSupabaseConfigured || !supabase) { setLoading(false); return; }
+    const db = supabase;
     setLoading(true); setErr("");
     const [from, to] = rangeDates(preset, cf, ct);
-    let t = supabase.from("retail_bank_txns")
-      .select("id,account_id,txn_date,txn_time,direction,amount,balance,descr,ref_no,ref,branch_id,category,counterparty,suggest,needs_ref,auto,source")
-      .order("txn_date", { ascending: false, nullsFirst: false }).order("id").limit(3000);
-    if (from) t = t.gte("txn_date", from);
-    if (to) t = t.lte("txn_date", to);
-    if (acct) t = t.eq("account_id", Number(acct));
-    const { data, error } = await t;
-    if (error) setErr(error.message);
-    setTxns((data as BankTxn[]) ?? []);
+    /* PostgREST caps a response at 1000 rows. The `.limit(3000)` that used to sit
+       here did not raise that cap — it only stopped asking for more, silently, at
+       1000. These rows are what the Credits, Debits and Flagged-personal totals
+       are summed from, and they are also the naming queue and the All-lines table,
+       so a truncated read understates money in and money out and hides lines that
+       still need a name. fetchAll pages instead. (The day book is not fed from
+       here — it reads its own day, per account, below.)
+
+       The order already ends in `id`, which is unique, so the LIMIT/OFFSET paging
+       underneath .range() has a total order to page through and cannot repeat or
+       skip a line between requests. The query is rebuilt per page because a
+       PostgREST builder carries its own range. */
+    const { rows, error, truncated } = await fetchAll<BankTxn>((lo, hi) => {
+      let t = db.from("retail_bank_txns")
+        .select("id,account_id,txn_date,txn_time,direction,amount,balance,descr,ref_no,ref,branch_id,category,counterparty,suggest,needs_ref,auto,source")
+        .order("txn_date", { ascending: false, nullsFirst: false }).order("id");
+      if (from) t = t.gte("txn_date", from);
+      if (to) t = t.lte("txn_date", to);
+      if (acct) t = t.eq("account_id", Number(acct));
+      return t.range(lo, hi);
+    });
+    if (error) setErr(error);
+    setTxns(rows);
+    setPartial(truncated);
     setLoading(false);
   }, [preset, cf, ct, acct]);
 
@@ -495,6 +522,116 @@ export default function BankPage() {
 
   /* ── columns ──────────────────────────────────────────────────────────── */
 
+  /* A STATEMENT LINE AS A CARD.
+   *
+   * The automatic card reads the columns in the order the day gets signed off
+   * in, which is the wrong order for one line: it titles the row "14:32" and
+   * leads with the running balance. On a phone a line IS its narration, the
+   * figure is the amount, and WHICH WAY the money went has to be legible before
+   * the figure is read — so the amount carries a sign, the edge carries the
+   * colour the In/Out columns were carrying, and the running balance drops to
+   * the line underneath. Green in, red out, same two colours as the table.
+   */
+  /* The dark variant is spelled out on purpose. `dark:border-white/[0.06]` on the
+     card compiles to `.dark\:border-…:is(.dark *)`, which outranks a plain
+     `.border-l-success` on specificity — so in dark mode the coloured edge would
+     silently come out grey. Naming the left colour in the dark variant too puts
+     the two at the same specificity, and border-left-color is emitted after
+     border-color, so the edge wins. (The sign and the amount's own colour carry
+     the same information, so the direction is readable either way.) */
+  const dirEdge = (r: BankTxn) => (r.direction === "credit"
+    ? "border-l-success dark:border-l-success" : "border-l-danger dark:border-l-danger");
+  const dirCls = (r: BankTxn) => (r.direction === "credit" ? "text-success" : "text-danger");
+  const dirSign = (r: BankTxn) => (r.direction === "credit" ? "+" : "−");
+
+  /* The day book's card. The reference input is the one thing anybody WRITES on
+     this screen, so it takes the full width of the card rather than the 90px of
+     a squeezed cell — typed and saved on blur exactly as the table does it. */
+  const dayCard = (l: { row: BankTxn; run: number }) => (
+    <div className={`rounded-card border border-l-[5px] border-line bg-surface p-3.5 dark:border-white/[0.06] dark:bg-[#201c17] ${dirEdge(l.row)}`}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="line-clamp-2 text-[13.5px] font-bold text-ink dark:text-[#f4f1ea]">{text(l.row.descr)}</div>
+          <div className="mt-0.5 text-[12px] tabular-nums text-muted dark:text-[#a89f93]">
+            {String(l.row.txn_time ?? "").slice(0, 5) || "no time"} · balance {money(l.run)}
+          </div>
+        </div>
+        <div className={`flex-none text-right text-[15px] font-extrabold tabular-nums ${dirCls(l.row)}`}>
+          {dirSign(l.row)}{money(l.row.amount)}
+        </div>
+      </div>
+      <input value={refDraft[l.row.id] ?? (l.row.ref ?? "")} placeholder={String(l.row.suggest ?? "name this line")}
+        aria-label="Reference"
+        onChange={(e) => setRefDraft((m) => ({ ...m, [l.row.id]: e.target.value }))}
+        onBlur={(e) => { if (bsClean(e.target.value) !== bsClean(l.row.ref)) saveRef(l.row.id, e.target.value); }}
+        className="mt-2.5 w-full rounded-xl2 border border-line bg-canvas px-3 py-2.5 text-ink outline-none transition focus:border-ink/30 dark:border-white/10 dark:bg-white/[0.04] dark:text-white" />
+    </div>
+  );
+
+  /* The queue's card. Nine columns, and the automatic card would put the "Name
+     it" button in the big-figure slot on the right. The balance is the one column
+     that does not survive the trip: a running figure off a statement is not read
+     line by line on a phone, and the lines here are sorted newest-first anyway,
+     so it is not running. Everything else fits. */
+  const txnCard = (r: BankTxn) => (
+    <div className={`rounded-card border border-l-[5px] border-line bg-surface p-3.5 dark:border-white/[0.06] dark:bg-[#201c17] ${dirEdge(r)}`}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="line-clamp-2 text-[13.5px] font-bold text-ink dark:text-[#f4f1ea]">{text(r.descr)}</div>
+          <div className="mt-0.5 truncate text-[12px] text-muted dark:text-[#a89f93]">
+            {text(r.txn_date)} · {bsAcctLabel(acctById(r.account_id))}
+          </div>
+        </div>
+        <div className={`flex-none text-right text-[15px] font-extrabold tabular-nums ${dirCls(r)}`}>
+          {dirSign(r)}{money(r.amount)}
+        </div>
+      </div>
+      {/* The reference and the branch are the two strings on this card somebody
+          typed, so they are the two that can be any length — they truncate in one
+          line rather than going into a Pill, which does not wrap and would print
+          straight out through the side of the card. */}
+      <div className="mt-2 flex items-center gap-2">
+        <span className={`min-w-0 flex-1 truncate text-[12.5px] font-semibold ${r.needs_ref ? "text-amber-strong dark:text-amber" : "text-ink dark:text-[#e7e2d8]"}`}>
+          {r.needs_ref ? "Not named yet" : text(r.ref)}
+          {r.branch_id != null && <span className="font-normal text-muted dark:text-[#a89f93]"> · {branchName(r.branch_id)}</span>}
+        </span>
+        {r.auto && <Pill tone="info">rule</Pill>}
+      </div>
+      {(PERSONAL.test(String(r.descr ?? "")) || SHOP_MONEY.test(String(r.descr ?? ""))) && (
+        <div className="mt-1.5 flex flex-wrap gap-1.5">
+          {PERSONAL.test(String(r.descr ?? "")) && <Pill tone="bad">personal</Pill>}
+          {SHOP_MONEY.test(String(r.descr ?? "")) && <Pill tone="good">shop</Pill>}
+        </div>
+      )}
+      <button onClick={() => startName(r)} className={`${btnGhost} mt-2.5 w-full`}>
+        {r.needs_ref ? "Name it" : "Edit the name"}
+      </button>
+    </div>
+  );
+
+  /* THE REPEAT-PARTY CARD — the one decision on this screen that is worth
+     making on a phone, because one tap names forty lines and teaches the rule
+     that names the next forty. Type, then tap, in that order and nothing else
+     between them. The automatic card put the input in the grey meta line and the
+     Apply button where the money goes. */
+  const groupCard = (g: { name: string; rows: BankTxn[]; inA: number; outA: number }) => (
+    <div className="rounded-card border border-line bg-surface p-3.5 dark:border-white/[0.06] dark:bg-[#201c17]">
+      <div className="line-clamp-2 text-[14px] font-bold text-ink dark:text-[#f4f1ea]">{g.name}</div>
+      <div className="mt-0.5 text-[12px] tabular-nums text-muted dark:text-[#a89f93]">
+        {g.rows.length} line{g.rows.length === 1 ? "" : "s"}
+        {g.inA ? <> · <span className="text-success">in {money(g.inA)}</span></> : null}
+        {g.outA ? <> · <span className="text-danger">out {money(g.outA)}</span></> : null}
+      </div>
+      <input value={groupRef[g.name.toLowerCase()] ?? String(g.rows[0].suggest ?? "")}
+        onChange={(e) => setGroupRef((m) => ({ ...m, [g.name.toLowerCase()]: e.target.value }))}
+        placeholder="e.g. Rent DHA, Card settlement" aria-label={`Your reference for ${g.name}`}
+        className="mt-3 w-full rounded-xl2 border border-line bg-canvas px-3 py-2.5 text-ink outline-none transition focus:border-ink/30 dark:border-white/10 dark:bg-white/[0.04] dark:text-white" />
+      <button onClick={() => applyGroup(g)} disabled={saving} className={`${btnPrimary} mt-2 w-full`}>
+        Apply to {g.rows.length} line{g.rows.length === 1 ? "" : "s"}
+      </button>
+    </div>
+  );
+
   const txnCols: Col<BankTxn>[] = [
     { head: "Date", muted: true, cell: (r) => text(r.txn_date) },
     { head: "Account", muted: true, cell: (r) => bsAcctLabel(acctById(r.account_id)) },
@@ -532,16 +669,23 @@ export default function BankPage() {
       ) },
   ];
 
+  /* The rule's card: the pattern is what it IS, the name it writes is the second
+     line, and how many lines it has saved anybody naming is the figure. "How" is
+     "contains" on every rule this screen can write, the priority is internal, and
+     Delete would otherwise land in the big-figure slot on the right — all three
+     move into the sheet a tap away. */
   const ruleCols: Col<RefRule>[] = [
-    { head: "When the details contain", bold: true, cell: (r) => <code className="text-[12px]">{text(r.pattern)}</code> },
-    { head: "How", muted: true, cell: (r) => text(r.match_type ?? "contains") },
-    { head: "Call it", cell: (r) => text(r.ref) },
+    { head: "When the details contain", bold: true, phone: "title", cell: (r) => <code className="text-[12px]">{text(r.pattern)}</code> },
+    { head: "How", muted: true, phone: "hide", cell: (r) => text(r.match_type ?? "contains") },
+    { head: "Call it", phone: "meta", cell: (r) => text(r.ref) },
     { head: "Account", muted: true, cell: (r) => (r.account_id ? bsAcctLabel(acctById(r.account_id)) : "any") },
     { head: "Direction", muted: true, cell: (r) => (r.direction === "credit" ? "money in" : r.direction === "debit" ? "money out" : "any") },
     { head: "Branch", muted: true, cell: (r) => (r.branch_id ? branchName(r.branch_id) : "—") },
-    { head: "Priority", right: true, muted: true, cell: (r) => num(r.priority ?? 100) },
-    { head: "Used", right: true, cell: (r) => num(r.hits).toLocaleString() },
-    { head: "", right: true, cell: (r) => (
+    { head: "Priority", right: true, muted: true, phone: "hide", cell: (r) => num(r.priority ?? 100) },
+    /* The lead slot on a card carries no label, and a bare "47" beside a pattern
+       reads like an id rather than a count, so the word travels with it. */
+    { head: "Used", right: true, phone: "lead", cell: (r) => (phone ? `${num(r.hits).toLocaleString()} used` : num(r.hits).toLocaleString()) },
+    { head: "", right: true, phone: "hide", cell: (r) => (
         <button onClick={() => deleteRule(r.id)} className="rounded-full border border-line px-3 py-1.5 text-[12px] font-semibold text-ink transition hover:bg-panel dark:border-white/10 dark:text-white dark:hover:bg-white/[0.08]">Delete</button>
       ) },
   ];
@@ -555,6 +699,22 @@ export default function BankPage() {
     { head: "From", muted: true, cell: (r) => text(r.opening_date) },
     { head: "", right: true, cell: (r) => (r.active === false ? <Pill>closed</Pill> : <Pill tone="good">active</Pill>) },
   ];
+
+  /* An account's card. The automatic one titles it with the bank ("alfalah") and
+     puts the active/closed pill in the big-figure slot; the label is what anybody
+     calls the account and open-or-closed is a pill, which RowCard has a row for. */
+  const acctCard = (a: BankAccount) => (
+    <RowCard
+      title={text(a.label)}
+      meta={`${text(a.bank)}${a.account_no ? " · " + a.account_no : ""}`}
+      right={money(a.opening_balance)}
+      pills={a.active === false ? <Pill>closed</Pill> : <Pill tone="good">active</Pill>}
+      pairs={[
+        { k: "Shop it belongs to", v: a.branch_id ? branchName(a.branch_id) : "mixed / not set" },
+        { k: "Opening figure from", v: text(a.opening_date) },
+      ]}
+    />
+  );
 
   const dayCols: Col<{ row: BankTxn; run: number }>[] = [
     { head: "Time", muted: true, cell: (l) => String(l.row.txn_time ?? "").slice(0, 5) || "—" },
@@ -602,6 +762,15 @@ export default function BankPage() {
   const pIn = preview.filter((r) => r.direction === "credit").reduce((a, r) => a + r.amount, 0);
   const pOut = preview.filter((r) => r.direction === "debit").reduce((a, r) => a + r.amount, 0);
 
+  /* Which accounts the lines are going into. On a computer that is a dropdown on
+     every row; on a phone there is no room for one, so the answer has at least to
+     be visible — a statement filed against the wrong account is the one import
+     mistake that is a nuisance to undo. */
+  const previewAccts = useMemo(
+    () => Array.from(new Set(preview.map((r) => r.account_id))).map((id) => bsAcctLabel(acctById(id))).join(", "),
+    [preview, acctById]
+  );
+
   return (
     <Shell>
       <PageHeader title="Bank Statements"
@@ -623,21 +792,36 @@ export default function BankPage() {
       </PageHeader>
 
       {tab === "day" ? (
+        /* Back, the date, forward — one row that fills the width, with Print on
+           its own row underneath. Left as a wrapping flex row it is four controls
+           in 390px, and the one that wraps is whichever one the day's date
+           happens to be wide enough to push off. */
         <div className="mt-5 flex flex-wrap items-center gap-2">
           <button onClick={() => setDay(addDays(day, -1))} className={btnGhost} aria-label="Previous day"><ChevronLeft size={15} /></button>
-          <input type="date" value={day} onChange={(e) => setDay(e.target.value)}
-            className="rounded-full border border-line bg-surface px-3.5 py-2 text-[12.5px] font-semibold text-ink outline-none dark:border-white/10 dark:bg-white/[0.06] dark:text-white" />
+          <input type="date" value={day} onChange={(e) => setDay(e.target.value)} aria-label="Day"
+            className="rounded-full border border-line bg-surface px-3.5 py-2 text-[12.5px] font-semibold text-ink outline-none max-md:flex-1 dark:border-white/10 dark:bg-white/[0.06] dark:text-white" />
           <button onClick={() => setDay(addDays(day, 1))} className={btnGhost} aria-label="Next day"><ChevronRight size={15} /></button>
-          <button onClick={printDay} disabled={!packs.length} className={`${btnGhost} ml-auto`}><Printer size={15} /> Print for signing</button>
+          <button onClick={printDay} disabled={!packs.length} className={`${btnGhost} ml-auto max-md:ml-0 max-md:w-full`}><Printer size={15} /> Print for signing</button>
         </div>
       ) : (
-        <RangeBar preset={preset} setPreset={setPreset} cf={cf} setCf={setCf} ct={ct} setCt={setCt} presets={MONEY_PRESETS} />
+        <RetailRange preset={preset} setPreset={setPreset} cf={cf} setCf={setCf} ct={ct} setCt={setCt} presets={MONEY_PRESETS} />
       )}
 
       <Tabs tabs={TABS} value={tab} onChange={(t) => { setErr(""); setNote(""); setTab(t); }} />
       {(tab === "needs" || tab === "all") && <StatCards stats={stats} loading={loading} />}
 
       {err && <p className="mt-4 text-[12.5px] font-semibold text-danger">{err}</p>}
+      {/* THE 200,000-ROW CEILING, SAID OUT LOUD. Credits, Debits and Flagged
+          personal are sums over the lines that were read; if the read stopped at
+          the ceiling they are lower bounds, and a lower bound printed as a total
+          is a wrong number about money. Only these two tabs are fed by that read
+          — the day book reads its own day. */}
+      {partial && (tab === "needs" || tab === "all") && (
+        <p className="mt-4 text-[12.5px] font-semibold text-amber-strong dark:text-amber">
+          This range is larger than the 200,000 lines this screen can read — the figures above are a
+          lower bound and the queue below is not the whole queue. Narrow the dates.
+        </p>
+      )}
       {note && (
         <div className="mt-4 flex gap-3 rounded-card border border-success/30 bg-success-soft p-4 dark:border-success/30 dark:bg-success/10">
           <CheckCircle2 size={18} className="mt-0.5 flex-none text-success" />
@@ -661,30 +845,39 @@ export default function BankPage() {
                     {p.needN ? ` · ${p.needN} to name` : p.lines.length ? " · all named" : ""}
                   </p>
                 </div>
-                <div className="flex flex-wrap items-center gap-4">
+                {/* Four right-aligned figures in a wrapping row become 2 + 2 at
+                    390px with a ragged right edge in the middle of the card. A
+                    2×2 grid instead, left-aligned so the labels line up — this
+                    block is the whole day in four numbers and it is what the day
+                    gets signed off against, so it has to read at a glance. */}
+                <div className="flex flex-wrap items-center gap-4 max-md:grid max-md:w-full max-md:grid-cols-2 max-md:gap-3">
                   {[
                     { l: "Opening", v: money(p.opening), c: "" },
                     { l: "In", v: money(p.inAmt), c: "text-success" },
                     { l: "Out", v: money(p.outAmt), c: "text-danger" },
                     { l: "Closing", v: money(p.closing), c: "" },
                   ].map((x) => (
-                    <div key={x.l} className="text-right">
+                    <div key={x.l} className="text-right max-md:text-left">
                       <div className="text-[11px] font-medium uppercase tracking-wide text-hint dark:text-[#8a8175]">{x.l}</div>
                       <div className={`text-[14px] font-extrabold tabular-nums ${x.c || "text-ink dark:text-[#f4f1ea]"}`}>{x.v}</div>
                     </div>
                   ))}
                 </div>
               </div>
+              {/* No footer on a phone: it is the same In / Out / Closing that the
+                  four figures above already give, and a six-column <tfoot> at
+                  390px squeezes three money values into 70px each. */}
               <DataTable cols={dayCols} rows={p.lines} loading={dayLoading} minWidth={900}
                 empty={`Nothing on ${day} in this account.`}
-                footer={
+                card={phone ? dayCard : undefined}
+                footer={phone ? undefined : (
                   <tr className="font-semibold text-ink dark:text-[#f4f1ea]">
                     <td className="px-4 py-3" colSpan={3}>Total for the day</td>
                     <td className="px-4 py-3 text-right tabular-nums text-success">{money(p.inAmt)}</td>
                     <td className="px-4 py-3 text-right tabular-nums text-danger">{money(p.outAmt)}</td>
                     <td className="px-4 py-3 text-right tabular-nums">{money(p.closing)}</td>
                   </tr>
-                } />
+                )} />
             </div>
           ))
         )
@@ -701,19 +894,21 @@ export default function BankPage() {
                 unless the name would also have matched somebody else&apos;s.
               </p>
               <DataTable cols={groupCols} rows={groups} loading={loading} minWidth={980}
+                card={phone ? groupCard : undefined}
                 empty="No party appears more than once." />
             </>
           )}
           <h2 className="mt-6 text-[15px] font-extrabold tracking-tight text-ink dark:text-[#f4f1ea]">One-off lines</h2>
           <p className="mt-0.5 text-[12.5px] text-muted dark:text-[#a89f93]">{singles.length} that appear only once in this range.</p>
           <DataTable cols={txnCols} rows={singles} loading={loading} minWidth={1140}
+            card={phone ? txnCard : undefined}
             empty="Nothing waiting — every line in this range has a name." />
         </>
       )}
 
-      {tab === "all" && <DataTable cols={txnCols} rows={txns} loading={loading} minWidth={1140} empty="No statement lines in this range. Add an account and import a statement first." />}
-      {tab === "rules" && <DataTable cols={ruleCols} rows={rules} loading={loading} minWidth={1060} empty="No rules yet — name a line and tick “remember this” to make the first one." />}
-      {tab === "accounts" && <DataTable cols={acctCols} rows={accounts} loading={loading} minWidth={900} empty="No accounts yet — add the Alfalah pooled account first." />}
+      {tab === "all" && <DataTable cols={txnCols} rows={txns} loading={loading} minWidth={1140} card={phone ? txnCard : undefined} empty="No statement lines in this range. Add an account and import a statement first." />}
+      {tab === "rules" && <DataTable cols={ruleCols} rows={rules} loading={loading} minWidth={1060} onRowTap={(r) => setRuleOpen(r)} empty="No rules yet — name a line and tick “remember this” to make the first one." />}
+      {tab === "accounts" && <DataTable cols={acctCols} rows={accounts} loading={loading} minWidth={900} card={phone ? acctCard : undefined} empty="No accounts yet — add the Alfalah pooled account first." />}
 
       <SourceNote>
         In the pooled Alfalah account, <strong>only the Merchant Payment / IBFT credits are shop
@@ -755,11 +950,58 @@ export default function BankPage() {
               </div>
             ))}
           </div>
-          <div className="max-h-[46vh] overflow-y-auto">
-            <DataTable cols={previewCols} rows={preview} minWidth={1100} empty="Nothing readable in those files." />
-          </div>
+          {/* A 1,100px table, inside a dialog, inside a 390px phone, inside a
+              scroller that is already inside a scroller. There is no arrangement
+              of eight columns and three form controls per row that works there.
+              So the phone gets the question it is actually able to answer — did
+              this file read correctly, yes or no — as the four figures above, the
+              accounts the lines are going into, and the first few lines in full.
+              Nothing about the save changes: every line is ticked by default, has
+              the account the file was matched to, and carries whatever a saved
+              rule named it, which is exactly what pressing Save on the computer
+              with nothing touched does today. Per-line un-ticking and re-pointing
+              a line at another account stay a desk job. */}
+          {phone ? (
+            <>
+              <p className="rounded-xl2 border border-line bg-panel/60 px-3.5 py-2.5 text-[12px] leading-relaxed text-muted dark:border-white/[0.06] dark:bg-white/[0.03] dark:text-[#a89f93]">
+                Going into <strong className="text-ink dark:text-[#e7e2d8]">{previewAccts}</strong>.
+                Every line below saves; anything a rule did not name lands in &ldquo;Needs a name&rdquo;.
+              </p>
+              <div className="space-y-2">
+                {preview.slice(0, 5).map((r, i) => (
+                  <div key={i} className={`rounded-card border border-l-[5px] border-line bg-surface p-3 dark:border-white/[0.06] dark:bg-[#201c17] ${r.direction === "credit" ? "border-l-success dark:border-l-success" : "border-l-danger dark:border-l-danger"}`}>
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <div className="line-clamp-2 text-[13px] font-bold text-ink dark:text-[#f4f1ea]">{r.descr}</div>
+                        <div className="mt-0.5 text-[11.5px] text-muted dark:text-[#a89f93]">
+                          {r.txn_date}{r.txn_time ? " " + r.txn_time : ""}
+                        </div>
+                      </div>
+                      <div className={`flex-none text-right text-[14px] font-extrabold tabular-nums ${r.direction === "credit" ? "text-success" : "text-danger"}`}>
+                        {r.direction === "credit" ? "+" : "−"}{money(r.amount)}
+                      </div>
+                    </div>
+                    {r.ref && (
+                      <div className="mt-1.5 truncate text-[12px] font-semibold text-periwinkle-strong dark:text-periwinkle">
+                        a rule named this “{r.ref}”
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+              {preview.length > 5 && (
+                <p className="text-center text-[12px] text-muted dark:text-[#a89f93]">
+                  and {preview.length - 5} more line{preview.length - 5 === 1 ? "" : "s"}, all of which save too.
+                </p>
+              )}
+            </>
+          ) : (
+            <div className="max-h-[46vh] overflow-y-auto">
+              <DataTable cols={previewCols} rows={preview} minWidth={1100} empty="Nothing readable in those files." />
+            </div>
+          )}
           {err && <p className="text-[12.5px] font-semibold text-danger">{err}</p>}
-          <div className="flex justify-end gap-2 pt-1">
+          <div className="flex justify-end gap-2 pt-1 max-md:pb-[env(safe-area-inset-bottom)] max-md:[&>button]:flex-1">
             <button onClick={() => setPreview([])} className={btnGhost}>Cancel</button>
             <button onClick={saveImport} disabled={saving} className={btnPrimary}>
               {saving ? "Saving…" : `Save ${preview.filter((r) => r.keep).length} transaction(s)`}
@@ -769,11 +1011,24 @@ export default function BankPage() {
       </Modal>
 
       {/* ── NAME ONE LINE ──────────────────────────────────────────────── */}
+      {/* THE NAMING DIALOG — the one thing anybody writes on this screen, so it
+          is the one dialog that has to work with a thumb. On a phone the dialog
+          is a bottom sheet: the narration is too long for the subtitle, which
+          would wrap to four lines and push the field it belongs to off the
+          bottom, so it moves into a clamped block of its own below. */}
       <Modal open={!!naming} onClose={() => setNaming(null)} title="Name this line"
-        subtitle={naming ? `${text(naming.txn_date)} · ${money(naming.amount)} · ${text(naming.descr)}` : undefined}>
+        subtitle={naming
+          ? (phone ? `${text(naming.txn_date)} · ${money(naming.amount)}`
+            : `${text(naming.txn_date)} · ${money(naming.amount)} · ${text(naming.descr)}`)
+          : undefined}>
         <div className="space-y-3.5">
+          {phone && naming && (
+            <p className="line-clamp-3 rounded-xl2 border border-line bg-panel/60 px-3.5 py-2.5 text-[12px] leading-relaxed text-muted dark:border-white/[0.06] dark:bg-white/[0.03] dark:text-[#a89f93]">
+              {text(naming.descr)}
+            </p>
+          )}
           <Field label="Reference — what to call it"><input value={nameForm.ref} onChange={(e) => setNameForm({ ...nameForm, ref: e.target.value })} className={inputCls} autoFocus placeholder="e.g. Card settlement, Rent DHA" /></Field>
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
             <Field label="Branch">
               <select value={nameForm.branch_id} onChange={(e) => setNameForm({ ...nameForm, branch_id: e.target.value })} className={inputCls}>
                 <option value="">Not a branch line</option>
@@ -782,8 +1037,10 @@ export default function BankPage() {
             </Field>
             <Field label="Category"><input value={nameForm.category} onChange={(e) => setNameForm({ ...nameForm, category: e.target.value })} className={inputCls} placeholder="Optional" /></Field>
           </div>
+          {/* The whole label toggles the box, so the tap target is the block, not
+              the 16px square — the square just has to be seen from arm's length. */}
           <label className="flex items-start gap-2.5 rounded-xl2 border border-line bg-panel/50 px-3.5 py-3 text-[12.5px] text-ink dark:border-white/[0.06] dark:bg-white/[0.03] dark:text-[#e7e2d8]">
-            <input type="checkbox" checked={nameForm.learn} onChange={(e) => setNameForm({ ...nameForm, learn: e.target.checked })} className="mt-0.5 h-4 w-4 accent-[#141414] dark:accent-white" />
+            <input type="checkbox" checked={nameForm.learn} onChange={(e) => setNameForm({ ...nameForm, learn: e.target.checked })} className="mt-0.5 h-4 w-4 accent-[#141414] max-md:h-5 max-md:w-5 dark:accent-white" />
             <span>
               <strong>Remember this line.</strong> The rule is written from{" "}
               <code>{naming ? bsPattern(naming) : ""}</code> — a masked account token if there is one,
@@ -792,7 +1049,7 @@ export default function BankPage() {
             </span>
           </label>
           {err && <p className="text-[12.5px] font-semibold text-danger">{err}</p>}
-          <div className="flex justify-end gap-2 pt-1">
+          <div className="flex justify-end gap-2 pt-1 max-md:pb-[env(safe-area-inset-bottom)] max-md:[&>button]:flex-1">
             <button onClick={() => setNaming(null)} className={btnGhost}>Cancel</button>
             <button onClick={saveName} disabled={saving} className={btnPrimary}>{saving ? "Saving…" : "Save name"}</button>
           </div>
@@ -803,7 +1060,7 @@ export default function BankPage() {
       <Modal open={acctOpen} onClose={() => setAcctOpen(false)} title="Add a bank account"
         subtitle="The opening balance is the figure on the statement the day before the first line you will import.">
         <div className="space-y-3.5">
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
             <Field label="Bank">
               <select value={acctForm.bank} onChange={(e) => setAcctForm({ ...acctForm, bank: e.target.value })} className={inputCls}>
                 <option value="alfalah">Bank Alfalah</option>
@@ -814,6 +1071,8 @@ export default function BankPage() {
             </Field>
             <Field label="Label"><input value={acctForm.label} onChange={(e) => setAcctForm({ ...acctForm, label: e.target.value })} className={inputCls} placeholder="e.g. Pooled 5840" autoFocus /></Field>
           </div>
+          {/* Deliberately NOT inputMode="numeric": an IBAN has letters in it, and
+              on iOS the numeric keypad has no way to reach them. */}
           <Field label="Account number"><input value={acctForm.account_no} onChange={(e) => setAcctForm({ ...acctForm, account_no: e.target.value })} className={inputCls} /></Field>
           <Field label="Shop it belongs to">
             <select value={acctForm.branch_id} onChange={(e) => setAcctForm({ ...acctForm, branch_id: e.target.value })} className={inputCls}>
@@ -821,20 +1080,50 @@ export default function BankPage() {
               {branches.map((b) => <option key={b.id} value={String(b.id)}>{b.name}</option>)}
             </select>
           </Field>
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="Opening balance"><input type="number" value={acctForm.opening_balance} onChange={(e) => setAcctForm({ ...acctForm, opening_balance: e.target.value })} className={inputCls} /></Field>
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+            <Field label="Opening balance"><input type="number" inputMode="decimal" value={acctForm.opening_balance} onChange={(e) => setAcctForm({ ...acctForm, opening_balance: e.target.value })} className={inputCls} /></Field>
             <Field label="Opening date"><input type="date" value={acctForm.opening_date} onChange={(e) => setAcctForm({ ...acctForm, opening_date: e.target.value })} className={inputCls} /></Field>
           </div>
           {err && <p className="text-[12.5px] font-semibold text-danger">{err}</p>}
-          <div className="flex justify-end gap-2 pt-1">
+          <div className="flex justify-end gap-2 pt-1 max-md:pb-[env(safe-area-inset-bottom)] max-md:[&>button]:flex-1">
             <button onClick={() => setAcctOpen(false)} className={btnGhost}>Cancel</button>
             <button onClick={saveAccount} disabled={saving} className={btnPrimary}>{saving ? "Saving…" : "Add account"}</button>
           </div>
         </div>
       </Modal>
 
+      {/* ── A RULE IN FULL, ON A PHONE ──────────────────────────────────────
+          Nine columns do not fit, and the three that were dropped are the two
+          nobody reads ("contains", the priority) plus Delete, which is better
+          behind a deliberate tap than loose in a list: deleting a rule leaves
+          every future line it would have matched unnamed. */}
+      <Sheet open={!!ruleOpen} onClose={() => setRuleOpen(null)} title="This rule"
+        subtitle={ruleOpen ? `Names a line “${text(ruleOpen.ref)}”` : undefined}>
+        {ruleOpen && (
+          <>
+            <Detail items={[
+              { k: "When the details contain", v: <code className="text-[12px]">{text(ruleOpen.pattern)}</code> },
+              { k: "How it matches", v: text(ruleOpen.match_type ?? "contains") },
+              { k: "Call it", v: text(ruleOpen.ref) },
+              { k: "Account", v: ruleOpen.account_id ? bsAcctLabel(acctById(ruleOpen.account_id)) : "any" },
+              { k: "Direction", v: ruleOpen.direction === "credit" ? "money in" : ruleOpen.direction === "debit" ? "money out" : "any" },
+              { k: "Branch", v: ruleOpen.branch_id ? branchName(ruleOpen.branch_id) : "—" },
+              { k: "Category", v: text(ruleOpen.category) },
+              { k: "Priority", v: num(ruleOpen.priority ?? 100) },
+              { k: "Lines it has named", v: num(ruleOpen.hits).toLocaleString() },
+            ]} />
+            <div className="mt-4 max-md:pb-[env(safe-area-inset-bottom)]">
+              <button onClick={() => { deleteRule(ruleOpen.id); setRuleOpen(null); }}
+                className="w-full rounded-full border border-danger/40 bg-danger-soft px-4 py-2.5 text-[13px] font-semibold text-danger transition dark:border-danger/40 dark:bg-danger/10">
+                Delete this rule
+              </button>
+            </div>
+          </>
+        )}
+      </Sheet>
+
       <div className="mt-3 flex items-center justify-center gap-1.5 text-center text-[12px] text-hint dark:text-[#8a8175]">
-        <Landmark size={13} /> CSV statements import here. A PDF or a photograph needs the
+        <Landmark size={13} className="flex-none" /> CSV statements import here. A PDF or a photograph needs the
         read-statement function deployed on this project.
       </div>
       <PreviewNote />

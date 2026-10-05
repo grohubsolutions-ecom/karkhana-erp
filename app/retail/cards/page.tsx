@@ -38,10 +38,11 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { CreditCard, Plus, Landmark, AlertTriangle, CheckCircle2, Link2 } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import Modal, { Field, inputCls, btnPrimary, btnGhost } from "@/components/Modal";
-import RangeBar from "@/components/RangeBar";
 import { rangeDates } from "@/lib/dateRange";
 import {
+  RetailRange,
   Shell, PageHeader, StatCards, DataTable, Tabs, Pill, Select, PreviewNote, SourceNote,
+  RowCard, Sheet, Detail, useIsPhone,
   useBranches, money, moneyOrDash, num, text, today, fetchAll,
   CARD_RATE_PCT, cardExpected, crTol, CR_AGE_DAYS,
   type Row, type Col,
@@ -431,6 +432,7 @@ function buildRecon(p: {
 
 export default function CardReconPage() {
   const { branches, branchName } = useBranches();
+  const phone = useIsPhone();
   const [tab, setTab] = useState<Tab>("days");
   const [preset, setPreset] = useState("30d");
   const [cf, setCf] = useState(""); const [ct, setCt] = useState("");
@@ -441,10 +443,17 @@ export default function CardReconPage() {
   const [sets, setSets] = useState<Row[]>([]);
   const [sales, setSales] = useState<Row[]>([]);
   const [loading, setLoading] = useState(true);
+  /* True when a paged read hit fetchAll's 200,000-row ceiling. Everything below
+     is then a lower bound, and the verdict has to say so rather than announce a
+     shortage — or the absence of one — off a partial read. */
+  const [partial, setPartial] = useState(false);
   const [err, setErr] = useState("");
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState({ credit_date: today(), sale_date: today(), amount: "", ref: "", bank: "Bank Alfalah", branch_id: "", descr: "" });
+  /* One payment's full row, for the phone sheet. Only reachable by tapping a
+     card, which only exists below 768px, so this is dead state on a computer. */
+  const [payOpen, setPayOpen] = useState<Row | null>(null);
 
   const lag = Math.max(0, Math.min(7, num(lagIn)));
   const roll = Math.max(0, Math.min(3, num(rollIn)));
@@ -465,25 +474,42 @@ export default function CardReconPage() {
 
     /* PostgREST caps a response at 1000 rows and does not say so. A shop-day
        silently missing its last sale lines is a shortage this screen would then
-       report as real money gone. fetchAll pages. */
-    const { rows: saleRows, error: se } = await fetchAll<Row>((a, b) =>
+       report as real money gone. fetchAll pages.
+
+       AND THE SORT KEY HAS TO BE UNIQUE. fetchAll pages with .range(), which is
+       LIMIT/OFFSET: two separate requests, and `sale_date` alone has hundreds of
+       ties inside one day, so Postgres is free to order them differently each
+       time — a line comes back twice or never, and this table is appended to by
+       imports while somebody is reading it. `id` after `sale_date` makes the
+       order total. The visible ordering is unchanged; it is only the tie that
+       was undefined before. */
+    const { rows: saleRows, error: se, truncated: saleCut } = await fetchAll<Row>((a, b) =>
       db.from("retail_sale_lines").select("branch_id,sale_date,sales_amount")
         .eq("payment_method", "meezan_card")
         .gte("sale_date", from).lte("sale_date", to)
-        .order("sale_date").range(a, b));
+        .order("sale_date").order("id").range(a, b));
 
     /* THE CREDIT WINDOW IS WIDER THAN THE SALES WINDOW, by lag + roll + 4 days.
        Sales on the last day of the range settle after the last day of the range.
        Query the two windows as though they were the same and the first and last
-       day of every range you ever pick are structurally unmatchable. */
-    const { data: setRows, error: ce } = await db.from("retail_card_settlements")
-      .select("id,branch_id,credit_date,credit_time,sale_date,amount,ref,bank,descr,source")
-      .gte("credit_date", from).lte("credit_date", addDays(to, lag + roll + 4))
-      .order("credit_date").limit(5000);
+       day of every range you ever pick are structurally unmatchable.
 
-    if (se || ce) setErr(se || ce?.message || "");
+       AND IT PAGES, for the same reason the sale lines do — this half used to ask
+       for `.limit(5000)`, which does not raise the 1000-row cap, it only stops
+       asking. Settlements are the other side of the subtraction: a settlement row
+       that was never fetched is money that arrived and is reported as missing.
+       Sixty days across nine shops passes 1000 rows, so the screen printed card
+       shortages that were not real, on days whose money had been paid. */
+    const { rows: setRows, error: ce, truncated: setsCut } = await fetchAll<Row>((a, b) =>
+      db.from("retail_card_settlements")
+        .select("id,branch_id,credit_date,credit_time,sale_date,amount,ref,bank,descr,source")
+        .gte("credit_date", from).lte("credit_date", addDays(to, lag + roll + 4))
+        .order("credit_date").order("id").range(a, b));
+
+    if (se || ce) setErr(se || ce || "");
     setSales(saleRows);
-    setSets((setRows as Row[]) ?? []);
+    setSets(setRows);
+    setPartial(saleCut || setsCut);
     setLoading(false);
   }, [from, to, lag, roll]);
   useEffect(() => { load(); }, [load]);
@@ -564,6 +590,95 @@ export default function CardReconPage() {
     : t === "info" ? "text-periwinkle-strong dark:text-periwinkle"
     : "text-muted dark:text-[#a89f93]";
 
+  /* RowCard paints one 5px edge in one of three colours, so the five tones have
+     to become four. "info" (settled out of the pooled money) and "neutral" (not
+     received yet) are statements of fact, not problems, so they stay plain: the
+     edge is kept for the only two things worth spotting while scrolling past
+     without reading — a shop that is short, and one that got too much. */
+  const toneEdge = (t: Tone): "plain" | "good" | "bad" | "warn" =>
+    t === "bad" ? "bad" : t === "warn" ? "warn" : t === "good" ? "good" : "plain";
+
+  /* THE RECONCILIATION AS CARDS.
+   *
+   * The automatic card leads with "Should get", because that is the last bold
+   * right-hand column — and nobody has ever opened this screen to find out what
+   * a shop should have been paid. They opened it to find out whether the money
+   * arrived. So the DIFFERENCE is the lead figure, and the line's own tone
+   * paints the card edge, which makes a short shop findable by scrolling past
+   * the colours instead of reading seven columns on each of nine shops.
+   *
+   * The three kinds of line are three different things on a phone: a day is a
+   * heading, a shop is a card, and the day total has to look unlike a shop or it
+   * reads as a tenth shop that is somehow the sum of the others.
+   */
+  const dayCard = (l: Line) => {
+    if (l.kind === "day") {
+      return (
+        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 px-1 pt-2">
+          <span className="text-[14px] font-extrabold text-ink dark:text-[#f4f1ea]">{l.label}</span>
+          <span className="text-[11.5px] text-muted dark:text-[#a89f93]">{l.note}</span>
+        </div>
+      );
+    }
+
+    const diff = l.diff === null
+      ? <span className="text-muted dark:text-[#a89f93]">—</span>
+      : <span className={toneCls(l.tone)}>{l.diff > 0 ? "+" : ""}{money(l.diff)}</span>;
+
+    if (l.kind === "total") {
+      return (
+        <div className="rounded-card border border-line bg-panel/60 px-3.5 py-3 dark:border-white/[0.06] dark:bg-white/[0.04]">
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-[11.5px] font-bold uppercase tracking-wide text-muted dark:text-[#a89f93]">Day total</span>
+            <span className="text-[15px] font-extrabold tabular-nums">{diff}</span>
+          </div>
+          <div className="mt-1 text-[12px] tabular-nums text-muted dark:text-[#a89f93]">
+            {money(l.sale)} sold · should get {money(l.expected)} · got {l.got === null ? "—" : money(l.got)}
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <RowCard
+        title={l.label}
+        meta={<span className={`font-semibold ${toneCls(l.tone)}`}>{l.status}</span>}
+        right={diff}
+        pairs={[
+          { k: "Card sales", v: l.sale === null ? "—" : money(l.sale) },
+          { k: "Charge", v: l.sale === null || l.expected === null ? "—" : <span className="text-danger">−{money(l.sale - l.expected)}</span> },
+          { k: "Should get", v: l.expected === null ? "—" : money(l.expected) },
+          { k: "Received", v: l.got === null ? "—" : `${money(l.got)}${l.nc > 1 ? ` (${l.nc})` : ""}` },
+        ]}
+        tone={toneEdge(l.tone)}
+      />
+    );
+  };
+
+  /* NOT TIED TO A SHOP, ON A PHONE.
+     The automatic card drops the shop picker into a half-width pair cell, where
+     nine branch names are three letters each. Picking the shop IS this tab — it
+     is the only thing anybody comes here to do — so it gets the full width of
+     the card, directly under the amount it is a decision about. */
+  const looseCard = (c: Credit) => (
+    <div className="rounded-card border border-line bg-surface p-3.5 dark:border-white/[0.06] dark:bg-[#201c17]">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="text-[14.5px] font-bold text-ink dark:text-[#f4f1ea]">
+            {crDay(c.credit_date)}{c.time ? " · " + String(c.time).slice(0, 5) : ""}
+          </div>
+          {c.ref && <div className="mt-0.5 truncate text-[12px] text-muted dark:text-[#a89f93]">Tx {c.ref}</div>}
+        </div>
+        <div className="flex-none text-[16px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">{money(c.amount)}</div>
+      </div>
+      <select value="" onChange={(e) => assign(c.id, c.credit_date, e.target.value)} aria-label="Give it a shop"
+        className="mt-3 w-full rounded-xl2 border border-line bg-surface px-3 py-2.5 font-semibold text-ink dark:border-white/10 dark:bg-white/[0.06] dark:text-white">
+        <option value="">Pick a shop…</option>
+        {branches.map((b) => <option key={b.id} value={String(b.id)}>{b.name}</option>)}
+      </select>
+    </div>
+  );
+
   const dayCols: Col<Line>[] = [
     { head: "Shop", cell: (l) =>
         l.kind === "day"
@@ -600,10 +715,17 @@ export default function CardReconPage() {
     [sets]
   );
 
+  /* THE PHONE CARD FOR A PAYMENT: when it landed, what it was matched to, how
+     much. The other four columns are the audit trail — the sale day we stamped,
+     the bank's own transaction id, where the row came from, and the shop field
+     itself — and they are what you check when a figure looks wrong, not what you
+     read going down the list. They are one tap away in the sheet below, which is
+     also where the shop gets assigned, because a dropdown inside a half-width
+     pair cell is a dropdown nobody can use one-handed. */
   const payCols: Col<Row>[] = [
-    { head: "Received on", muted: true, cell: (r) => `${text(r.credit_date)}${r.credit_time ? " " + String(r.credit_time).slice(0, 5) : ""}` },
-    { head: "Amount", right: true, bold: true, cell: (r) => money(r.amount) },
-    { head: "Matched to", cell: (r) => {
+    { head: "Received on", muted: true, phone: "title", cell: (r) => `${text(r.credit_date)}${r.credit_time ? " " + String(r.credit_time).slice(0, 5) : ""}` },
+    { head: "Amount", right: true, bold: true, phone: "lead", cell: (r) => money(r.amount) },
+    { head: "Matched to", phone: "meta", cell: (r) => {
         const m = R.matchOf[Number(r.id)];
         if (!m) return <Pill tone="warn">not tied to a shop</Pill>;
         if (m.outside) return <span className="text-[12px] text-muted dark:text-[#a89f93]">pays for {m.date} — outside this range</span>;
@@ -615,10 +737,10 @@ export default function CardReconPage() {
           </span>
         );
       } },
-    { head: "Sale day on file", muted: true, cell: (r) => text(r.sale_date) },
-    { head: "Tx ID", muted: true, cell: (r) => text(r.ref) },
-    { head: "Source", cell: (r) => (String(r.source) === "manual" ? <Pill>By hand</Pill> : String(r.source) === "statement" ? <Pill tone="info">Statement</Pill> : <Pill tone="info">Slip</Pill>) },
-    { head: "Shop", right: true, cell: (r) => (
+    { head: "Sale day on file", muted: true, phone: "hide", cell: (r) => text(r.sale_date) },
+    { head: "Tx ID", muted: true, phone: "hide", cell: (r) => text(r.ref) },
+    { head: "Source", phone: "hide", cell: (r) => (String(r.source) === "manual" ? <Pill>By hand</Pill> : String(r.source) === "statement" ? <Pill tone="info">Statement</Pill> : <Pill tone="info">Slip</Pill>) },
+    { head: "Shop", right: true, phone: "hide", cell: (r) => (
         r.branch_id != null ? <span className="font-semibold">{branchName(r.branch_id)}</span> : (
           <Select value="" onChange={(v) => assign(r.id, String(r.credit_date), v)}>
             <option value="">Pick a shop…</option>
@@ -629,7 +751,7 @@ export default function CardReconPage() {
   ];
 
   /* ── the one sentence at the top that says whether money is missing ────── */
-  const verdict = (() => {
+  const baseVerdict = (() => {
     const extra = (R.loose > 1 ? ` Another ${money(R.loose)} arrived in ${R.looseN} payment(s) that could not be tied to a shop.` : "")
       + (R.outAmt > 1 ? ` ${money(R.outAmt)} in ${R.outN} payment(s) pays for sale days outside this range.` : "");
     const wait = R.waitDays ? ` ${R.waitDays} day(s) haven't settled yet.` : "";
@@ -640,6 +762,14 @@ export default function CardReconPage() {
     return { tone: "good" as const, text: `All settled. Expected ${money(R.tExp)}, received ${money(R.tGot)}.` };
   })();
 
+  /* EVERY SENTENCE ABOVE IS A CLAIM ABOUT COMPLETENESS — "all settled", "nothing
+     is missing", "short by X". If the paged read stopped at its 200,000-row
+     ceiling then both sides of the subtraction are lower bounds and none of those
+     sentences is true as written, so the verdict says what it is instead. */
+  const verdict = partial
+    ? { ...baseVerdict, text: `${baseVerdict.text} This range is larger than the 200,000 rows this screen can read, so every figure above is a lower bound — narrow the dates before trusting it.` }
+    : baseVerdict;
+
   return (
     <Shell>
       <PageHeader title="Card Reconciliation"
@@ -648,12 +778,16 @@ export default function CardReconPage() {
         <button onClick={() => { setErr(""); setOpen(true); }} className={btnPrimary}><Plus size={15} /> Add a credit</button>
       </PageHeader>
 
-      <RangeBar preset={preset} setPreset={setPreset} cf={cf} setCf={setCf} ct={ct} setCt={setCt} presets={CARD_PRESETS} />
+      <RetailRange preset={preset} setPreset={setPreset} cf={cf} setCf={setCf} ct={ct} setCt={setCt} presets={CARD_PRESETS} />
 
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        <label className="flex items-center gap-2 rounded-full border border-line bg-surface px-3.5 py-1.5 text-[12.5px] font-semibold text-ink dark:border-white/10 dark:bg-white/[0.06] dark:text-white">
+        {/* py-1.5 around a 13px input is a 25px-tall tap target on a computer,
+            where a mouse can hit it. The phone CSS raises every input to 16px to
+            stop iOS zooming, which still leaves a 30px strip for the one number
+            on this screen that changes every figure below it. */}
+        <label className="flex items-center gap-2 rounded-full border border-line bg-surface px-3.5 py-1.5 text-[12.5px] font-semibold text-ink max-md:py-2.5 dark:border-white/10 dark:bg-white/[0.06] dark:text-white">
           Bank charge %
-          <input type="number" step="0.001" value={rateIn} onChange={(e) => setRateIn(e.target.value)}
+          <input type="number" inputMode="decimal" step="0.001" value={rateIn} onChange={(e) => setRateIn(e.target.value)}
             className="w-20 bg-transparent text-right tabular-nums outline-none" />
         </label>
         <label className="flex items-center gap-2 text-[12.5px] font-semibold text-muted dark:text-[#a89f93]">
@@ -701,9 +835,16 @@ export default function CardReconPage() {
       {err && <p className="mt-4 text-[12.5px] font-semibold text-danger">{err}</p>}
 
       {tab === "days" && (
-        <DataTable cols={dayCols} rows={R.lines} loading={loading} minWidth={1020}
-          empty="No card sales in this range."
-          footer={
+        <>
+          {/* The totals row is kept on a phone by rendering the <tfoot> in a
+              table of its own — which for seven unlabelled money columns at
+              390px is seven unlabelled money columns. So the footer is desktop
+              only, and the same two rows become cards underneath, carrying the
+              labels the <th>s were holding for them. */}
+          <DataTable cols={dayCols} rows={R.lines} loading={loading} minWidth={1020}
+            empty="No card sales in this range."
+            card={phone ? dayCard : undefined}
+            footer={phone ? undefined : (
             <>
               <tr className="font-extrabold text-ink dark:text-[#f4f1ea]">
                 <td className="px-4 py-3">SETTLED TOTAL</td>
@@ -731,7 +872,40 @@ export default function CardReconPage() {
                 </tr>
               )}
             </>
-          } />
+            )} />
+          {phone && !loading && R.lines.length > 0 && (
+            <div className="mt-2 space-y-2">
+              <RowCard
+                title="Settled total"
+                meta={R.tShort > 1
+                  ? <span className="font-semibold text-danger">short {money(R.tShort)}</span>
+                  : <span className="font-semibold text-success">matched</span>}
+                right={<span className={R.tShort > 1 ? "text-danger" : "text-success"}>
+                  {R.missing > 1 ? "−" + money(R.missing) : "+" + money(-R.missing)}
+                </span>}
+                pairs={[
+                  { k: "Card sales", v: money(R.tSale) },
+                  { k: `Charge ${rate}%`, v: <span className="text-danger">−{money(R.tSale - R.tExp)}</span> },
+                  { k: "Should get", v: money(R.tExp) },
+                  { k: "Received", v: money(R.tGot) },
+                ]}
+                tone={R.tShort > 1 ? "bad" : "good"}
+              />
+              {R.wExp > 1 && (
+                <RowCard
+                  title="Not settled yet"
+                  meta={`${R.waitDays} day${R.waitDays === 1 ? "" : "s"} still waiting`}
+                  right={<span className="text-muted dark:text-[#a89f93]">—</span>}
+                  pairs={[
+                    { k: "Card sales", v: money(R.wSale) },
+                    { k: `Charge ${rate}%`, v: <span className="text-danger">−{money(R.wSale - R.wExp)}</span> },
+                    { k: "Should get", v: money(R.wExp) },
+                  ]}
+                />
+              )}
+            </div>
+          )}
+        </>
       )}
 
       {tab === "loose" && (
@@ -742,12 +916,14 @@ export default function CardReconPage() {
             forced onto a shop, because a forced match invents a shortage somewhere else.
           </p>
           <DataTable cols={looseCols} rows={R.looseRows} loading={loading} minWidth={760}
+            card={phone ? looseCard : undefined}
             empty="Every payment in this range is tied to a shop." />
         </>
       )}
 
       {tab === "payments" && (
         <DataTable cols={payCols} rows={payRows} loading={loading} minWidth={1060}
+          onRowTap={(r) => setPayOpen(r)}
           empty="Nothing loaded for this range yet." />
       )}
 
@@ -768,16 +944,22 @@ export default function CardReconPage() {
 
       <Modal open={open} onClose={() => setOpen(false)} title="Record a card credit"
         subtitle="Type what the bank shows. Duplicates are refused by the database, so it is safe to add one you are unsure about.">
+        {/* One field per line on a phone. Two date inputs side by side at 390px
+            with the 16px font the phone CSS forces are two fields that both get
+            mis-tapped; from 768px up this is the two-column grid it always was. */}
         <div className="space-y-3.5">
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
             <Field label="Credit date"><input type="date" value={form.credit_date} onChange={(e) => setForm({ ...form, credit_date: e.target.value })} className={inputCls} /></Field>
             <Field label="Sale day it covers"><input type="date" value={form.sale_date} onChange={(e) => setForm({ ...form, sale_date: e.target.value })} className={inputCls} /></Field>
           </div>
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="Amount"><input type="number" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} className={inputCls} autoFocus /></Field>
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+            {/* inputMode="decimal" is what puts the numeric keypad up instead of
+                the alphabet. Typing an amount on a QWERTY keyboard is the slowest
+                thing anybody does on this screen. */}
+            <Field label="Amount"><input type="number" inputMode="decimal" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} className={inputCls} autoFocus /></Field>
             <Field label="Bank reference / TXID"><input value={form.ref} onChange={(e) => setForm({ ...form, ref: e.target.value })} className={inputCls} placeholder="Blank is allowed" /></Field>
           </div>
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
             <Field label="Bank"><input value={form.bank} onChange={(e) => setForm({ ...form, bank: e.target.value })} className={inputCls} /></Field>
             <Field label="Shop (optional)">
               <select value={form.branch_id} onChange={(e) => setForm({ ...form, branch_id: e.target.value })} className={inputCls}>
@@ -788,12 +970,55 @@ export default function CardReconPage() {
           </div>
           <Field label="What the statement says"><input value={form.descr} onChange={(e) => setForm({ ...form, descr: e.target.value })} className={inputCls} /></Field>
           {err && <p className="text-[12.5px] font-semibold text-danger">{err}</p>}
-          <div className="flex justify-end gap-2 pt-1">
+          {/* Both buttons share the full width on a phone — the dialog is a
+              bottom sheet there, so these two are the last thing a thumb reaches
+              and they sit over the home indicator without the safe-area pad. */}
+          <div className="flex justify-end gap-2 pt-1 max-md:pb-[env(safe-area-inset-bottom)] max-md:[&>button]:flex-1">
             <button onClick={() => setOpen(false)} className={btnGhost}>Cancel</button>
             <button onClick={save} disabled={saving} className={btnPrimary}>{saving ? "Saving…" : "Record credit"}</button>
           </div>
         </div>
       </Modal>
+
+      {/* ── THE REST OF A PAYMENT ROW, ON A PHONE ───────────────────────────
+          Four of the seven columns are only ever read when a figure looks wrong,
+          so the card shows three and this holds all seven. It is also where an
+          untied payment gets its shop, because that is the one write on this tab
+          and it deserves a full-width control rather than a sliver of a cell. */}
+      <Sheet open={!!payOpen} onClose={() => setPayOpen(null)} title="This payment"
+        subtitle={payOpen ? `${text(payOpen.credit_date)} · ${money(payOpen.amount)}` : undefined}>
+        {payOpen && (() => {
+          const m = R.matchOf[Number(payOpen.id)];
+          return (
+            <>
+              <Detail items={[
+                { k: "Received on", v: `${text(payOpen.credit_date)}${payOpen.credit_time ? " · " + String(payOpen.credit_time).slice(0, 5) : ""}` },
+                { k: "Amount", v: money(payOpen.amount) },
+                { k: "Matched to", v: !m ? <Pill tone="warn">not tied to a shop</Pill>
+                  : m.outside ? `pays for ${m.date} — outside this range`
+                  : `${m.branch} · ${m.date}${m.sure ? "" : " (best guess)"}` },
+                { k: "Shop on file", v: payOpen.branch_id != null ? branchName(payOpen.branch_id) : "—" },
+                { k: "Sale day on file", v: text(payOpen.sale_date) },
+                { k: "Tx ID", v: text(payOpen.ref) },
+                { k: "Bank", v: text(payOpen.bank) },
+                { k: "What the statement says", v: text(payOpen.descr) },
+                { k: "How it got here", v: String(payOpen.source) === "manual" ? "Typed in by hand" : String(payOpen.source) === "statement" ? "From a bank statement" : "From a slip" },
+              ]} />
+              {payOpen.branch_id == null && (
+                <label className="mt-4 block text-[12.5px] font-semibold text-ink dark:text-[#e7e2d8]">
+                  Give it a shop
+                  <select value="" aria-label="Give it a shop"
+                    onChange={(e) => { if (e.target.value) { assign(payOpen.id, String(payOpen.credit_date), e.target.value); setPayOpen(null); } }}
+                    className="mt-1.5 w-full rounded-xl2 border border-line bg-surface px-3 py-2.5 font-semibold text-ink dark:border-white/10 dark:bg-white/[0.06] dark:text-white">
+                    <option value="">Pick a shop…</option>
+                    {branches.map((b) => <option key={b.id} value={String(b.id)}>{b.name}</option>)}
+                  </select>
+                </label>
+              )}
+            </>
+          );
+        })()}
+      </Sheet>
 
       <PreviewNote />
     </Shell>

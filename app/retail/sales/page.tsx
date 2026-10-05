@@ -22,11 +22,48 @@
  *   of credit bills IS the debtor list, and without the customer name on it
  *   there is nowhere in this app that says who owes on account. The column is
  *   only shown for credit because on a cash bill the customer field is noise.
+ *   On a phone the party is the card TITLE, for the same reason: on a debtor
+ *   list the name is the thing you are looking for, not the receipt number.
  *
  * WHY THE PAGING (fetchAll)
  *   PostgREST caps a response at 1000 rows; `.limit(5000)` does not raise the
  *   cap, it only stops asking. This screen at least admitted it ("capped at
  *   5,000 lines"), but a total that is a lower bound is still a wrong total.
+ *
+ *   The paging has a ceiling of its own — 200,000 rows — and it used to be
+ *   crossed in silence. `fetchAll` now reports it as `truncated`, this screen
+ *   keeps it in state, and the note under the table stops claiming completeness
+ *   when it is set. The claim and the figures have to agree: if the period could
+ *   not be read in full then every total on the page is a lower bound, and the
+ *   screen says exactly that instead of printing "all N are in every total".
+ *
+ * WHY A PHONE ASKS THE DATABASE TO ADD UP INSTEAD  (phone work, Oct 2026)
+ *   Levels 1 and 2, and the By Department / By Salesperson views, are pure
+ *   sums — nothing on them needs an individual line. Over "all time" that is
+ *   upwards of 150,000 rows paged into the browser over mobile data to produce
+ *   nine figures. So on a phone those states call `retail_sales_rollup`, which
+ *   returns one row per branch (or per method / department / salesperson) and
+ *   counts receipts on the same `branch|receipt_txn/receipt_no/id` key this
+ *   file builds by hand.
+ *
+ *   Four rules keep that from quietly becoming a different screen:
+ *     · THE COMPUTER NEVER USES IT. A computer reads the lines exactly as it
+ *       did, because the roll-up has no `discount` and the diagnostics row
+ *       would lose a figure. Nothing above 767.98px changed.
+ *     · ANYTHING THAT NEEDS A LINE STILL READS LINES — level 3 (bills), the
+ *       Lines view, By Item (there is deliberately no item dimension), and the
+ *       moment anybody types in the search box, because no roll-up can search
+ *       receipt numbers, item names and customers.
+ *     · IF THE ROLL-UP ERRORS, THE LINES ARE READ. A slow right total beats a
+ *       fast missing one, and this is also the fallback if the function is not
+ *       deployed yet.
+ *     · RECEIPTS DO NOT ADD UP ACROSS PAYMENT METHODS. A bill settled half cash
+ *       half card is one receipt in each method's count — exactly what counting
+ *       the lines did too. So the store's bill count comes from the per-branch
+ *       roll-up and never from totalling the method tiles.
+ *
+ *   Both producers fill the same `Agg` shape and every figure below reads that,
+ *   so the two cannot drift into disagreeing about how a figure is built.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
@@ -34,11 +71,12 @@ import {
   Store, Rows3,
 } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
-import RangeBar from "@/components/RangeBar";
 import { rangeDates } from "@/lib/dateRange";
 import {
+  RetailRange,
   Shell, PageHeader, StatCards, DataTable, Tabs, Pill, BranchPicker,
   PreviewNote, SourceNote, useBranches, money, num, text, sum, fetchAll,
+  useIsPhone, RowCard, ActionBar,
   type Branch, type Row, type Col,
 } from "@/components/retail/kit";
 
@@ -84,11 +122,47 @@ type StoreRow =
 type Bill = { key: string; no: string; date: string; party: string; qty: number; amt: number; short: number };
 type GroupRow = { name: string; qty: number; amt: number; margin: number; lines: number };
 
+/** One group's figures, however they were produced. `recs` is a COUNT, not a
+ *  set: the roll-up can only hand back a count, so the line path collapses its
+ *  sets to counts at the end and both sides end up the same shape. */
+type Agg = { amt: number; qty: number; margin: number; lines: number; recs: number };
+
+/** A row of `retail_sales_rollup`. Dimensions not grouped by come back null,
+ *  and the measures arrive as PostgREST numerics — `num()` on every one. */
+type RollRow = {
+  branch_id: number | null; sale_date: string | null; payment_method: string | null;
+  salesperson: string | null; department: string | null;
+  sales: unknown; margin: unknown; qty: unknown; lines: unknown; receipts: unknown;
+};
+/** What the database answered, kept with the dimension it was asked for so a
+ *  half-finished view switch cannot read last view's rows under this view's
+ *  heading. */
+type Srv = {
+  branches: RollRow[];
+  methods: RollRow[] | null;
+  groups: RollRow[] | null;
+  dim: "department" | "salesperson" | null;
+};
+
+const aggOf = (r: RollRow): Agg => ({
+  amt: num(r.sales), qty: num(r.qty), margin: num(r.margin),
+  lines: num(r.lines), recs: num(r.receipts),
+});
+
 export default function RetailSalesPage() {
+  const phone = useIsPhone();
   const { branches } = useBranches();
   const [rows, setRows] = useState<Row[]>([]);
+  const [srv, setSrv] = useState<Srv | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
+  /* TRUE WHEN THE LINE READ HIT fetchAll's 200,000-ROW CEILING.
+     It used to be crossed silently: the loop stopped and the screen carried on as
+     though it had read the period, which makes every total below a lower bound
+     presented as a total. The department is already around 150,000 lines for "all
+     time", so this is reachable, not theoretical — and the note under the table
+     is only honest if it knows. */
+  const [truncated, setTruncated] = useState(false);
   /* Level 1 is branch === "". Level 2 is a branch with no method chosen.
      Level 3 is both. The dropdown writes the same state the drill-down does. */
   const [branch, setBranch] = useState("");
@@ -106,23 +180,86 @@ export default function RetailSalesPage() {
      that shop's cash bills under the previous shop's heading. */
   const goBranch = useCallback((v: string) => { setBranch(v); setPm(null); }, []);
 
+  /* Which grouped view is on screen. `items` is absent on purpose: the roll-up
+     has no item dimension, so By Item always reads lines. */
+  const groupDim: "department" | "salesperson" | null =
+    view === "departments" ? "department" : view === "salespeople" ? "salesperson" : null;
+
+  /* THE ONE PLACE THAT DECIDES WHETHER THIS SCREEN READS LINES.
+     A phone, no search text, and a state that is a pure sum. Everything else —
+     every computer, level 3, the Lines and By Item views, and any search —
+     reads lines as it always did. `null` on a computer is a stable value, so
+     the loader's dependencies are unchanged there and switching view still
+     does not refetch. */
+  const srvPlan = useMemo(() => {
+    const summable = view === "stores" ? !pm : groupDim !== null;
+    if (!phone || q.trim() || !summable) return null;
+    return { dim: groupDim, branch };
+  }, [phone, q, view, pm, groupDim, branch]);
+
   const load = useCallback(async () => {
     if (!isSupabaseConfigured || !supabase) { setLoading(false); return; }
     setLoading(true); setErr("");
+    const db = supabase;
     const [from, to] = rangeDates(preset, cf, ct);
-    const { rows: got, error } = await fetchAll<Row>((lo, hi) => {
-      let sq = supabase!.from("retail_sale_lines")
+
+    if (srvPlan) {
+      const br = srvPlan.branch ? Number(srvPlan.branch) : null;
+      const ask = (by: string[]) => db.rpc("retail_sales_rollup", { p_from: from, p_to: to, p_branch: br, p_by: by });
+      /* Per-branch always: it carries the headline figures AND the store's own
+         bill count, which must not be totalled off the method tiles. */
+      const jobs = [ask(["branch_id"])];
+      if (srvPlan.dim) jobs.push(ask([srvPlan.dim]));
+      else if (srvPlan.branch) jobs.push(ask(["branch_id", "payment_method"]));
+      const res = await Promise.all(jobs);
+      const bad = res.find((g) => g.error);
+      if (!bad) {
+        const base = (res[0].data as RollRow[]) ?? [];
+        const extra = res[1] ? ((res[1].data as RollRow[]) ?? []) : null;
+        setSrv({
+          branches: base,
+          methods: srvPlan.dim ? null : extra,
+          groups: srvPlan.dim ? extra : null,
+          dim: srvPlan.dim,
+        });
+        setRows([]);
+        /* The database did the adding up, so no ceiling was involved and there is
+           nothing to warn about. Cleared explicitly — a stale `true` from a
+           previous range would put a lower-bound warning under figures that are
+           complete, which is its own kind of lie. */
+        setTruncated(false);
+        setLoading(false);
+        return;
+      }
+      /* The roll-up could not answer — fall through and read the lines. Slow
+         and right beats fast and missing, and this is also what happens if the
+         function has not been deployed to this database yet. */
+    }
+
+    /* `sale_date` IS A TIE, AND A TIE CANNOT BE PAGED ON.
+       fetchAll pages with .range() — LIMIT/OFFSET, a separate request per page —
+       and a day of trading is thousands of lines all carrying the same
+       sale_date. Postgres makes no promise about the order of tied rows between
+       two requests, so a line can be returned on two pages (counted twice in
+       every total and in the receipt set) or on neither (lost from all of them),
+       and retail_sale_lines is being appended to by imports while this reads.
+       `id` is unique and is appended LAST, so newest-day-first is untouched. */
+    const { rows: got, error, truncated: cut } = await fetchAll<Row>((lo, hi) => {
+      let sq = db.from("retail_sale_lines")
         .select("id,branch_id,sale_date,receipt_no,receipt_txn,item_code,item_name,department,salesperson,customer,quantity,net_sales,sales_amount,gross_margin,discount,payment_method")
-        .order("sale_date", { ascending: false, nullsFirst: false });
+        .order("sale_date", { ascending: false, nullsFirst: false })
+        .order("id", { ascending: true });
       if (from) sq = sq.gte("sale_date", from);
       if (to) sq = sq.lte("sale_date", to);
       if (branch) sq = sq.eq("branch_id", Number(branch));
       return sq.range(lo, hi);
     });
     if (error) setErr(error);
+    setSrv(null);
     setRows(got);
+    setTruncated(cut);
     setLoading(false);
-  }, [preset, cf, ct, branch]);
+  }, [preset, cf, ct, branch, srvPlan]);
   useEffect(() => { load(); }, [load]);
 
   const filtered = useMemo(() => {
@@ -136,12 +273,60 @@ export default function RetailSalesPage() {
     () => new Set(filtered.map((r) => `${r.branch_id}|${recKey(r)}`)).size, [filtered]);
   const totalSales = useMemo(() => sum(filtered, "sales_amount"), [filtered]);
 
+  /* ── one figure set, two producers ──────────────────────────────────────
+     Per branch, keyed the way the store table and the footer both want it.
+     A receipt key already carries its branch, so a branch's distinct count and
+     the sum of the branches' distinct counts are the same number — which is
+     why the headline bill count below can add these up. */
+  const byBranch = useMemo(() => {
+    const out: Record<string, Agg> = {};
+    if (srv) {
+      srv.branches.forEach((r) => { out[String(r.branch_id)] = aggOf(r); });
+      return out;
+    }
+    const recs: Record<string, Set<string>> = {};
+    filtered.forEach((r) => {
+      const id = String(r.branch_id);
+      const a = (out[id] ||= { amt: 0, qty: 0, margin: 0, lines: 0, recs: 0 });
+      a.amt += num(r.sales_amount); a.qty += num(r.quantity);
+      a.margin += num(r.gross_margin); a.lines += 1;
+      (recs[id] ||= new Set()).add(recKey(r));
+    });
+    Object.keys(out).forEach((id) => { out[id].recs = recs[id].size; });
+    return out;
+  }, [filtered, srv]);
+
+  /* The figures across the top. On the line path these are byte for byte what
+     the screen computed before; on the roll-up path they are the same sums done
+     in the database. `discount` is deliberately absent — the roll-up has no
+     such measure, and the row that shows it is a computer-only row. */
+  const totals = useMemo(() => {
+    if (srv) {
+      const rs = srv.branches;
+      return {
+        sales: rs.reduce((t, r) => t + num(r.sales), 0),
+        margin: rs.reduce((t, r) => t + num(r.margin), 0),
+        qty: rs.reduce((t, r) => t + num(r.qty), 0),
+        recs: rs.reduce((t, r) => t + num(r.receipts), 0),
+      };
+    }
+    return {
+      sales: totalSales, margin: sum(filtered, "gross_margin"),
+      qty: sum(filtered, "quantity"), recs: receiptCount,
+    };
+  }, [srv, filtered, totalSales, receiptCount]);
+
   const headline = [
-    { label: "Total sales", value: money(totalSales), Icon: Receipt, bg: "bg-salmon-soft" },
-    { label: "Gross margin", value: money(sum(filtered, "gross_margin")), Icon: TrendingUp, bg: "bg-success-soft" },
-    { label: "Receipts", value: receiptCount.toLocaleString(), Icon: ScrollText, bg: "bg-periwinkle-soft" },
-    { label: "Avg receipt", value: money(receiptCount ? totalSales / receiptCount : 0), Icon: Layers, bg: "bg-lavender-soft" },
+    { label: "Total sales", value: money(totals.sales), Icon: Receipt, bg: "bg-salmon-soft" },
+    { label: "Gross margin", value: money(totals.margin), Icon: TrendingUp, bg: "bg-success-soft" },
+    { label: "Receipts", value: totals.recs.toLocaleString(), Icon: ScrollText, bg: "bg-periwinkle-soft" },
+    { label: "Avg receipt", value: money(totals.recs ? totals.sales / totals.recs : 0), Icon: Layers, bg: "bg-lavender-soft" },
   ];
+  /* The diagnostics row. COMPUTER ONLY, for two reasons: eight tiles at two per
+     row push the actual list a screen and a half down a 390px phone, and the
+     database roll-up a phone reads has no discount total. The four figures that
+     answer "how did we do" are above; these four answer "is the import sane",
+     which is a desk question. */
   const secondary = [
     { label: "Items sold", value: Math.round(sum(filtered, "quantity")).toLocaleString(), Icon: Layers, bg: "bg-amber-soft" },
     { label: "Discounts", value: money(sum(filtered, "discount")), Icon: Tag, bg: "bg-pink-soft" },
@@ -154,32 +339,27 @@ export default function RetailSalesPage() {
      shop that sold nothing all week is the single most interesting row on the
      screen and dropping it hides exactly that. */
   const storeRows: StoreRow[] = useMemo(() => {
-    const agg: Record<string, { amt: number; qty: number; recs: Set<string> }> = {};
-    filtered.forEach((r) => {
-      const id = String(r.branch_id);
-      (agg[id] ||= { amt: 0, qty: 0, recs: new Set() });
-      agg[id].amt += num(r.sales_amount); agg[id].qty += num(r.quantity);
-      agg[id].recs.add(recKey(r));
-    });
+    const agg = byBranch;
     const live: Branch[] = branches.filter((b) => b.active !== false || agg[String(b.id)]);
     const chains = [...new Set(live.map((b) => b.chain || "—"))];
     const multi = chains.length > 1;
     const out: StoreRow[] = [];
+    const zero: Agg = { amt: 0, qty: 0, margin: 0, lines: 0, recs: 0 };
     chains.forEach((ch) => {
       const stores = live.filter((b) => (b.chain || "—") === ch)
-        .map((b) => ({ b, g: agg[String(b.id)] ?? { amt: 0, qty: 0, recs: new Set<string>() } }))
+        .map((b) => ({ b, g: agg[String(b.id)] ?? zero }))
         .sort((x, y) => y.g.amt - x.g.amt);
       if (multi) {
         out.push({
           kind: "chain", name: bizLabel(ch),
-          recs: stores.reduce((t, x) => t + x.g.recs.size, 0),
+          recs: stores.reduce((t, x) => t + x.g.recs, 0),
           qty: stores.reduce((t, x) => t + x.g.qty, 0),
           amt: stores.reduce((t, x) => t + x.g.amt, 0),
         });
       }
       stores.forEach((x) => out.push({
         kind: "store", id: x.b.id, name: x.b.name,
-        recs: x.g.recs.size, qty: x.g.qty, amt: x.g.amt,
+        recs: x.g.recs, qty: x.g.qty, amt: x.g.amt,
       }));
     });
     /* Sales whose branch_id matches no branch row — a branch deleted after its
@@ -189,10 +369,10 @@ export default function RetailSalesPage() {
     const seen = new Set(live.map((b) => String(b.id)));
     Object.keys(agg).filter((id) => !seen.has(id)).forEach((id) => out.push({
       kind: "store", id: Number(id), name: `Unknown branch #${id}`,
-      recs: agg[id].recs.size, qty: agg[id].qty, amt: agg[id].amt,
+      recs: agg[id].recs, qty: agg[id].qty, amt: agg[id].amt,
     }));
     return out;
-  }, [filtered, branches]);
+  }, [byBranch, branches]);
 
   const storeCols: Col<StoreRow>[] = [
     { head: "Store", cell: (r) =>
@@ -209,18 +389,33 @@ export default function RetailSalesPage() {
     { head: "Total sales", right: true, cell: (r) => <span className={r.kind === "chain" ? "font-extrabold" : "font-semibold"}>{money(r.amt)}</span> },
   ];
 
-  /* ── LEVEL 2 · payment methods for one store ────────────────────────────── */
+  /* ── LEVEL 2 · payment methods for one store ──────────────────────────────
+     The tiles are per method, so their bill counts are per method: a bill
+     settled half cash half card is counted in both, and totalling them would
+     overstate the shop. The shop's own count is `totals.recs`. */
   const pmTiles = useMemo(() => {
-    const agg: Record<string, { amt: number; recs: Set<string> }> = {};
-    filtered.forEach((r) => {
-      const k = String(r.payment_method || "unclassified");
-      (agg[k] ||= { amt: 0, recs: new Set() });
-      agg[k].amt += num(r.sales_amount); agg[k].recs.add(recKey(r));
-    });
+    const agg: Record<string, { amt: number; bills: number }> = {};
+    if (srv?.methods) {
+      /* null and '' come back as separate rows and both mean "unclassified",
+         so they are merged here exactly as the line path merges them. */
+      srv.methods.forEach((r) => {
+        const k = String(r.payment_method || "unclassified");
+        const a = (agg[k] ||= { amt: 0, bills: 0 });
+        a.amt += num(r.sales); a.bills += num(r.receipts);
+      });
+    } else {
+      const sets: Record<string, Set<string>> = {};
+      filtered.forEach((r) => {
+        const k = String(r.payment_method || "unclassified");
+        (agg[k] ||= { amt: 0, bills: 0 }).amt += num(r.sales_amount);
+        (sets[k] ||= new Set()).add(recKey(r));
+      });
+      Object.keys(agg).forEach((k) => { agg[k].bills = sets[k].size; });
+    }
     const known = PM_ORDER.filter((k) => agg[k]);
     const rest = Object.keys(agg).filter((k) => !PM_ORDER.includes(k));
-    return [...known, ...rest].map((k) => ({ k, amt: agg[k].amt, bills: agg[k].recs.size }));
-  }, [filtered]);
+    return [...known, ...rest].map((k) => ({ k, amt: agg[k].amt, bills: agg[k].bills }));
+  }, [filtered, srv]);
 
   /* ── LEVEL 3 · the bills behind one method ──────────────────────────────
      Rolled up from the lines, because a receipt is not a row anywhere — it is
@@ -244,15 +439,32 @@ export default function RetailSalesPage() {
 
   const showParty = pm === "credit";
   const billCols: Col<Bill>[] = [
-    { head: "Date", muted: true, cell: (r) => text(r.date) },
+    /* The date is the small grey line on a phone, not the card title — a bill is
+       identified by its number, and on credit by who owes. */
+    { head: "Date", muted: true, phone: "meta", cell: (r) => text(r.date) },
     { head: "Receipt", bold: true, cell: (r) => text(r.no) },
-    ...(showParty ? [{ head: "Party", cell: (r: Bill) => (r.party ? text(r.party) : <span className="text-muted dark:text-[#a89f93]">—</span>) } as Col<Bill>] : []),
+    ...(showParty ? [{
+      head: "Party", phone: "title",
+      cell: (r: Bill) => (r.party ? text(r.party) : <span className="text-muted dark:text-[#a89f93]">—</span>),
+    } as Col<Bill>] : []),
     { head: "Items", right: true, cell: (r) => Math.round(r.qty).toLocaleString() },
     { head: "Amount", right: true, bold: true, cell: (r) => money(r.amt) },
   ];
 
   /* ── the flat views, kept as extra tabs ─────────────────────────────────── */
   const grouped: GroupRow[] = useMemo(() => {
+    const dim = srv?.dim;
+    if (srv?.groups && dim) {
+      /* Same "—" bucket as the line path, and merged on the label, because the
+         database answers null and '' as two rows and both read "—". */
+      const m: Record<string, GroupRow> = {};
+      srv.groups.forEach((r) => {
+        const k = String((r as unknown as Record<string, unknown>)[dim] || "—");
+        const g = (m[k] ||= { name: k, qty: 0, amt: 0, margin: 0, lines: 0 });
+        g.qty += num(r.qty); g.amt += num(r.sales); g.margin += num(r.margin); g.lines += num(r.lines);
+      });
+      return Object.values(m).sort((a, b) => b.amt - a.amt).slice(0, 300);
+    }
     const key = view === "items" ? "item_name" : view === "departments" ? "department" : view === "salespeople" ? "salesperson" : null;
     if (!key) return [];
     const m: Record<string, GroupRow> = {};
@@ -262,7 +474,7 @@ export default function RetailSalesPage() {
       g.qty += num(r.quantity); g.amt += num(r.sales_amount); g.margin += num(r.gross_margin); g.lines += 1;
     });
     return Object.values(m).sort((a, b) => b.amt - a.amt).slice(0, 300);
-  }, [filtered, view]);
+  }, [filtered, view, srv]);
 
   const maxAmt = Math.max(...grouped.map((g) => g.amt), 1);
   const groupCols: Col<GroupRow>[] = [
@@ -271,7 +483,10 @@ export default function RetailSalesPage() {
     { head: "Qty", right: true, cell: (r) => Math.round(r.qty).toLocaleString() },
     { head: "Sales", right: true, bold: true, cell: (r) => money(r.amt) },
     { head: "Margin", right: true, cell: (r) => money(r.margin) },
-    { head: "Share", cell: (r) => (
+    /* A bar measured against the biggest row needs a wide row to mean anything,
+       and on a card it would land where the second identifier goes. The figure
+       beside it already says the same thing. */
+    { head: "Share", phone: "hide", cell: (r) => (
         <div className="h-2 w-full max-w-[140px] overflow-hidden rounded-full bg-panel dark:bg-white/[0.06]">
           <div className="h-full rounded-full bg-salmon" style={{ width: `${Math.max((r.amt / maxAmt) * 100, 2)}%` }} />
         </div>
@@ -280,13 +495,20 @@ export default function RetailSalesPage() {
 
   const lineCols: Col<Row>[] = [
     { head: "Date", muted: true, cell: (r) => text(r.sale_date) },
-    { head: "Branch", bold: true, cell: (r) => branchName(r.branch_id) },
+    /* What was sold identifies the line; which shop sold it is the second
+       thing you want when the list spans all of them. */
+    { head: "Branch", bold: true, phone: "meta", cell: (r) => branchName(r.branch_id) },
     { head: "Receipt", muted: true, cell: (r) => text(r.receipt_no) },
-    { head: "Item", cell: (r) => text(r.item_name) },
+    { head: "Item", phone: "title", cell: (r) => text(r.item_name) },
     { head: "Qty", right: true, cell: (r) => num(r.quantity).toLocaleString() },
     { head: "Amount", right: true, bold: true, cell: (r) => money(r.sales_amount) },
     { head: "Payment", muted: true, cell: (r) => pmLabel(String(r.payment_method || "unclassified")) },
   ];
+
+  /* 500 cards on a phone is sixty thousand pixels of scrolling and several
+     thousand DOM nodes before the first paint finishes. The totals above are
+     unaffected either way — this is only how many rows get drawn. */
+  const lineCap = phone ? 150 : 500;
 
   const here = branch ? branchName(branch) : "All stores";
 
@@ -295,30 +517,33 @@ export default function RetailSalesPage() {
       <PageHeader title="Sales" subtitle="Every shop, then every payment method, then every bill."
         onRefresh={load} loading={loading} />
 
-      <RangeBar preset={preset} setPreset={setPreset} cf={cf} setCf={setCf} ct={ct} setCt={setCt}
+      <RetailRange preset={preset} setPreset={setPreset} cf={cf} setCf={setCf} ct={ct} setCt={setCt}
         right={
           <>
             <BranchPicker branches={branches} value={branch} onChange={goBranch} allLabel="All stores" />
             <div className="flex items-center gap-2 rounded-full border border-line bg-surface px-3.5 py-2 dark:border-white/10 dark:bg-white/[0.05]">
               <Search size={15} className="text-hint dark:text-[#8a8175]" />
+              {/* On a phone this box is the full width of the screen, so the
+                  input has to grow into it instead of sitting in 160px of it. */}
               <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search receipt, item, staff"
-                className="w-40 bg-transparent text-[13px] outline-none placeholder:text-hint sm:w-48 dark:text-[#f4f1ea] dark:placeholder:text-[#6f675c]" />
+                className="w-40 bg-transparent text-[13px] outline-none placeholder:text-hint sm:w-48 max-md:flex-1 dark:text-[#f4f1ea] dark:placeholder:text-[#6f675c]" />
             </div>
           </>
         } />
 
       <StatCards stats={headline} loading={loading} />
-      <StatCards stats={secondary} loading={loading} />
+      {!phone && <StatCards stats={secondary} loading={loading} />}
 
       <Tabs tabs={VIEWS} value={view} onChange={setView} />
 
       {view === "stores" ? (
         <>
-          {/* The back control, at every level below the first. */}
+          {/* Where you are. The back control itself is the pill on a computer and
+              a bar above the thumb on a phone — see ActionBar at the bottom. */}
           <div className="mt-4 flex flex-wrap items-center gap-2">
             {branch && (
               <button onClick={() => (pm ? setPm(null) : goBranch(""))}
-                className="flex items-center gap-1.5 rounded-full border border-line bg-surface px-3.5 py-1.5 text-[12.5px] font-semibold text-ink transition hover:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:hover:bg-white/[0.12]">
+                className="flex items-center gap-1.5 rounded-full border border-line bg-surface px-3.5 py-1.5 text-[12.5px] font-semibold text-ink transition hover:bg-panel max-md:hidden dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:hover:bg-white/[0.12]">
                 <ChevronLeft size={14} /> {pm ? here : "All stores"}
               </button>
             )}
@@ -331,29 +556,74 @@ export default function RetailSalesPage() {
             <>
               <DataTable cols={storeCols} rows={storeRows} loading={loading} err={err} minWidth={620}
                 empty="No sales in this period — this fills when shop sales are brought in."
-                footer={
+                card={(r) =>
+                  r.kind === "chain" ? (
+                    /* A chain is a heading on a phone, not a card. Dressing it
+                       like the shops under it invites a tap that does nothing. */
+                    <div className="flex items-baseline justify-between gap-3 px-1 pb-0.5 pt-3">
+                      <span className="text-[11.5px] font-extrabold uppercase tracking-wide text-hint dark:text-[#8a8175]">{r.name}</span>
+                      <span className="text-[13px] font-bold tabular-nums text-ink dark:text-[#f4f1ea]">{money(r.amt)}</span>
+                    </div>
+                  ) : (
+                    <RowCard title={r.name} right={money(r.amt)}
+                      meta={`${r.recs.toLocaleString()} bill${r.recs === 1 ? "" : "s"} · ${Math.round(r.qty).toLocaleString()} items`}
+                      onTap={() => goBranch(String(r.id))} />
+                  )
+                }
+                /* FOUR CELLS DO NOT FIT ON A PHONE. The kit keeps the totals row
+                   when a table becomes cards, which is right — it is the row
+                   people came for — but "All stores" plus three figures plus
+                   four cells of padding is wider than 390px, and the box it
+                   sits in clips rather than scrolls, so the grand total would be
+                   the part cut off. Two cells, same figures. */
+                footer={phone ? (
+                  <tr className="bg-panel/60 font-bold text-ink dark:bg-white/[0.04] dark:text-[#f4f1ea]">
+                    <td className="px-3.5 py-3">All stores · {totals.recs.toLocaleString()} bill{totals.recs === 1 ? "" : "s"}</td>
+                    <td className="px-3.5 py-3 text-right tabular-nums">{money(totals.sales)}</td>
+                  </tr>
+                ) : (
                   <tr className="bg-panel/60 font-bold text-ink dark:bg-white/[0.04] dark:text-[#f4f1ea]">
                     <td className="px-4 py-3">All stores</td>
-                    <td className="px-4 py-3 text-right tabular-nums">{receiptCount.toLocaleString()}</td>
-                    <td className="px-4 py-3 text-right tabular-nums">{Math.round(sum(filtered, "quantity")).toLocaleString()}</td>
-                    <td className="px-4 py-3 text-right tabular-nums">{money(totalSales)}</td>
+                    <td className="px-4 py-3 text-right tabular-nums">{totals.recs.toLocaleString()}</td>
+                    <td className="px-4 py-3 text-right tabular-nums">{Math.round(totals.qty).toLocaleString()}</td>
+                    <td className="px-4 py-3 text-right tabular-nums">{money(totals.sales)}</td>
                   </tr>
-                } />
+                )} />
               <p className="mt-2 text-[12px] text-hint dark:text-[#8a8175]">Tap a store to see its Cash / Card / JazzCash breakdown.</p>
             </>
           ) : !pm ? (
-            /* LEVEL 2 */
-            <>
+            /* LEVEL 2 — padded on a phone to clear the fixed back bar. */
+            <div className="max-md:pb-24">
+              {/* WHILE THE ANSWER IS STILL COMING, A PHONE SHOWS NOTHING RATHER
+                  THAN THE PREVIOUS SHOP'S. Walking into a store carries the old
+                  figures for as long as the fetch takes, and a shop total that
+                  is really the all-stores total — with nothing on screen saying
+                  so — is the one mistake this screen exists to prevent. The
+                  tiles below are the same markup they always were, so a computer
+                  takes the second branch every time and is unchanged. */}
+              {phone && loading ? (
+                <div className="mt-4 space-y-3">
+                  <div className="h-[92px] animate-pulse rounded-card bg-panel/70 dark:bg-white/[0.05]" />
+                  <div className="grid grid-cols-2 gap-3">
+                    {Array.from({ length: 4 }).map((_, i) => (
+                      <div key={i} className="h-[92px] animate-pulse rounded-card bg-panel/70 dark:bg-white/[0.05]" />
+                    ))}
+                  </div>
+                </div>
+              ) : (
+              <>
               <div className="mt-4 rounded-card border border-line bg-surface p-5 dark:border-white/[0.06] dark:bg-[#201c17]">
                 <div className="text-[12px] font-medium text-muted dark:text-[#a89f93]">{here} — total</div>
-                <div className="mt-1 text-[24px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">{money(totalSales)}</div>
-                <div className="mt-0.5 text-[12px] text-hint dark:text-[#8a8175]">{receiptCount.toLocaleString()} bill{receiptCount === 1 ? "" : "s"}</div>
+                <div className="mt-1 text-[24px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">{money(totals.sales)}</div>
+                <div className="mt-0.5 text-[12px] text-hint dark:text-[#8a8175]">{totals.recs.toLocaleString()} bill{totals.recs === 1 ? "" : "s"}</div>
               </div>
               {pmTiles.length === 0 ? (
                 <div className="mt-3 rounded-card border border-line bg-surface px-4 py-16 text-center text-[13px] text-muted dark:border-white/[0.06] dark:bg-[#201c17] dark:text-[#a89f93]">
                   No sales for this store in this period.
                 </div>
               ) : (
+                /* Two tiles to a row on a phone, four on a computer. Seven
+                   methods across a 390px screen would be a sideways drag. */
                 <div className="mt-3 grid grid-cols-2 gap-3 lg:grid-cols-4">
                   {pmTiles.map((t) => (
                     <button key={t.k} onClick={() => setPm(t.k)}
@@ -368,10 +638,12 @@ export default function RetailSalesPage() {
                   ))}
                 </div>
               )}
-            </>
+              </>
+              )}
+            </div>
           ) : (
             /* LEVEL 3 */
-            <>
+            <div className="max-md:pb-24">
               <DataTable cols={billCols} rows={bills} loading={loading} err={err} minWidth={showParty ? 680 : 560}
                 empty={`No ${pmLabel(pm)} bills for this store in this period.`}
                 footer={
@@ -386,28 +658,76 @@ export default function RetailSalesPage() {
                   them. Every party named here owes that amount on account.
                 </SourceNote>
               )}
-            </>
+            </div>
+          )}
+
+          {/* THE BACK CONTROL ON A PHONE. Fixed above the tab bar, so it is
+              under the thumb at the bottom of a two-hundred-bill list instead of
+              a chevron somewhere above the scroll. */}
+          {phone && branch && (
+            <ActionBar>
+              <button onClick={() => (pm ? setPm(null) : goBranch(""))}
+                className="flex w-full items-center justify-center gap-2 rounded-full border border-line bg-surface px-4 py-3 text-[14px] font-bold text-ink dark:border-white/10 dark:bg-white/[0.06] dark:text-white">
+                <ChevronLeft size={17} /> Back to {pm ? here : "all stores"}
+              </button>
+            </ActionBar>
           )}
         </>
       ) : view === "lines" ? (
-        <DataTable cols={lineCols} rows={filtered.slice(0, 500)} loading={loading} err={err} minWidth={820}
+        <DataTable cols={lineCols} rows={filtered.slice(0, lineCap)} loading={loading} err={err} minWidth={820}
           empty={rows.length === 0 ? "No sales in this period — this fills when shop sales are brought in." : "Nothing matches this search."} />
       ) : (
         <DataTable cols={groupCols} rows={grouped} loading={loading} err={err} minWidth={740}
           empty={rows.length === 0 ? "No sales in this period — this fills when shop sales are brought in." : "Nothing matches this search."} />
       )}
 
-      {view === "lines" && !loading && !err && filtered.length > 500 && (
+      {/* THE DRAWING CAP, AND THE ONE CASE WHERE IT MAY NOT SAY "ALL".
+          Normally the cut really is only on how many rows are DRAWN — every line
+          read is in every total — and that sentence is kept word for word,
+          because it is the one that is true on every ordinary day and a string
+          that changes is a change on a 1280px screen.
+          When the read itself was cut short, the same sentence becomes a false
+          claim about money, so the completeness half of it is dropped and the
+          warning below says what actually happened. */}
+      {view === "lines" && !loading && !err && filtered.length > lineCap && (
         <p className="mt-2 text-[12px] text-hint dark:text-[#8a8175]">
-          Showing the first 500 of {filtered.length.toLocaleString()} lines. All {filtered.length.toLocaleString()} are
-          in every total on this page — the cut is only on how many rows are drawn.
+          {truncated ? (
+            <>Showing the first {lineCap} of the {filtered.length.toLocaleString()} lines that were read.</>
+          ) : (
+            <>Showing the first {lineCap} of {filtered.length.toLocaleString()} lines. All {filtered.length.toLocaleString()} are
+            in every total on this page — the cut is only on how many rows are drawn.</>
+          )}
+        </p>
+      )}
+
+      {/* THE CEILING, SAID OUT LOUD. Only ever on screen when the period really
+          was too big to read, so nothing about an ordinary day changes. */}
+      {!loading && !err && truncated && (
+        <p className="mt-2 rounded-card border border-amber-strong/40 bg-amber-soft px-3.5 py-2.5 text-[12.5px] font-semibold leading-snug text-ink dark:border-white/10 dark:bg-white/[0.06] dark:text-[#f4f1ea]">
+          This period is too large to total line by line. Reading stopped at{" "}
+          {rows.length.toLocaleString()} lines, so every figure on this page — sales, margin, receipts,
+          every store and every method — is a <strong>lower bound</strong> and not the period&apos;s total.
+          Choose a shorter range for a figure that is complete, or read the period off the Dashboard,
+          which asks the database for the totals and has no such ceiling.
         </p>
       )}
 
       <SourceNote>
-        Sale lines are read a page at a time until the database stops returning rows, so these totals
-        are the whole period and not the first thousand lines of it. A <b>receipt</b> is counted by its
+        {/* The same completeness claim as the cap note above, and the same single
+            exception: when the read was cut short these totals are NOT the whole
+            period, and this note sits directly under the warning that says so. */}
+        {truncated ? (
+          <>Sale lines are read a page at a time, up to a ceiling this period went past — see the note
+          above before using any figure here.</>
+        ) : (
+          <>Sale lines are read a page at a time until the database stops returning rows, so these totals
+          are the whole period and not the first thousand lines of it.</>
+        )}{" "}
+        A <b>receipt</b> is counted by its
         transaction id, so a bill with nine items is one receipt, not nine.
+        {srv && <> On a phone, the store and payment totals are added up <strong>by the database</strong> rather
+          than by downloading every line — the same sums, on the same receipt key. Search a receipt or a
+          customer, or open a bill list, and the lines are read in full as usual.</>}
       </SourceNote>
 
       <PreviewNote />

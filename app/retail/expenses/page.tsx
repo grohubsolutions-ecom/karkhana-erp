@@ -42,10 +42,11 @@ import {
 } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import Modal, { Field, inputCls, btnPrimary, btnGhost } from "@/components/Modal";
-import RangeBar from "@/components/RangeBar";
 import { rangeDates } from "@/lib/dateRange";
 import {
+  RetailRange,
   Shell, PageHeader, StatCards, DataTable, Pill, PreviewNote, SourceNote,
+  CardList, RowCard, useIsPhone,
   useBranches, money, num, text, today, fetchAll, type Col,
 } from "@/components/retail/kit";
 
@@ -116,6 +117,7 @@ const blankForm = () => ({
 
 export default function ExpensesPage() {
   const { branches, branchName } = useBranches();
+  const phone = useIsPhone();
 
   /* These two pieces of state ARE the three levels:
        branch === null                → level 1, all stores
@@ -434,7 +436,7 @@ export default function ExpensesPage() {
         <button onClick={openAdd} className={btnPrimary}><Plus size={15} /> New entry</button>
       </PageHeader>
 
-      <RangeBar preset={preset} setPreset={setPreset} cf={cf} setCf={setCf} ct={ct} setCt={setCt} />
+      <RetailRange preset={preset} setPreset={setPreset} cf={cf} setCf={setCf} ct={ct} setCt={setCt} />
 
       {/* The breadcrumb IS the navigation. There is no branch dropdown on this
           screen on purpose: level 1 is the branch picker, and having both means
@@ -468,6 +470,57 @@ export default function ExpensesPage() {
       {/* ── LEVEL 1 ─────────────────────────────────────────────────────── */}
       {branch === null && (
         <>
+          {/* ON A PHONE this five-column 720px table becomes one card per shop.
+              It is not just a table: it IS the branch picker, the first thing
+              anybody taps on this screen. Dragged sideways to reach the Net
+              column, the shop name has scrolled out of sight by the time you
+              get there — so you read a number without knowing whose it is.
+              Tapping the card drills in, same as tapping the row.
+              Above 767.98px the table below renders exactly as it always has. */}
+          {phone ? (
+            <CardList
+              rows={l1} loading={loading} err={err}
+              empty="No entries in this range. Import a Nimbus account-transaction file, or add one."
+              footer={
+                <div className="flex items-center justify-between gap-3 rounded-card border border-line bg-panel/60 px-3.5 py-3 dark:border-white/[0.06] dark:bg-white/[0.04]">
+                  <div className="min-w-0">
+                    <div className="text-[13px] font-extrabold text-ink dark:text-[#f4f1ea]">All stores</div>
+                    <div className="text-[11.5px] text-muted dark:text-[#a89f93]">
+                      {rows.length.toLocaleString()} entr{rows.length === 1 ? "y" : "ies"} · net {money(tot.net)}
+                    </div>
+                  </div>
+                  <div className="flex-none text-[15px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">{money(tot.out)}</div>
+                </div>
+              }
+              render={(r) =>
+                r.kind === "chain" ? (
+                  /* A chain stays a heading and not a card, because it is not
+                     tappable — dressing it as one invites a tap that does
+                     nothing, which is how people decide a screen is broken. */
+                  <div key={r.key} className="flex items-baseline justify-between gap-3 px-1 pt-2 text-[12px] font-extrabold uppercase tracking-wide text-hint dark:text-[#8a8175]">
+                    <span className="truncate">{r.label}</span>
+                    <span className="flex-none tabular-nums">{money(r.g.exp)}</span>
+                  </div>
+                ) : (
+                  <RowCard
+                    key={r.key}
+                    title={r.label}
+                    meta={`${r.g.n.toLocaleString()} entr${r.g.n === 1 ? "y" : "ies"}`}
+                    right={money(r.g.exp)}
+                    /* Income and Net only earn the space when there IS income:
+                       with none, Net equals the figure already on the right, so
+                       the pair row would say the same thing twice. */
+                    pairs={r.g.inc ? [
+                      { k: "Income", v: money(r.g.inc) },
+                      /* Net = expenses − income, as everywhere on this screen. */
+                      { k: "Net", v: money(r.g.exp - r.g.inc) },
+                    ] : undefined}
+                    onTap={() => { setBranch(r.id); setPm(null); }}
+                  />
+                )
+              }
+            />
+          ) : (
           <div className="mt-4 overflow-hidden rounded-card border border-line bg-surface dark:border-white/[0.06] dark:bg-[#201c17]">
             <div className="overflow-x-auto">
               <table className="w-full min-w-[720px] text-left text-[13px]">
@@ -534,6 +587,7 @@ export default function ExpensesPage() {
               </table>
             </div>
           </div>
+          )}
           <p className="mt-3 text-[12px] text-muted dark:text-[#a89f93]">Tap a store to see how it paid.</p>
         </>
       )}
@@ -600,6 +654,38 @@ export default function ExpensesPage() {
         <DataTable
           cols={txnCols} rows={txnRows} loading={loading} err={err} minWidth={820}
           empty={`No ${pm === INCOME_KEY ? "misc income" : (PAID_LABEL[pm] ?? pm)} entries for ${branchLabel} in this range.`}
+          /* THE AUTOMATIC CARD IS WRONG FOR THIS TABLE, in two ways worth the
+             override:
+               · It would title the card with the DATE, because that is the
+                 first plain column. Nobody looks for an expense by date — they
+                 look for "the sign painter" or "tea". The title is therefore
+                 what the money was spent on: the note, or the category when
+                 there is no note.
+               · Expenses and income share this table and are told apart only by
+                 txn_type. On the computer that is a + or a − in one column; on
+                 a phone a sign alone is a glyph nobody reads, so the direction
+                 is also the card's left edge — red out, green in — via `tone`.
+             Read from the ROW's own txn_type rather than the tile, so a stray
+             income row inside a payment-method tile still shows as income
+             instead of inheriting the tile's direction.
+             Tapping the card edits it, which is the whole card instead of a
+             28px "Edit" pill. Nimbus rows have no tap: they are read-only, and
+             the pill says so rather than opening an editor that cannot save. */
+          card={(r, i) => {
+            const inc = String(r.txn_type) === "income";
+            const nimbus = String(r.source) === "nimbus";
+            return (
+              <RowCard
+                key={i}
+                title={r.description ? String(r.description) : text(r.category)}
+                meta={r.description ? `${text(r.expense_date)} · ${text(r.category)}` : text(r.expense_date)}
+                right={<span className={inc ? "text-success" : undefined}>{inc ? "+" : "−"}{money(r.amount)}</span>}
+                tone={inc ? "good" : "bad"}
+                pills={nimbus ? <Pill tone="info">Nimbus · edit it in Nimbus</Pill> : undefined}
+                onTap={nimbus ? undefined : () => openEdit(r)}
+              />
+            );
+          }}
           footer={
             <tr className="bg-panel/70 font-bold text-ink dark:bg-white/[0.04] dark:text-[#f4f1ea]">
               <td className="px-4 py-3" colSpan={3}>Total · {txnRows.length} entr{txnRows.length === 1 ? "y" : "ies"}</td>
@@ -626,8 +712,21 @@ export default function ExpensesPage() {
         title={form.id == null ? "New entry" : "Edit entry"}
         subtitle="Expense or income, on one day, for one branch — or for the business as a whole."
       >
+        {/* THE DIALOG IS THE SCREEN, on a phone. Everything else here is
+            reading; this is the one thing a shop person does standing up, and
+            it is done several times a day.
+              · ONE COLUMN below 768px (`grid-cols-1 md:grid-cols-2`). Two
+                half-width fields at 390px are two 150px controls, and a date
+                input that narrow hides its own value.
+              · Every picker is a NATIVE <select>, not a styled dropdown: it
+                opens as the phone's own wheel, which is the fastest control on
+                the device and already thumb-sized. The shared mobile CSS sets
+                16px on it so iOS does not zoom the page on focus.
+              · The date already defaults to today (blankForm), so the common
+                case — an expense being entered as it happens — is no taps.
+            Above 767.98px every one of these is the two-column form it was. */}
         <div className="space-y-3.5">
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
             <Field label="Branch">
               <select value={form.branch_id} onChange={(e) => setForm({ ...form, branch_id: e.target.value })} className={inputCls}>
                 {/* "" → branch_id NULL. Central rent and head-office purchases
@@ -640,7 +739,7 @@ export default function ExpensesPage() {
               <input type="date" value={form.expense_date} onChange={(e) => setForm({ ...form, expense_date: e.target.value })} className={inputCls} />
             </Field>
           </div>
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
             <Field label="Type">
               <select value={form.txn_type} onChange={(e) => setForm({ ...form, txn_type: e.target.value })} className={inputCls}>
                 <option value="expense">Expense — money out</option>
@@ -657,9 +756,14 @@ export default function ExpensesPage() {
           <Field label="Description">
             <input value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} className={inputCls} placeholder="What it was for" />
           </Field>
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
             <Field label="Amount">
-              <input type="number" step="1" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} className={inputCls} autoFocus />
+              {/* inputMode="decimal" gives the phone's numeric keypad instead of
+                  the full QWERTY — the amount is the field that gets typed every
+                  single time, and hunting for digits above letters is where the
+                  typos come from. type="number" is kept so the computer keeps
+                  its spinner and its validation. */}
+              <input type="number" step="1" inputMode="decimal" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} className={inputCls} autoFocus />
             </Field>
             <Field label="Paid via">
               <select value={form.paid_via} onChange={(e) => setForm({ ...form, paid_via: e.target.value })} className={inputCls}>
@@ -668,10 +772,15 @@ export default function ExpensesPage() {
             </Field>
           </div>
           {fErr && <p className="text-[12.5px] font-semibold text-danger">{fErr}</p>}
-          <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
+          {/* ON A PHONE the three buttons stack full width, and `flex-col-reverse`
+              reverses the DOM order so Save sits on top and Delete at the
+              bottom — furthest from the thumb, which is where a button that
+              destroys a row belongs. The shared mobile CSS already gives every
+              button inside a dialog a 44px minimum height. */}
+          <div className="flex flex-wrap items-center justify-end gap-2 pt-1 max-md:flex-col-reverse max-md:flex-nowrap max-md:items-stretch max-md:[&>*]:w-full">
             {form.id != null && (
               <button onClick={remove} disabled={saving}
-                className="mr-auto flex items-center justify-center gap-2 rounded-full border border-danger/30 bg-danger-soft px-4 py-2.5 text-[13px] font-semibold text-danger transition hover:opacity-90 disabled:opacity-50 dark:border-white/10 dark:bg-white/[0.06]">
+                className="mr-auto flex items-center justify-center gap-2 rounded-full border border-danger/30 bg-danger-soft px-4 py-2.5 text-[13px] font-semibold text-danger transition hover:opacity-90 disabled:opacity-50 max-md:mr-0 dark:border-white/10 dark:bg-white/[0.06]">
                 Delete
               </button>
             )}

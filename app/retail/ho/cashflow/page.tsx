@@ -39,7 +39,7 @@ import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import Modal, { Field, inputCls, btnPrimary, btnGhost } from "@/components/Modal";
 import {
   Shell, PageHeader, StatCards, DataTable, MonthPicker, PreviewNote, SourceNote,
-  money, num, text, today, monthKey, monthBounds, monthLabel, fetchAll, type Col,
+  money, num, text, today, monthKey, monthBounds, monthLabel, fetchAll, useIsPhone, type Col,
 } from "@/components/retail/kit";
 
 /* ── the categories, ported verbatim ─────────────────────────────────────────
@@ -68,6 +68,7 @@ const signed = (r: { direction?: string | null; amount?: number | null }) =>
   isIn(r) ? num(r.amount) : -num(r.amount);
 
 export default function HoCashflowPage() {
+  const phone = useIsPhone();
   const [month, setMonth] = useState(monthKey());
   const [rows, setRows] = useState<CF[]>([]);
   const [opening, setOpening] = useState(0);
@@ -90,10 +91,17 @@ export default function HoCashflowPage() {
     /* Everything BEFORE the month, for the opening balance. Only two columns,
        but possibly years of them — so it pages. A `.limit()` here would cap the
        opening balance silently and every balance on the screen would be wrong
-       by the same hidden amount. */
+       by the same hidden amount.
+
+       Ordered on id for the same class of reason. Paging is LIMIT/OFFSET over
+       separate requests, and with no ORDER BY Postgres is free to hand back the
+       same row on two pages or neither. This read IS the opening balance, and
+       every running balance in the month is chained off it — one duplicated or
+       dropped entry here is wrong by that amount on every line of the screen.
+       `id` is unique, which is what makes the pages one stable list. */
     const priorP = fetchAll<CF>((lo, hi) =>
       supabase!.from("retail_ho_cashflow").select("direction,amount")
-        .lt("flow_date", from).range(lo, hi));
+        .lt("flow_date", from).order("id").range(lo, hi));
 
     /* The month itself, oldest first — the running balance has to be built in
        the order the money actually moved, even though the table reads newest
@@ -235,9 +243,61 @@ export default function HoCashflowPage() {
 
       <StatCards stats={stats} loading={loading} />
 
+      {/* THE PHONE CARD, written out rather than left to the kit's automatic one.
+          A ledger row is three figures — what moved, which way, and the balance
+          it left behind — and the automatic card would have made the balance the
+          one big number and rendered the edit and delete buttons as a labelled
+          pair with no label. Here the MOVEMENT is the figure, signed and
+          coloured the way the In and Out columns are on the computer, with the
+          balance after it on its own line because that is the number the End of
+          Day count is checked against. */}
       <DataTable cols={cols} rows={chained} loading={loading} err={err} minWidth={820}
         empty={`No office cash movement in ${monthLabel(month)}.`}
-        footer={
+        card={(r) => {
+          /* Read from `direction`, exactly as _in and _out are, so the sign on
+             the card can never disagree with the sign in the table. */
+          const inward = isIn(r);
+          return (
+            <div className="rounded-card border border-line bg-surface p-3.5 dark:border-white/[0.06] dark:bg-[#201c17]">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-[14.5px] font-bold text-ink dark:text-[#f4f1ea]">{text(r.category)}</div>
+                  <div className="mt-0.5 text-[12.5px] text-muted dark:text-[#a89f93]">{text(r.flow_date)}</div>
+                  {r.description && <div className="mt-0.5 break-words text-[12.5px] text-muted dark:text-[#a89f93]">{r.description}</div>}
+                </div>
+                <div className={`flex-none text-right text-[16px] font-extrabold tabular-nums ${inward ? "text-success" : "text-danger"}`}>
+                  {inward ? "+" : "−"}{money(inward ? r._in : r._out)}
+                </div>
+              </div>
+              <div className="mt-2.5 flex items-center justify-between gap-3 border-t border-line pt-2.5 dark:border-white/[0.06]">
+                <span className="text-[11px] uppercase tracking-wide text-hint dark:text-[#8a8175]">Balance after</span>
+                <span className="flex items-center gap-1">
+                  <span className="text-[14px] font-bold tabular-nums text-ink dark:text-[#f4f1ea]">{money(r._bal)}</span>
+                  {/* Same two buttons as the computer's last column, behind the
+                      same deliberate Edit mode switch — a delete that is one
+                      stray thumb away on a bus is a row gone. */}
+                  {editMode && (
+                    <>
+                      <button onClick={() => startEdit(r)} aria-label="Edit entry"
+                        className="ml-1 rounded-full p-1.5 text-muted transition hover:bg-panel hover:text-ink dark:text-[#a89f93] dark:hover:bg-white/[0.06] dark:hover:text-white">
+                        <Pencil size={15} />
+                      </button>
+                      <button onClick={() => remove(r)} aria-label="Delete entry"
+                        className="rounded-full p-1.5 text-muted transition hover:bg-danger-soft hover:text-danger dark:text-[#a89f93] dark:hover:bg-white/[0.06]">
+                        <Trash2 size={15} />
+                      </button>
+                    </>
+                  )}
+                </span>
+              </div>
+            </div>
+          );
+        }}
+        /* NO FOOTER ON A PHONE. It prints opening, in, out and closing — the
+           same four figures the stat cards directly above already show — and a
+           seven-column totals row squeezed into 358px is four numbers wrapping
+           into each other to say nothing new. */
+        footer={phone ? undefined : (
           <>
             <tr className="bg-panel/60 font-bold text-ink dark:bg-white/[0.04] dark:text-[#f4f1ea]">
               <td className="px-4 py-3" colSpan={3}>Closing balance</td>
@@ -252,7 +312,7 @@ export default function HoCashflowPage() {
               {pad}
             </tr>
           </>
-        } />
+        )} />
 
       <SourceNote>
         <strong>Closing</strong> is the opening balance plus everything in, less everything out —
@@ -266,7 +326,9 @@ export default function HoCashflowPage() {
         title={editing ? "Edit cash movement" : "Office cash movement"}
         subtitle="One direction per entry. A transfer is two entries, which is what makes both sides visible.">
         <div className="space-y-3.5">
-          <div className="grid grid-cols-2 gap-3">
+          {/* One column on a phone: "In — money arriving" does not fit in half of
+              390px at the 16px font iOS insists on. */}
+          <div className="grid grid-cols-2 gap-3 max-md:grid-cols-1">
             <Field label="Date"><input type="date" value={form.flow_date} onChange={(e) => setForm({ ...form, flow_date: e.target.value })} className={inputCls} /></Field>
             <Field label="Direction">
               <select value={form.direction}
@@ -282,10 +344,15 @@ export default function HoCashflowPage() {
               {catOptions.map((c) => <option key={c} value={c}>{c}</option>)}
             </select>
           </Field>
-          <Field label="Amount"><input type="number" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} className={inputCls} autoFocus /></Field>
+          {/* inputMode="decimal" opens the phone's numeric keypad rather than the
+              letter keyboard with a number row — the difference between four taps
+              and four taps plus a hunt for the digits. */}
+          <Field label="Amount"><input type="number" inputMode="decimal" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} className={inputCls} autoFocus /></Field>
           <Field label="Notes"><input value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} className={inputCls} placeholder="Who, or what for" /></Field>
           {err && <p className="text-[12.5px] font-semibold text-danger">{err}</p>}
-          <div className="flex justify-end gap-2 pt-1">
+          {/* Stacked and full width on a phone, Save at the bottom under the
+              thumb. The dialog CSS already gives both 44px. */}
+          <div className="flex justify-end gap-2 pt-1 max-md:flex-col max-md:[&>button]:w-full">
             <button onClick={() => { setOpen(false); setEditing(null); }} className={btnGhost}>Cancel</button>
             <button onClick={save} disabled={saving} className={btnPrimary}>
               {saving ? "Saving…" : editing ? "Save changes" : "Add entry"}

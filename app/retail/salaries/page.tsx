@@ -38,6 +38,24 @@
  *       was settled, which is what an employee asks about when they disagree
  *   Editing the original rows instead would destroy the second property and
  *   still be no safer about the first.
+ *
+ * AND ONE THE DATABASE ENFORCES, NOT THIS FILE
+ *   retail_salary_payments is UNIQUE (employee_id, pay_month) — migration 0124.
+ *   Before that constraint existed the same person could be paid twice for the
+ *   same month and nothing errored: two payslips, two offsetting ledger rows,
+ *   the advance cleared twice, and the only evidence was a balance that looked
+ *   slightly better than it should. The Pay button is hidden once a month is
+ *   paid, but that only helps the person looking at a fresh screen — two phones
+ *   on the same month, or a stale tab, go straight past it. The constraint is
+ *   what actually stops it, so the insert below stays a plain insert: it must be
+ *   allowed to FAIL. Never turn it into an upsert, and never change the
+ *   conflict target of anything that writes this table.
+ *
+ * ON A PHONE  (Oct 2026 — nothing below 768px changes the computer screen)
+ *   The pay run is cards: the amount payable is the figure, paid-or-not is the
+ *   card's left edge AND a pill, and Pay / Undo / Slip are full-height buttons
+ *   instead of 28px pills. The slip is left exactly as it was in print — see
+ *   the note above Slip() for why the two copies differ by one class.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
@@ -46,7 +64,7 @@ import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import Modal, { Field, inputCls, btnPrimary, btnGhost } from "@/components/Modal";
 import {
   Shell, PageHeader, StatCards, DataTable, Tabs, Pill, BranchPicker, MonthPicker,
-  PreviewNote, SourceNote, fetchAll, useEmployees,
+  PreviewNote, SourceNote, fetchAll, useEmployees, RowCard, useIsPhone,
   isHourly, attHours, isSunday, money, num, text, today, monthKey, monthBounds, monthLabel,
   type Row, type Col, type Employee,
 } from "@/components/retail/kit";
@@ -75,6 +93,7 @@ export default function SalariesPage() {
      historic wage payout, because history has to stay readable after somebody
      leaves. */
   const { employees, allEmployees, branches } = useEmployees("all");
+  const phone = useIsPhone();
   const [tab, setTab] = useState<Tab>("payroll");
   const [month, setMonth] = useState(monthKey());
   const [branch, setBranch] = useState("");
@@ -128,11 +147,17 @@ export default function SalariesPage() {
     const [from, to] = monthBounds(month);
 
     const [attRes, ledRes, payRes] = await Promise.all([
+      /* `att_date` alone cannot be paged on: one date is one row PER PERSON, so
+         every date in the month is a tie across the whole shop. Paging is
+         LIMIT/OFFSET over separate requests and Postgres orders tied rows however
+         it likes in each one, so a day could arrive twice — paying an hourly
+         worker for hours nobody worked — or not at all. `id` is unique and is
+         appended last, so the date order the screen reads is unchanged. */
       fetchAll<Row>((a, b) =>
         supabase!.from("retail_attendance")
           .select("employee_id,att_date,status,time_in,time_out")
           .in("employee_id", ids).gte("att_date", from).lte("att_date", to)
-          .order("att_date", { ascending: true }).range(a, b)),
+          .order("att_date", { ascending: true }).order("id", { ascending: true }).range(a, b)),
       /* ALL TIME on purpose — see rule 2 at the top of this file. */
       fetchAll<Row>((a, b) =>
         supabase!.from("retail_employee_ledger")
@@ -407,12 +432,71 @@ export default function SalariesPage() {
       ) },
   ];
 
+  /* The wage list's automatic phone card is already nearly right — "Amount" is
+     the only bold right-aligned column, so it is the figure. These two hints
+     just swap the top line: a payout is identified by WHO was paid, and the
+     date is the second line. `phone` is read by the kit below 768px and is
+     ignored by the table above it. */
   const wageCols: Col<Row>[] = [
-    { head: "Date", muted: true, cell: (w) => text(w.pay_date) },
-    { head: "Employee", bold: true, cell: (w) => empName(w.employee_id) },
+    { head: "Date", muted: true, phone: "meta", cell: (w) => text(w.pay_date) },
+    { head: "Employee", bold: true, phone: "title", cell: (w) => empName(w.employee_id) },
     { head: "Amount", right: true, bold: true, cell: (w) => money(w.amount) },
     { head: "Note", muted: true, cell: (w) => text(w.note) },
   ];
+
+  /* ── the pay run as phone cards ────────────────────────────────────────
+   * Written out rather than derived, for two reasons. The derived card puts the
+   * Pay and Slip buttons into a labelled pair with `truncate` on it, which
+   * clips the only two controls on the screen; and the "capped · Rs X still
+   * owed" note that hangs off the Advances cell gets truncated with them, which
+   * is the one line on the row that explains why a deduction is smaller than
+   * what somebody owes.
+   *
+   * Paid or not paid has to be unmissable — it is the difference between
+   * handing over cash and handing it over twice — so it is said three times: the
+   * left edge, a pill, and which button is offered.
+   */
+  const payCard = (r: PayRow, i: number) => {
+    const a = r.rec ? num(r.rec.advance_deducted) : r.advToDeduct;
+    const capped = !r.rec && r.owed > r.salary;
+    return (
+      <RowCard key={i}
+        title={r.e.name}
+        meta={[branchName(r.e.branch_id), isHourly(r.e) ? `${r.hours.toFixed(1)} h @ ${money(r.e.hourly_rate)}/hr` : ""]
+          .filter(Boolean).join(" · ")}
+        right={money(r.rec ? num(r.rec.net_paid) : r.netPayable)}
+        tone={r.rec ? "good" : "warn"}
+        pills={
+          <>
+            {r.rec
+              ? <Pill tone="good">Paid{r.rec.paid_on ? ` · ${String(r.rec.paid_on)}` : ""}</Pill>
+              : <Pill tone="warn">Unpaid</Pill>}
+            {r.rec
+              ? <button onClick={() => { setErr(""); setUndoFor(r); }}
+                  className="inline-flex items-center gap-1.5 rounded-full border border-line bg-surface px-4 py-2 text-[12.5px] font-semibold text-ink dark:border-white/10 dark:bg-white/[0.06] dark:text-white">
+                  <Undo2 size={13} /> Undo
+                </button>
+              : <button onClick={() => startPay(r)}
+                  className="rounded-full bg-ink px-5 py-2 text-[12.5px] font-semibold text-white dark:bg-white dark:text-[#141414]">
+                  Pay
+                </button>}
+            <button onClick={() => setSlipFor(r)}
+              className="rounded-full border border-line bg-surface px-4 py-2 text-[12.5px] font-semibold text-ink dark:border-white/10 dark:bg-white/[0.06] dark:text-white">
+              Slip
+            </button>
+          </>
+        }
+        pairs={[
+          { k: "Salary", v: r.salary ? money(r.salary) : "—" },
+          { k: "Advances", v: a ? <span className="text-danger">−{money(a)}</span> : "—" },
+          /* Its own pair, not a second line inside the one above, because the
+             card truncates a pair's value: the rest of the debt is not
+             forgiven, it comes off next month, and that has to survive. */
+          ...(capped ? [{ k: "Still owed after cap", v: money(r.owed - r.advToDeduct) }] : []),
+        ]}
+      />
+    );
+  };
 
   return (
     <Shell>
@@ -430,7 +514,11 @@ export default function SalariesPage() {
             but invisible on the Wages tab would quietly narrow that list. */}
         {branches.length > 1 && <BranchPicker branches={branches} value={branch} onChange={setBranch} />}
         {tab === "wages" && (
-          <button onClick={() => { setWageForm({ ...BLANK_WAGE }); setErr(""); setWageOpen(true); }} className={btnPrimary}>
+          /* `today()` again on open, not the date frozen into BLANK_WAGE when
+             the module loaded. A phone keeps this tab alive for days, and a
+             wage paid today recorded against last Thursday is a payout nobody
+             can find when they go looking for it. */
+          <button onClick={() => { setWageForm({ ...BLANK_WAGE, pay_date: today() }); setErr(""); setWageOpen(true); }} className={btnPrimary}>
             <Plus size={15} /> Record wage
           </button>
         )}
@@ -445,8 +533,27 @@ export default function SalariesPage() {
 
       {tab === "payroll" ? (
         <DataTable cols={cols} rows={rows} loading={loading} minWidth={920}
+          card={payCard}
           empty="No active staff here yet — add them under Employee ▸ Employees."
-          footer={
+          /* SEVEN CELLS DO NOT FIT ON A PHONE. The run's totals are the last
+             thing checked before the cash is counted out, so they are kept —
+             but three money figures and two spacers across 358px push the net,
+             the one that says how much cash to bring, off the right-hand edge
+             and under the clip. Two lines of two instead, net first. */
+          footer={phone ? (
+            <>
+              <tr className="text-ink dark:text-[#f4f1ea]">
+                <td className="px-3.5 pt-3 font-bold">Net payable · {rows.length} staff</td>
+                <td className="px-3.5 pt-3 text-right font-bold tabular-nums">{money(totals.net)}</td>
+              </tr>
+              <tr className="text-[12px] text-muted dark:text-[#a89f93]">
+                <td className="px-3.5 pb-3 pt-1">Salary {money(totals.salary)}</td>
+                <td className="px-3.5 pb-3 pt-1 text-right tabular-nums text-danger">
+                  {totals.adv ? "Advances −" + money(totals.adv) : "No advances"}
+                </td>
+              </tr>
+            </>
+          ) : (
             <tr className="text-ink dark:text-[#f4f1ea]">
               <td className="px-4 py-3 font-bold" colSpan={2}>Total · {rows.length} staff</td>
               <td className="px-4 py-3 text-right font-bold tabular-nums">{money(totals.salary)}</td>
@@ -454,7 +561,7 @@ export default function SalariesPage() {
               <td className="px-4 py-3 text-right font-bold tabular-nums">{money(totals.net)}</td>
               <td className="px-4 py-3" colSpan={2} />
             </tr>
-          } />
+          )} />
       ) : (
         <DataTable cols={wageCols} rows={wages} loading={wagesLoading} minWidth={640}
           empty="No wage payouts recorded yet." />
@@ -475,25 +582,29 @@ export default function SalariesPage() {
         subtitle={`${monthLabel(month)} · advances owed are deducted, the net is the cash to hand over.`}>
         {payFor && (
           <div className="space-y-3.5">
-            <div className="grid grid-cols-2 gap-3">
+            {/* ONE COLUMN ON A PHONE, and `inputMode="decimal"` on all three
+                money fields — it is the only way to get a numeric keypad with a
+                decimal point on iOS, and this is the dialog where a figure is
+                typed and then cash is counted out against it. */}
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
               <Field label="Salary">
-                <input type="number" value={payForm.salary} className={inputCls}
+                <input type="number" inputMode="decimal" value={payForm.salary} className={inputCls}
                   onChange={(e) => setPayForm((f) => {
                     const next = { ...f, salary: e.target.value };
                     return { ...next, net: recalc(next) };
                   })} />
               </Field>
               <Field label="Advance deducted">
-                <input type="number" value={payForm.adv} className={inputCls}
+                <input type="number" inputMode="decimal" value={payForm.adv} className={inputCls}
                   onChange={(e) => setPayForm((f) => {
                     const next = { ...f, adv: e.target.value };
                     return { ...next, net: recalc(next) };
                   })} />
               </Field>
             </div>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
               <Field label="Net paid">
-                <input type="number" value={payForm.net} className={inputCls}
+                <input type="number" inputMode="decimal" value={payForm.net} className={inputCls}
                   onChange={(e) => setPayForm({ ...payForm, net: e.target.value })} />
               </Field>
               <Field label="Paid on">
@@ -514,7 +625,12 @@ export default function SalariesPage() {
             </p>
 
             {err && <p className="text-[12.5px] font-semibold text-danger">{err}</p>}
-            <div className="flex justify-end gap-2 pt-1">
+            {/* THIS IS THE CONFIRM STEP, and it stays one. Nothing is written
+                until "Record payment" is tapped, and the line above it says the
+                figure that will be handed over. On a phone both buttons share
+                the row at full width, in the same order, so Cancel is never the
+                one that happens to be under the thumb. */}
+            <div className="flex justify-end gap-2 pt-1 max-md:[&>button]:flex-1">
               <button onClick={() => setPayFor(null)} className={btnGhost}>Cancel</button>
               <button onClick={pay} disabled={saving} className={btnPrimary}>{saving ? "Recording…" : "Record payment"}</button>
             </div>
@@ -529,7 +645,7 @@ export default function SalariesPage() {
         subtitle="The payslip is removed and the deducted advance goes back onto their balance.">
         <div className="space-y-3.5">
           {err && <p className="text-[12.5px] font-semibold text-danger">{err}</p>}
-          <div className="flex justify-end gap-2">
+          <div className="flex justify-end gap-2 max-md:[&>button]:flex-1">
             <button onClick={() => setUndoFor(null)} className={btnGhost}>Keep it</button>
             <button onClick={undo} disabled={saving} className={btnPrimary}>{saving ? "Undoing…" : "Undo payment"}</button>
           </div>
@@ -540,7 +656,7 @@ export default function SalariesPage() {
       <Modal open={wageOpen} onClose={() => setWageOpen(false)} title="Record a wage payout"
         subtitle="A payout outside the monthly run — one day or several at once.">
         <div className="space-y-3.5">
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
             <Field label="Employee">
               {/* `people`, not every employee: the outstanding advance shown
                   below comes from the ledger this page loaded, which is scoped
@@ -555,12 +671,12 @@ export default function SalariesPage() {
               <input type="date" value={wageForm.pay_date} onChange={(e) => setWageForm({ ...wageForm, pay_date: e.target.value })} className={inputCls} />
             </Field>
           </div>
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
             <Field label="Wage amount">
-              <input type="number" value={wageForm.amount} onChange={(e) => setWageForm({ ...wageForm, amount: e.target.value })} className={inputCls} placeholder="e.g. 1000" />
+              <input type="number" inputMode="decimal" value={wageForm.amount} onChange={(e) => setWageForm({ ...wageForm, amount: e.target.value })} className={inputCls} placeholder="e.g. 1000" />
             </Field>
             <Field label="Cut from advance">
-              <input type="number" value={wageForm.adv} onChange={(e) => setWageForm({ ...wageForm, adv: e.target.value })} className={inputCls} placeholder="0" />
+              <input type="number" inputMode="decimal" value={wageForm.adv} onChange={(e) => setWageForm({ ...wageForm, adv: e.target.value })} className={inputCls} placeholder="0" />
             </Field>
           </div>
           {wageForm.employee_id && (owedBy[Number(wageForm.employee_id)] ?? 0) > 0 && (
@@ -573,7 +689,7 @@ export default function SalariesPage() {
             <input value={wageForm.note} onChange={(e) => setWageForm({ ...wageForm, note: e.target.value })} className={inputCls} placeholder="e.g. 3 days" />
           </Field>
           {err && <p className="text-[12.5px] font-semibold text-danger">{err}</p>}
-          <div className="flex justify-end gap-2 pt-1">
+          <div className="flex justify-end gap-2 pt-1 max-md:[&>button]:flex-1">
             <button onClick={() => setWageOpen(false)} className={btnGhost}>Cancel</button>
             <button onClick={saveWage} disabled={saving} className={btnPrimary}>{saving ? "Saving…" : "Record payout"}</button>
           </div>
@@ -611,8 +727,16 @@ export default function SalariesPage() {
  *   its own scrollbar sitting inside a fixed overlay — print it in place and
  *   the browser hands you the first screenful and throws the rest away. The
  *   portalled copy has no such ancestors: it is a direct child of <body>, and
- *   the print rule simply hides every sibling. Same React element rendered in
- *   two places, so the two can never say different things.
+ *   the print rule simply hides every sibling. One function called twice, so
+ *   the two copies cannot say different things about a figure.
+ *
+ *   The `onScreen` flag is the ONLY difference between them, and it carries no
+ *   data: it adds the handful of phone-only classes that make the sheet
+ *   readable at 390px. They are deliberately kept off the print copy. A
+ *   printed page has no scrollbar to drag, and a box that is `overflow: auto`
+ *   on screen can come out of a printer as the visible slice with the rest
+ *   dropped — on a payslip that would be a ledger silently missing its last
+ *   rows, which is the one thing worse than an ugly payslip.
  *
  * WHY IT IS ALWAYS A WHITE SHEET
  *   Deliberately no dark: variants anywhere below. A payslip is a piece of
@@ -716,7 +840,15 @@ function Slip({ r, month, att, ledger, branchName, onClose }: {
   const th = "px-3 py-2 text-left text-[10.5px] font-bold uppercase tracking-wide text-muted";
   const td = "px-3 py-1.5 text-[12px]";
 
-  const sheet = (
+  /* `box` is the frame each of the sheet's three tables sits in.
+     `overflow-hidden` is what rounds the corners over a table — and on a phone
+     it is also what CLIPS the ledger's sixth column, the running balance: the
+     column somebody is pointing at when they say the deduction is wrong.
+     `rt-scroll-x` turns that clip into a scroll inside the box, below 768px
+     only, and only on the copy that is on a screen. */
+  const sheet = (onScreen: boolean) => {
+    const box = `mt-2 overflow-hidden rounded-xl2 border border-line${onScreen ? " rt-scroll-x" : ""}`;
+    return (
     <div className="rounded-xl2 border border-line bg-white p-5 text-ink">
       <div className="border-b border-line pb-3">
         <div className="text-[10.5px] font-bold uppercase tracking-[0.09em] text-muted">Salary slip</div>
@@ -726,8 +858,11 @@ function Slip({ r, month, att, ledger, branchName, onClose }: {
         </div>
       </div>
 
-      {/* ── the three figures ──────────────────────────────────────────── */}
-      <div className="mt-4 grid grid-cols-3 gap-2.5">
+      {/* ── the three figures ────────────────────────────────────────────
+          Three across at 390px is 105px a box, and "Rs 1,20,000" over a label
+          reading "Earned (hrs × rate)" does not go into 105px. Stacked on a
+          phone instead; three across from 768px up, and on paper, as before. */}
+      <div className={`mt-4 grid grid-cols-3 gap-2.5 ${onScreen ? "max-md:grid-cols-1 max-md:gap-2" : ""}`}>
         <div className="rounded-xl2 border border-line bg-panel p-3">
           <div className="text-[10px] font-bold uppercase tracking-wide text-muted">
             {hourly ? "Earned (hrs × rate)" : "Monthly salary"}
@@ -753,7 +888,7 @@ function Slip({ r, month, att, ledger, branchName, onClose }: {
       </h4>
 
       {hourly ? (
-        <div className="mt-2 overflow-hidden rounded-xl2 border border-line">
+        <div className={box}>
           <table className="w-full">
             <thead className="border-b border-line bg-panel">
               <tr><th className={th}>Date</th><th className={th}>In</th><th className={th}>Out</th><th className={`${th} text-right`}>Hours</th></tr>
@@ -788,7 +923,7 @@ function Slip({ r, month, att, ledger, branchName, onClose }: {
             {" · "}<span className="text-periwinkle-strong">Sundays {tally.sun}</span>
             {" · "}<strong>Counted {tally.counted} days</strong>
           </p>
-          <div className="mt-2 overflow-hidden rounded-xl2 border border-line">
+          <div className={box}>
             <table className="w-full">
               <thead className="border-b border-line bg-panel">
                 <tr><th className={th}>Date</th><th className={th}>Day</th><th className={th}>Status</th></tr>
@@ -814,7 +949,7 @@ function Slip({ r, month, att, ledger, branchName, onClose }: {
       <h4 className="mt-5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted">
         Advance ledger · outstanding {money(r.owed)}
       </h4>
-      <div className="mt-2 overflow-hidden rounded-xl2 border border-line">
+      <div className={box}>
         <table className="w-full">
           <thead className="border-b border-line bg-panel">
             <tr>
@@ -844,14 +979,16 @@ function Slip({ r, month, att, ledger, branchName, onClose }: {
       <p className="mt-3 text-[11px] text-hint">Generated {today()}</p>
     </div>
   );
+};
 
   return (
     <>
       <style>{PRINT_CSS}</style>
-      {sheet}
-      {/* The print copy — hidden on screen, the only thing on the page in print. */}
-      {mounted && createPortal(<div className="rt-slip-print">{sheet}</div>, document.body)}
-      <div className="mt-4 flex justify-end gap-2">
+      {sheet(true)}
+      {/* The print copy — hidden on screen, the only thing on the page in print,
+          and without the phone classes. See the note at the top of this block. */}
+      {mounted && createPortal(<div className="rt-slip-print">{sheet(false)}</div>, document.body)}
+      <div className="mt-4 flex justify-end gap-2 max-md:[&>button]:flex-1">
         <button onClick={onClose} className={btnGhost}>Close</button>
         <button onClick={() => window.print()} className={btnPrimary}><Printer size={15} /> Print</button>
       </div>

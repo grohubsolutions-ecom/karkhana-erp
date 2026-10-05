@@ -23,13 +23,19 @@
  * NET PAYABLE deducts this month's advances and purchase credit and adds back
  * what has been repaid, which is what the person handing over the envelope
  * actually needs.
+ *
+ * ON A PHONE (Oct 2026) the eight-column table becomes one card per person —
+ * the kit does that from the columns below. The only thing this screen has to
+ * say about it is which column is which: the name identifies the row, the
+ * attendance is the second line, and NET PAYABLE is the one big figure, because
+ * that is the number somebody is holding an envelope against.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { CalendarRange, Wallet, Clock, Banknote } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import {
   Shell, PageHeader, StatCards, DataTable, Pill, MonthPicker, BranchPicker, PreviewNote, SourceNote,
-  useEmployees, monthKey, monthBounds, monthLabel, isHeadOffice,
+  useIsPhone, useEmployees, monthKey, monthBounds, monthLabel, isHeadOffice,
   money, num, attHours, isHourly, type Row, type Col, type Employee,
 } from "@/components/retail/kit";
 
@@ -41,6 +47,7 @@ type Line = {
 };
 
 export default function SummaryScreen({ scope }: { scope: Scope }) {
+  const phone = useIsPhone();
   const { employees, branches } = useEmployees(scope);
   const [month, setMonth] = useState(monthKey());
   const [branch, setBranch] = useState("");
@@ -111,11 +118,16 @@ export default function SummaryScreen({ scope }: { scope: Scope }) {
   ];
 
   const cols: Col<Line>[] = [
-    { head: "Name", bold: true, cell: (l) => l.emp.name },
+    /* `phone` says where each column lands on the card. Without the hint on
+       Attendance the card's second line would be the pay-type pill, which says
+       nothing you did not already know from the rate beside it — where the days
+       (or the hours, for hourly staff) are the one thing that explains the
+       figure on the right. */
+    { head: "Name", bold: true, phone: "title", cell: (l) => l.emp.name },
     { head: "Pay", cell: (l) => l.hourly
         ? <Pill tone="warn">{money(l.emp.hourly_rate)}/hr</Pill>
         : <Pill tone="info">Monthly</Pill> },
-    { head: "Attendance", muted: true, cell: (l) => l.hourly
+    { head: "Attendance", muted: true, phone: "meta", cell: (l) => l.hourly
         ? `${l.hours.toFixed(1)} h`
         : `${l.present} present${l.half ? ` · ${l.half} half` : ""}${l.absent ? ` · ${l.absent} absent` : ""}` },
     { head: "Earned", right: true, bold: true, cell: (l) => money(l.earned) },
@@ -141,14 +153,29 @@ export default function SummaryScreen({ scope }: { scope: Scope }) {
 
       <DataTable cols={cols} rows={lines} loading={loading} err={err} minWidth={940}
         empty="Nobody in scope — add employees first."
-        footer={
+        footer={phone ? (
+          /* The computer's total row is four cells wide; at 390px they wrap into
+             three money figures with no labels left. Same numbers, stacked, with
+             net payable — the month's wage bill after what people have already
+             drawn — as the figure the eye lands on. */
+          <tr className="text-ink dark:text-[#f4f1ea]">
+            <td className="px-3.5 py-3">
+              <div className="text-[12.5px] font-bold">{lines.length} people · earned {money(tot.earned)}</div>
+              <div className="text-[11.5px] font-semibold text-muted dark:text-[#a89f93]">{money(tot.drawn)} drawn</div>
+            </td>
+            <td className="px-3.5 py-3 text-right">
+              <div className="text-[11px] uppercase tracking-wide text-hint dark:text-[#8a8175]">Net payable</div>
+              <div className="text-[16px] font-extrabold tabular-nums">{money(tot.net)}</div>
+            </td>
+          </tr>
+        ) : (
           <tr className="text-ink dark:text-[#f4f1ea]">
             <td className="px-4 py-3 font-bold" colSpan={3}>Total</td>
             <td className="px-4 py-3 text-right font-bold tabular-nums">{money(tot.earned)}</td>
             <td className="px-4 py-3 text-right font-bold tabular-nums" colSpan={3}>{money(tot.drawn)} drawn</td>
             <td className="px-4 py-3 text-right font-bold tabular-nums">{money(tot.net)}</td>
           </tr>
-        } />
+        )} />
 
       <SourceNote>
         <strong>Monthly staff are paid the full salary.</strong> Days present do not scale it — an

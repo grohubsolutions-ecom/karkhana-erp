@@ -52,11 +52,26 @@
  *   always older than the repayments against them, so the balance came out too
  *   low and every outstanding figure on the screen understated the debt. It is
  *   read all-time through fetchAll instead.
+ *
+ * ON A PHONE  (Oct 2026 — nothing below 768px changes the computer screen)
+ *   All three lists hand DataTable their own `card`, rather than letting the
+ *   kit derive one. The derived card picks the LAST right-aligned column as the
+ *   big figure, and on every table here that column is a button — "Statement"
+ *   on the rollup, the delete bin on the register — so the one number the
+ *   screen exists for ended up as a labelled pair halfway down the card while a
+ *   button sat where the money should be. Written out by hand:
+ *     who-owes-what → the BALANCE is the figure, and the card's left edge is
+ *                     red when they owe and green when they are settled, so the
+ *                     list can be read without reading it
+ *     entries       → the AMOUNT of that entry, red out / green back
+ *   The statement inside the modal becomes cards too: as a table it was a
+ *   600px-wide scroller inside the modal's own scroller, which on a phone is
+ *   two scrollbars fighting over one drag.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import {
-  NotebookPen, Plus, HandCoins, Users, Scale, Printer, Trash2, ArrowDownRight, ArrowUpRight,
+  NotebookPen, Plus, HandCoins, Users, Scale, Printer, Trash2, ArrowDownRight, ArrowUpRight, Phone,
 } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import Modal, { Field, inputCls, btnPrimary, btnGhost } from "@/components/Modal";
@@ -64,6 +79,7 @@ import {
   Shell, PageHeader, StatCards, DataTable, Tabs, Pill, Select, BranchPicker, MonthPicker,
   PreviewNote, SourceNote, useEmployees, isHeadOffice, money, num, text, today,
   monthKey, monthBounds, monthLabel, fetchAll,
+  RowCard, CardList, useIsPhone,
   type Row, type Col, type Employee,
 } from "@/components/retail/kit";
 
@@ -109,6 +125,13 @@ export function balancesByEmployee(rows: Row[]): Record<number, number> {
   });
   return m;
 }
+
+/** How a balance reads at a glance on a phone card's left edge: red when the
+ *  person owes, amber when the business owes THEM (money pointing the other way
+ *  is worth a second look, not a tick), green when it is settled. The same
+ *  three cases the Outstanding column spells out in words. */
+const balTone = (bal: number): "bad" | "warn" | "good" =>
+  bal > OPEN ? "bad" : bal < -OPEN ? "warn" : "good";
 
 function SourcePill({ source }: { source: unknown }) {
   const s = String(source ?? "manual");
@@ -160,6 +183,7 @@ export function EmployeeStatement({ employee, branchName, onClose, onSaved }: {
   const [date, setDate] = useState(today());
   const [amount, setAmount] = useState("");
   const [note, setNote] = useState("");
+  const phone = useIsPhone();
 
   /* document.body does not exist while this renders on the server, so the
      print copy waits for the mount. */
@@ -289,8 +313,12 @@ export function EmployeeStatement({ employee, branchName, onClose, onSaved }: {
       subtitle={who || "Every advance and repayment, oldest first, with the balance after each one."}>
       <style>{PRINT_CSS}</style>
 
-      {/* ── the three figures ─────────────────────────────────────────── */}
-      <div className="grid grid-cols-3 gap-2.5">
+      {/* ── the three figures ───────────────────────────────────────────
+          Three across at 390px leaves 110px a box, and "Rs 1,20,000" does not
+          fit in 110px. On a phone Advanced and Repaid share the top line and
+          Outstanding — the figure the statement was opened for — takes the
+          whole width underneath. Three across from 768px up, as before. */}
+      <div className="grid grid-cols-2 gap-2 md:grid-cols-3 md:gap-2.5">
         <div className="rounded-xl2 border border-line bg-danger-soft p-3 dark:border-white/[0.06] dark:bg-white/[0.04]">
           <div className={`${boxLabel} text-danger`}>Advanced</div>
           <div className="mt-1 text-[16px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">{loading ? "—" : money(advT)}</div>
@@ -299,31 +327,78 @@ export function EmployeeStatement({ employee, branchName, onClose, onSaved }: {
           <div className={`${boxLabel} text-success`}>Repaid</div>
           <div className="mt-1 text-[16px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">{loading ? "—" : money(repT)}</div>
         </div>
-        <div className="rounded-xl2 border border-line bg-amber-soft p-3 dark:border-white/[0.06] dark:bg-white/[0.04]">
+        <div className="rounded-xl2 border border-line bg-amber-soft p-3 max-md:col-span-2 dark:border-white/[0.06] dark:bg-white/[0.04]">
           <div className={`${boxLabel} text-amber-strong`}>Outstanding</div>
           <div className={`mt-1 text-[18px] font-extrabold tabular-nums ${bal > OPEN ? "text-danger" : "text-success"}`}>{loading ? "—" : money(bal)}</div>
         </div>
       </div>
 
+      {/* WHY A CALL BUTTON, AND ONLY HERE: the reason somebody opens a
+          statement on a phone is nearly always to ring the person about what
+          they owe, and the number is already loaded with the employee. A tel:
+          link saves reading it off the screen and typing it into the dialler.
+          Phone only — a desktop browser has nothing to hand the number to. */}
+      {phone && employee.phone && (
+        <a href={`tel:${String(employee.phone).replace(/\s+/g, "")}`}
+          className="mt-3 flex min-h-[44px] w-full items-center justify-center gap-2 rounded-full border border-line bg-surface px-4 text-[13px] font-semibold text-ink dark:border-white/10 dark:bg-white/[0.06] dark:text-white">
+          <Phone size={15} /> Call {employee.phone}
+        </a>
+      )}
+
       {/* ── record something, without leaving the statement ────────────── */}
-      <div className="mt-4 grid grid-cols-2 gap-3">
+      <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
         <Field label="Date"><input type="date" value={date} onChange={(e) => setDate(e.target.value)} className={inputCls} /></Field>
-        <Field label="Amount"><input type="number" inputMode="numeric" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="e.g. 2000" className={inputCls} /></Field>
+        {/* decimal, not numeric: on iOS `numeric` is a digits-only pad with no
+            decimal point, and a repayment of 1,500.50 cannot be typed on it. */}
+        <Field label="Amount"><input type="number" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="e.g. 2000" className={inputCls} /></Field>
       </div>
       <div className="mt-3"><Field label="Details"><input value={note} onChange={(e) => setNote(e.target.value)} placeholder="reason / what was taken" className={inputCls} /></Field></div>
+      {/* STACKED ON A PHONE, NOT SIDE BY SIDE. These two buttons write money in
+          opposite directions and neither asks for confirmation, so half a
+          thumb's width between "Give advance" and "Record repayment" is a
+          mis-tap that puts a debt on somebody who just paid it off. */}
       <div className="mt-3 flex flex-wrap gap-2">
         <button onClick={() => add("adv")} disabled={saving !== null}
-          className="inline-flex items-center gap-1.5 rounded-full bg-danger px-4 py-2 text-[12.5px] font-semibold text-white transition hover:opacity-90 disabled:opacity-50">
+          className="inline-flex items-center justify-center gap-1.5 rounded-full bg-danger px-4 py-2 text-[12.5px] font-semibold text-white transition hover:opacity-90 disabled:opacity-50 max-md:w-full">
           <ArrowUpRight size={14} /> {saving === "adv" ? "Saving…" : "Give advance"}
         </button>
         <button onClick={() => add("rep")} disabled={saving !== null}
-          className="inline-flex items-center gap-1.5 rounded-full bg-success px-4 py-2 text-[12.5px] font-semibold text-white transition hover:opacity-90 disabled:opacity-50">
+          className="inline-flex items-center justify-center gap-1.5 rounded-full bg-success px-4 py-2 text-[12.5px] font-semibold text-white transition hover:opacity-90 disabled:opacity-50 max-md:w-full">
           <ArrowDownRight size={14} /> {saving === "rep" ? "Saving…" : "Record repayment"}
         </button>
       </div>
       {err && <p className="mt-2.5 text-[12.5px] font-semibold text-danger">{err}</p>}
 
-      {/* ── the statement ─────────────────────────────────────────────── */}
+      {/* ── the statement ───────────────────────────────────────────────
+          CARDS ON A PHONE. As a table this is 600px wide inside a 44vh box
+          inside the modal's own scroller: three nested scroll areas on a 390px
+          screen, where a drag that was meant to move the list sideways moves
+          the page instead and the row being read disappears. Oldest first
+          either way, and each card carries the balance after it — that running
+          figure is the whole point of the statement. */}
+      {phone ? (
+        <CardList rows={lines} loading={loading}
+          empty="No entries yet — give an advance or record a repayment above."
+          render={({ l, adv, rep, bal: b }, i) => (
+            <RowCard key={i}
+              title={text(l.purchase_details, kindLabel(l, adv, rep))}
+              meta={text(l.entry_date)}
+              /* The amount is the figure, and its direction is its colour:
+                 red went out to them, green came back. */
+              right={adv > 0
+                ? <span className="text-danger">{money(adv)}</span>
+                : rep > 0 ? <span className="text-success">{money(rep)}</span> : "—"}
+              tone={adv > 0 ? "warn" : "good"}
+              pills={<SourcePill source={l.source} />}
+              /* An imported row can carry an advance AND a repayment at once,
+                 and then the lead figure is only half the row. */
+              pairs={[
+                ...(adv > 0 && rep > 0 ? [{ k: "Repaid", v: money(rep) }] : []),
+                { k: "Balance after", v: money(b) },
+              ]}
+            />
+          )} />
+      ) : (
       <div className="mt-4 max-h-[44vh] overflow-auto rounded-xl2 border border-line dark:border-white/[0.08]">
         <table className="w-full min-w-[600px] text-left text-[12.5px]">
           <thead className="sticky top-0 bg-panel dark:bg-[#2a251f]">
@@ -356,6 +431,7 @@ export function EmployeeStatement({ employee, branchName, onClose, onSaved }: {
           </tbody>
         </table>
       </div>
+      )}
 
       <p className="mt-2.5 text-[11.5px] text-hint dark:text-[#8a8175]">
         Balance after each row is <strong>(advance + purchase credit) − repaid</strong>, running from the first
@@ -363,7 +439,10 @@ export function EmployeeStatement({ employee, branchName, onClose, onSaved }: {
         screens.
       </p>
 
-      <div className="mt-4 flex justify-end gap-2">
+      {/* The two buttons share the row at full width on a phone — a 70px
+          "Close" pinned to the right edge of a 390px screen is a thumb reaching
+          across the whole display for the commonest action on the dialog. */}
+      <div className="mt-4 flex justify-end gap-2 max-md:[&>button]:flex-1">
         <button onClick={onClose} className={btnGhost}>Close</button>
         <button onClick={() => window.print()} className={btnPrimary}><Printer size={15} /> Print</button>
       </div>
@@ -401,6 +480,7 @@ const SOURCE_FOR: Record<string, string> = {
 
 export default function LedgerScreen({ scope }: { scope: Scope }) {
   const { employees, branches } = useEmployees(scope);
+  const phone = useIsPhone();
   const [tab, setTab] = useState<Tab>("people");
   const [branch, setBranch] = useState("");
   const [employeeId, setEmployeeId] = useState("");
@@ -665,6 +745,93 @@ export default function LedgerScreen({ scope }: { scope: Scope }) {
       ) },
   ];
 
+  /* ── the same three lists as phone cards ───────────────────────────────
+   * Handed to DataTable as `card`, which replaces the kit's derived card below
+   * 768px and changes nothing at all above it. Why they are written out rather
+   * than hinted per column is at the top of this file: on every table here the
+   * last right-aligned column is a button, and that is the slot the derived
+   * card fills with the row's big figure.
+   */
+
+  /** WHO OWES WHAT. The balance is the figure, the left edge and the pill — the
+   *  question is "who owes me what", and it should be answerable by scrolling
+   *  past, not by reading. The whole card opens the statement: the 70px
+   *  "Statement" pill from the table is a smaller target than the card it sits
+   *  in, and tapping the name was already how the statement opened. */
+  const rollCard = (r: Roll, i: number) => (
+    <RowCard key={i}
+      title={r.e.name}
+      meta={showBranch ? branchName(r.e.branch_id) : r.e.designation}
+      right={<span className={r.bal > OPEN ? "text-danger" : "text-success"}>{money(r.bal)}</span>}
+      tone={balTone(r.bal)}
+      pills={r.bal > OPEN
+        ? <Pill tone="bad">Owes</Pill>
+        : r.bal < -OPEN
+          /* A Pill never wraps, so this says it in four words rather than
+             overflowing the card: repaid more than taken, we owe it back. */
+          ? <Pill tone="warn">In credit · we owe this</Pill>
+          : <Pill tone="good">Settled</Pill>}
+      pairs={[
+        { k: "Advanced", v: r.adv ? money(r.adv) : "—" },
+        { k: "Repaid", v: r.rep ? money(r.rep) : "—" },
+      ]}
+      onTap={() => setStatementFor(r.e)}
+    />
+  );
+
+  /** ALL ENTRIES. The person is what identifies the row — a date identifies
+   *  nothing when nine rows share it — and the figure is the amount of THIS
+   *  entry, red for value going out and green for money coming back. */
+  const entryCard = (l: Row, i: number) => {
+    const adv = advancedOn(l);
+    const rep = num(l.paid);
+    return (
+      <RowCard key={i}
+        title={empName(l.employee_id)}
+        meta={[text(l.entry_date, ""), text(l.purchase_details, "")].filter(Boolean).join(" · ")}
+        right={adv > 0
+          ? <span className="text-danger">{money(adv)}</span>
+          : rep > 0 ? <span className="text-success">{money(rep)}</span> : "—"}
+        tone={adv > 0 ? "warn" : "good"}
+        pills={<SourcePill source={l.source} />}
+        /* Only what the one figure above cannot say: how much of an advance was
+           goods rather than cash, and the repayment on a row that carries both
+           — which an imported row can. */
+        pairs={[
+          ...(num(l.purchase_credit) ? [{ k: "Of which credit", v: money(l.purchase_credit) }] : []),
+          ...(adv > 0 && rep > 0 ? [{ k: "Repaid", v: money(l.paid) }] : []),
+        ]}
+      />
+    );
+  };
+
+  /** ADVANCES REGISTER. Same shape, and the delete stays reachable because
+   *  correcting a mistyped advance is exactly the thing somebody does from the
+   *  shop floor with a phone in their hand. */
+  const advCard = (l: Row, i: number) => (
+    <RowCard key={i}
+      title={empName(l.employee_id)}
+      meta={[text(l.entry_date, ""), text(l.purchase_details, "")].filter(Boolean).join(" · ")}
+      right={<span className="text-danger">{money(l.advance)}</span>}
+      tone="warn"
+      pills={
+        <>
+          <SourcePill source={l.source} />
+          {/* Spelled out, not the 15px bin from the table: at a thumb's
+              resolution a bare icon that deletes money is a coin flip. Same
+              confirm dialog behind it, and a salary-run or Nimbus row still
+              gets no button at all. */}
+          {!isLockedRow(l) && (
+            <button onClick={() => { setErr(""); setDelFor(l); }}
+              className="inline-flex items-center gap-1 rounded-full border border-danger/30 bg-danger-soft px-3 py-2 text-[11.5px] font-semibold text-danger dark:border-danger/40 dark:bg-white/[0.06]">
+              <Trash2 size={13} /> Delete
+            </button>
+          )}
+        </>
+      }
+    />
+  );
+
   return (
     <Shell>
       <PageHeader
@@ -685,7 +852,11 @@ export default function LedgerScreen({ scope }: { scope: Scope }) {
           </Select>
         )}
         {tab === "advances" && <MonthPicker value={month} onChange={setMonth} />}
-        <button onClick={() => { setForm({ ...BLANK, employee_id: employeeId }); setErr(""); setOpen(true); }} className={btnPrimary}>
+        {/* `today()` again on open, not the one frozen into BLANK when the
+            module loaded. A phone keeps this tab alive for days, and an advance
+            entered on Tuesday dated last Saturday lands in the wrong month's
+            register with nothing on screen to say so. */}
+        <button onClick={() => { setForm({ ...BLANK, entry_date: today(), employee_id: employeeId }); setErr(""); setOpen(true); }} className={btnPrimary}>
           <Plus size={15} /> New entry
         </button>
       </PageHeader>
@@ -705,7 +876,24 @@ export default function LedgerScreen({ scope }: { scope: Scope }) {
           </div>
           <DataTable cols={rollCols} rows={rollRows} loading={loading} minWidth={showBranch ? 880 : 760}
             empty={showAll ? "No employees on this branch yet." : "No outstanding advances — nobody owes anything."}
-            footer={
+            card={rollCard}
+            /* SIX CELLS DO NOT FIT ON A PHONE. The totals row is kept — it is
+               the figure the shop's owner scrolls to the bottom for — but five
+               money columns across 358px either wrap every figure in half or
+               push the last one out of the card and under the clip. Two lines
+               of two instead, outstanding first. */
+            footer={phone ? (
+              <>
+                <tr className="text-ink dark:text-[#f4f1ea]">
+                  <td className="px-3.5 pt-3 font-bold">Outstanding · {rollRows.length} shown</td>
+                  <td className="px-3.5 pt-3 text-right font-bold tabular-nums text-danger">{money(shownTotals.out)}</td>
+                </tr>
+                <tr className="text-[12px] text-muted dark:text-[#a89f93]">
+                  <td className="px-3.5 pb-3 pt-1">Advanced {money(shownTotals.adv)}</td>
+                  <td className="px-3.5 pb-3 pt-1 text-right tabular-nums">Repaid {money(shownTotals.rep)}</td>
+                </tr>
+              </>
+            ) : (
               <tr className="text-ink dark:text-[#f4f1ea]">
                 <td className="px-4 py-3 font-bold" colSpan={showBranch ? 2 : 1}>
                   Total · {rollRows.length} shown
@@ -715,7 +903,7 @@ export default function LedgerScreen({ scope }: { scope: Scope }) {
                 <td className="px-4 py-3 text-right font-bold tabular-nums text-danger">{money(shownTotals.out)}</td>
                 <td className="px-4 py-3" />
               </tr>
-            } />
+            )} />
           <SourceNote>
             <strong>Total outstanding</strong> adds up the people who owe something and nobody else.
             A person who has repaid more than they took is money the business owes <em>them</em>; letting
@@ -728,6 +916,7 @@ export default function LedgerScreen({ scope }: { scope: Scope }) {
       {tab === "entries" && (
         <>
           <DataTable cols={entryCols} rows={entries} loading={loading} minWidth={920}
+            card={entryCard}
             empty="No ledger entries — advances and purchase credit will appear here." />
           <SourceNote>
             Every row, newest first. <strong>Advance</strong> is cash out, <strong>purchase credit</strong> is
@@ -750,11 +939,13 @@ export default function LedgerScreen({ scope }: { scope: Scope }) {
                   {people.map((e) => <option key={e.id} value={String(e.id)}>{e.name}</option>)}
                 </select>
               </Field>
-              <Field label="Amount"><input type="number" inputMode="numeric" value={advForm.amount} onChange={(e) => setAdvForm({ ...advForm, amount: e.target.value })} placeholder="5000" className={inputCls} /></Field>
+              {/* decimal, not numeric: iOS gives `numeric` a digits-only pad
+                  with no decimal point on it. */}
+              <Field label="Amount"><input type="number" inputMode="decimal" value={advForm.amount} onChange={(e) => setAdvForm({ ...advForm, amount: e.target.value })} placeholder="5000" className={inputCls} /></Field>
               <Field label="Date"><input type="date" value={advForm.entry_date} onChange={(e) => setAdvForm({ ...advForm, entry_date: e.target.value })} className={inputCls} /></Field>
               <Field label="Note"><input value={advForm.details} onChange={(e) => setAdvForm({ ...advForm, details: e.target.value })} placeholder="optional" className={inputCls} /></Field>
             </div>
-            <div className="mt-3.5 flex justify-end">
+            <div className="mt-3.5 flex justify-end max-md:[&>button]:w-full">
               <button onClick={addAdvance} disabled={advSaving} className={btnPrimary}>
                 <Plus size={15} /> {advSaving ? "Saving…" : "Add advance"}
               </button>
@@ -762,14 +953,20 @@ export default function LedgerScreen({ scope }: { scope: Scope }) {
           </div>
 
           <DataTable cols={advCols} rows={advRows} loading={loading} minWidth={860}
+            card={advCard}
             empty={`No advances in ${monthLabel(month)}.`}
-            footer={
+            footer={phone ? (
+              <tr className="text-ink dark:text-[#f4f1ea]">
+                <td className="px-3.5 py-3 font-bold">Total · {advRows.length} advance{advRows.length === 1 ? "" : "s"}</td>
+                <td className="px-3.5 py-3 text-right font-bold tabular-nums">{money(advTotal)}</td>
+              </tr>
+            ) : (
               <tr className="text-ink dark:text-[#f4f1ea]">
                 <td className="px-4 py-3 font-bold" colSpan={2}>Total</td>
                 <td className="px-4 py-3 text-right font-bold tabular-nums">{money(advTotal)}</td>
                 <td className="px-4 py-3" colSpan={3} />
               </tr>
-            } />
+            )} />
           <SourceNote>
             Advances paid out in {monthLabel(month)} — deducted from that month&apos;s payable salary on the
             Salaries screen. Everything added here is tagged <strong>advance</strong>; a row written by the
@@ -782,7 +979,11 @@ export default function LedgerScreen({ scope }: { scope: Scope }) {
       <Modal open={open} onClose={() => setOpen(false)} title="New ledger entry"
         subtitle="One entry, one kind. Recording an advance and a repayment together hides which is which.">
         <div className="space-y-3.5">
-          <div className="grid grid-cols-2 gap-3">
+          {/* ONE COLUMN ON A PHONE. Two half-width fields inside a dialog that
+              is already only 390px wide leaves each one too narrow to show the
+              name it is holding, and the 16px font the phone CSS forces on
+              inputs (so iOS does not zoom) makes that worse, not better. */}
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
             <Field label="Employee">
               <select value={form.employee_id} onChange={(e) => setForm({ ...form, employee_id: e.target.value })} className={inputCls}>
                 <option value="">Pick someone</option>
@@ -798,13 +999,13 @@ export default function LedgerScreen({ scope }: { scope: Scope }) {
               <option value="repay">Repayment — money coming back</option>
             </select>
           </Field>
-          <Field label="Amount"><input type="number" inputMode="numeric" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} className={inputCls} autoFocus /></Field>
+          <Field label="Amount"><input type="number" inputMode="decimal" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} className={inputCls} autoFocus /></Field>
           <Field label={form.kind === "credit" ? "What was taken" : "Details"}>
             <input value={form.details} onChange={(e) => setForm({ ...form, details: e.target.value })} className={inputCls}
               placeholder={form.kind === "credit" ? "e.g. 2 shirts, 1 trouser" : "Optional"} />
           </Field>
           {err && <p className="text-[12.5px] font-semibold text-danger">{err}</p>}
-          <div className="flex justify-end gap-2 pt-1">
+          <div className="flex justify-end gap-2 pt-1 max-md:[&>button]:flex-1">
             <button onClick={() => setOpen(false)} className={btnGhost}>Cancel</button>
             <button onClick={save} disabled={saving} className={btnPrimary}>{saving ? "Saving…" : "Add entry"}</button>
           </div>
@@ -822,7 +1023,7 @@ export default function LedgerScreen({ scope }: { scope: Scope }) {
             </p>
           )}
           {err && <p className="text-[12.5px] font-semibold text-danger">{err}</p>}
-          <div className="flex justify-end gap-2">
+          <div className="flex justify-end gap-2 max-md:[&>button]:flex-1">
             <button onClick={() => setDelFor(null)} className={btnGhost}>Keep it</button>
             <button onClick={removeAdvance} disabled={saving} className={btnPrimary}>{saving ? "Deleting…" : "Delete"}</button>
           </div>

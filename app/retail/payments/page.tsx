@@ -38,14 +38,15 @@
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  ArrowLeftRight, CreditCard, Smartphone, Globe, Users, Banknote, HelpCircle, CheckCircle2,
+  ArrowLeftRight, CreditCard, Smartphone, Globe, Users, Banknote, HelpCircle, CheckCircle2, Circle,
 } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
-import RangeBar from "@/components/RangeBar";
 import { rangeDates } from "@/lib/dateRange";
 import {
+  RetailRange,
   Shell, PageHeader, StatCards, DataTable, Pill, BranchPicker, PreviewNote, SourceNote,
-  useBranches, money, num, text, today, fetchAll, CARD_RATE_PCT, cardExpected,
+  ActionBar, CardList, RowCard, useIsPhone,
+  useBranches, money, num, text, today, addDays, fetchAll, CARD_RATE_PCT, cardExpected,
   type Row, type Col,
 } from "@/components/retail/kit";
 
@@ -74,16 +75,14 @@ const CLASSIFY_AS = [
   { pm: "cash", label: "Cash", cls: "bg-success-soft text-success hover:opacity-90" },
 ];
 
-/** ISO date + n days, built from the string's own parts.
- *  Not the kit's `iso()`, which goes through toISOString() and therefore
- *  converts to UTC — in Pakistan (UTC+5) that turns local midnight into the
- *  previous day, and a settlement date that is one day early is worse than no
- *  settlement date at all. */
-const addDays = (d: string, n: number) => {
-  const x = new Date(d + "T00:00:00");
-  x.setDate(x.getDate() + n);
-  return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, "0")}-${String(x.getDate()).padStart(2, "0")}`;
-};
+/* `addDays` now comes from the kit. It was hand-rolled here because the kit's
+   `iso()` used to go through toISOString(), which converts to UTC — in Pakistan
+   (UTC+5) that turns local midnight into the previous day, and a settlement date
+   one day early is worse than no settlement date at all. `iso()` has since been
+   fixed to report the local calendar day and the kit's `addDays` works from the
+   string's own parts, so there is nothing left for a local copy to protect
+   against. One implementation, and a settlement day that cannot disagree with
+   the day the cash book shows. */
 
 type UncLine = {
   id: number; branch_id: number | null; sale_date: string | null; sale_time: string | null;
@@ -104,6 +103,7 @@ const dateInputCls =
 
 export default function NonCashPage() {
   const { branches, branchName } = useBranches();
+  const phone = useIsPhone();
   const [branch, setBranch] = useState("");
 
   /* ── section 1 state: one day, one rate ────────────────────────────────── */
@@ -121,6 +121,20 @@ export default function NonCashPage() {
   const [loadingUnc, setLoadingUnc] = useState(true);
   const [errUnc, setErrUnc] = useState("");
   const [busy, setBusy] = useState("");
+  /* TICKED RECEIPTS, phone only. The computer tags one receipt at a time from
+     its own row of buttons — four buttons per row is fine when the row is
+     860px wide. On a phone those four buttons have to live somewhere, and
+     putting them on every card turns a 60px card into a 140px one, so the
+     backlog becomes four receipts a screen. Instead the card is a tick and the
+     four buttons move to one bar at the bottom. Keyed by UncGroup.key, so a
+     tick survives the list re-ordering. */
+  const [sel, setSel] = useState<Set<string>>(new Set());
+  const toggle = (k: string) =>
+    setSel((s) => {
+      const n = new Set(s);
+      if (n.has(k)) n.delete(k); else n.add(k);
+      return n;
+    });
 
   /* ── section 3 state: the mix over a range ─────────────────────────────── */
   const [preset, setPreset] = useState("30d");
@@ -204,6 +218,10 @@ export default function NonCashPage() {
     if (!isSupabaseConfigured || !supabase) { setLoadingUnc(false); return; }
     const db = supabase;
     setLoadingUnc(true); setErrUnc("");
+    /* Ticks are dropped on every reload — switching branch replaces the list,
+       and a tick left behind would be an invisible receipt in the bar's count
+       that the operator can no longer see or untick. */
+    setSel(new Set());
     const { rows, error } = await fetchAll<UncLine>((lo, hi) => {
       let q = db.from("retail_sale_lines")
         .select("id,branch_id,sale_date,sale_time,receipt_no,receipt_txn,sales_amount")
@@ -236,20 +254,31 @@ export default function NonCashPage() {
   }, [branch]);
   useEffect(() => { loadUnc(); }, [loadUnc]);
 
-  async function classify(g: UncGroup, pm: string) {
-    if (!supabase) return;
-    setBusy(g.key); setErrUnc("");
-    /* Chunked at 300 ids. PostgREST turns .in() into a query-string list, and
-       a busy receipt can be dozens of lines — a large group sent in one go
-       trips the URL length limit and comes back as a 414 that reads like a
-       network blip. Chunking also means a partial failure leaves a visibly
-       half-tagged receipt rather than silently doing nothing. */
+  /** The write, and the only one on this screen. Both the computer's per-row
+   *  buttons and the phone's bottom bar go through here, so the two cannot
+   *  drift apart. Returns "" on success, the message on failure.
+   *
+   *  Chunked at 300 ids. PostgREST turns .in() into a query-string list, and
+   *  a busy receipt can be dozens of lines — a large group sent in one go
+   *  trips the URL length limit and comes back as a 414 that reads like a
+   *  network blip. Chunking also means a partial failure leaves a visibly
+   *  half-tagged receipt rather than silently doing nothing. */
+  async function setMethod(g: UncGroup, pm: string): Promise<string> {
+    if (!supabase) return "Not connected.";
     for (let i = 0; i < g.ids.length; i += 300) {
       const chunk = g.ids.slice(i, i + 300);
       const { error } = await supabase.from("retail_sale_lines")
         .update({ payment_method: pm }).in("id", chunk);
-      if (error) { setErrUnc(error.message); setBusy(""); return; }
+      if (error) return error.message;
     }
+    return "";
+  }
+
+  async function classify(g: UncGroup, pm: string) {
+    if (!supabase) return;
+    setBusy(g.key); setErrUnc("");
+    const e = await setMethod(g, pm);
+    if (e) { setErrUnc(e); setBusy(""); return; }
     /* Removed from the list rather than re-fetched: the row is done, and a
        full reload here would scroll the operator away from the next one. */
     setUnc((gs) => gs.filter((x) => x.key !== g.key));
@@ -257,7 +286,38 @@ export default function NonCashPage() {
     loadMix();
   }
 
+  /** The ticked receipts, all tagged the same way. One receipt at a time is
+   *  what the computer does; a phone operator working through a backlog of
+   *  forty JazzCash receipts should not press forty buttons.
+   *
+   *  Receipt by receipt, NOT one .in() over every id: a receipt is the unit
+   *  that succeeds or fails, and the ones that went through stay gone from the
+   *  list while the ones that did not stay ticked, ready to retry. A single
+   *  statement across all of them would, on a failure halfway, leave nobody
+   *  able to say which receipts were written. */
+  async function classifySelected(pm: string) {
+    const picked = unc.filter((g) => sel.has(g.key));
+    if (!picked.length || !supabase) return;
+    setBusy("bulk"); setErrUnc("");
+    const done = new Set<string>();
+    for (const g of picked) {
+      const e = await setMethod(g, pm);
+      if (e) { setErrUnc(e); break; }
+      done.add(g.key);
+    }
+    setUnc((gs) => gs.filter((x) => !done.has(x.key)));
+    setSel((s) => new Set([...s].filter((k) => !done.has(k))));
+    setBusy("");
+    loadMix();
+  }
+
   const uncTotal = useMemo(() => unc.reduce((t, g) => t + g.amt, 0), [unc]);
+  /* What the bottom bar is about to write, in rupees. A bulk action with no
+     figure on it is a bulk action nobody checks before pressing. */
+  const selTotal = useMemo(
+    () => unc.filter((g) => sel.has(g.key)).reduce((t, g) => t + g.amt, 0),
+    [unc, sel]
+  );
 
   /* ── 3. the mix over a range ───────────────────────────────────────────── */
 
@@ -346,18 +406,69 @@ export default function NonCashPage() {
           what should actually arrive.
         </p>
 
+        {/* Two label-plus-input pairs sit side by side on a computer. On a phone
+            each takes a full-width line with the label left and the control
+            right, because at 390px — and the shared CSS makes every input 16px
+            so iOS cannot zoom the page — the pair after the first one wraps to a
+            half-orphaned line that looks like a glitch. */}
         <div className="mt-3 flex flex-wrap items-center gap-2">
-          <label className="flex items-center gap-2 text-[12.5px] font-semibold text-muted dark:text-[#a89f93]">
+          <label className="flex items-center gap-2 text-[12.5px] font-semibold text-muted max-md:w-full max-md:justify-between dark:text-[#a89f93]">
             Day
             <input type="date" value={day} onChange={(e) => setDay(e.target.value)} className={dateInputCls} />
           </label>
-          <label className="flex items-center gap-2 text-[12.5px] font-semibold text-muted dark:text-[#a89f93]">
+          <label className="flex items-center gap-2 text-[12.5px] font-semibold text-muted max-md:w-full max-md:justify-between dark:text-[#a89f93]">
             Bank charge %
-            <input type="number" step="0.001" value={rate} onChange={(e) => setRate(e.target.value)}
+            {/* inputMode="decimal" for the phone's numeric keypad — the rate is
+                typed as 1.276, and hunting a decimal point on a QWERTY keyboard
+                is how it becomes 1276. */}
+            <input type="number" step="0.001" inputMode="decimal" value={rate} onChange={(e) => setRate(e.target.value)}
               className={`${dateInputCls} w-[92px] tabular-nums`} />
           </label>
         </div>
 
+        {/* ON A PHONE one card per shop, with Net expected as the figure on the
+            right — that is the number the screen was opened for, and in the
+            640px table it is the last of four columns, which on a 390px display
+            means dragging past the shop name to reach it. Gross and the charge
+            stay on the card as a pair, so the net can still be checked rather
+            than taken on trust. The computer keeps the table below, unchanged. */}
+        {phone ? (
+          <CardList
+            rows={cardTable.out} loading={loadingCard} err={errCard}
+            empty={`No card sales on ${day}.`}
+            footer={
+              <div className="flex items-center justify-between gap-3 rounded-card border border-line bg-panel/60 px-3.5 py-3 dark:border-white/[0.06] dark:bg-white/[0.04]">
+                <div className="min-w-0">
+                  <div className="text-[13px] font-extrabold text-ink dark:text-[#f4f1ea]">All stores</div>
+                  <div className="text-[11.5px] text-muted dark:text-[#a89f93]">gross {money(cardTable.gross)}</div>
+                </div>
+                <div className="flex-none text-[15px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">{money(cardTable.net)}</div>
+              </div>
+            }
+            render={(r) =>
+              r.kind === "chain" ? (
+                <div key={r.key} className="flex items-baseline justify-between gap-3 px-1 pt-2 text-[12px] font-extrabold uppercase tracking-wide text-hint dark:text-[#8a8175]">
+                  <span className="truncate">{r.label}</span>
+                  <span className="flex-none tabular-nums">{money(r.net)}</span>
+                </div>
+              ) : (
+                <RowCard
+                  key={r.key}
+                  title={r.label}
+                  /* Spelled out, because a big figure on a card gives no clue
+                     whether it is the gross at the till or the net from the
+                     bank, and those two are the whole point of this section. */
+                  meta="net expected"
+                  right={money(r.net)}
+                  pairs={[
+                    { k: "Card sales (gross)", v: money(r.gross) },
+                    { k: `Bank charge ${ratePct}%`, v: <span className="text-danger">−{money(r.gross - r.net)}</span> },
+                  ]}
+                />
+              )
+            }
+          />
+        ) : (
         <div className="mt-4 overflow-hidden rounded-card border border-line bg-surface dark:border-white/[0.06] dark:bg-[#201c17]">
           <div className="overflow-x-auto">
             <table className="w-full min-w-[640px] text-left text-[13px]">
@@ -411,6 +522,7 @@ export default function NonCashPage() {
             </table>
           </div>
         </div>
+        )}
 
         {!loadingCard && cardTable.net > 0 && (
           <div className="mt-3 rounded-card border border-line bg-periwinkle-soft px-4 py-3 text-[13px] text-ink dark:border-white/[0.06] dark:bg-white/[0.05] dark:text-[#e7e2d8]">
@@ -431,6 +543,107 @@ export default function NonCashPage() {
 
         {errUnc && <p className="mt-3 text-[12.5px] font-semibold text-danger">Couldn&apos;t update: {errUnc}</p>}
 
+        {/* ON A PHONE: TICK, THEN TAG. This is the one screen in the department
+            where somebody works through a list doing the same thing to row after
+            row, and the 860px table it is on the computer cannot be that: seven
+            columns to drag past, and four tagging buttons squeezed into the last
+            of them.
+
+            So the receipt becomes a card whose WHOLE SURFACE is the tick — a
+            16px checkbox is a mis-tap, and a mis-tap here either tags the wrong
+            receipt or scrolls the list — and the four buttons move to one bar
+            above the tab bar, where they are full-sized and in one place instead
+            of repeated on every card.
+
+            Two taps per receipt become one, and a run of forty JazzCash
+            receipts becomes forty ticks and a single button.
+
+            `ActionBar` sits at bottom-[60px+safe-area] so it never covers the
+            tab bar, and the list is padded by pb-24 while it is up so the last
+            card is not underneath it. */}
+        {phone ? (
+          <>
+            <div className={sel.size ? "pb-24" : ""}>
+              <CardList
+                rows={unc} loading={loadingUnc}
+                empty="Nothing to classify — every non-cash sale is already tagged."
+                footer={
+                  <div className="flex items-center justify-between gap-3 rounded-card border border-line bg-panel/60 px-3.5 py-3 dark:border-white/[0.06] dark:bg-white/[0.04]">
+                    <div className="min-w-0">
+                      <div className="text-[13px] font-extrabold text-ink dark:text-[#f4f1ea]">
+                        {unc.length} receipt{unc.length === 1 ? "" : "s"} waiting
+                      </div>
+                      <div className="text-[11.5px] text-muted dark:text-[#a89f93]">
+                        {unc.reduce((t, g) => t + g.ids.length, 0).toLocaleString()} lines · tap to tick
+                      </div>
+                    </div>
+                    <div className="flex-none text-[15px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">{money(uncTotal)}</div>
+                  </div>
+                }
+                render={(g) => {
+                  const on = sel.has(g.key);
+                  const dim = busy === g.key || (busy === "bulk" && on);
+                  return (
+                    <button
+                      key={g.key} type="button" aria-pressed={on} disabled={!!busy}
+                      onClick={() => toggle(g.key)}
+                      className={`flex w-full items-start gap-3 rounded-card border p-3.5 text-left transition ${
+                        on ? "border-ink bg-panel/70 dark:border-white/30 dark:bg-white/[0.08]"
+                           : "border-line bg-surface dark:border-white/[0.06] dark:bg-[#201c17]"
+                      } ${dim ? "opacity-40" : ""}`}
+                    >
+                      <span className="mt-0.5 flex-none">
+                        {on ? <CheckCircle2 size={22} className="text-ink dark:text-white" /> : <Circle size={22} className="text-hint" />}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-[14.5px] font-bold text-ink dark:text-[#f4f1ea]">{branchName(g.branch_id)}</span>
+                        <span className="block truncate text-[12.5px] text-muted dark:text-[#a89f93]">
+                          {text(g.date)}{g.time ? ` ${g.time}` : ""} · {g.receipt ? `#${g.receipt}` : "no receipt number"}
+                        </span>
+                        <span className="mt-0.5 block text-[11.5px] text-hint dark:text-[#8a8175]">
+                          {g.ids.length} line{g.ids.length === 1 ? "" : "s"}
+                        </span>
+                      </span>
+                      <span className="flex-none text-right text-[15px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">{money(g.amt)}</span>
+                    </button>
+                  );
+                }}
+              />
+            </div>
+
+            {sel.size > 0 && (
+              <ActionBar>
+                {/* One child, laid out inside: the four labels do not fit across
+                    a 390px row, and "Credit (udhaar)" is never shortened — the
+                    whole reason it is spelled out is that it is not a card. */}
+                <div className="w-full">
+                  <div className="flex items-center justify-between gap-2 pb-2">
+                    <span className="text-[12px] font-semibold text-ink dark:text-[#e7e2d8]">
+                      {busy === "bulk"
+                        ? "Tagging… one receipt at a time"
+                        : `${sel.size} receipt${sel.size === 1 ? "" : "s"} · ${money(selTotal)} — set as`}
+                    </span>
+                    {/* A pill, not underlined text: 'Clear' after twenty ticks
+                        has to be hittable, and the shared CSS gives every
+                        rounded-full button in here a 40px minimum. */}
+                    <button type="button" onClick={() => setSel(new Set())} disabled={!!busy}
+                      className="flex-none rounded-full border border-line bg-surface px-3 py-1.5 text-[12px] font-semibold text-muted transition disabled:opacity-50 dark:border-white/10 dark:bg-white/[0.06] dark:text-[#a89f93]">
+                      Clear
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    {CLASSIFY_AS.map((c) => (
+                      <button key={c.pm} onClick={() => classifySelected(c.pm)} disabled={!!busy}
+                        className={`rounded-full px-3 py-2.5 text-[12.5px] font-semibold transition disabled:opacity-50 dark:bg-white/[0.08] dark:text-white ${c.cls}`}>
+                        {c.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </ActionBar>
+            )}
+          </>
+        ) : (
         <div className="mt-4 overflow-hidden rounded-card border border-line bg-surface dark:border-white/[0.06] dark:bg-[#201c17]">
           <div className="overflow-x-auto">
             <table className="w-full min-w-[860px] text-left text-[13px]">
@@ -491,6 +704,7 @@ export default function NonCashPage() {
             </table>
           </div>
         </div>
+        )}
 
         <SourceNote>
           <strong>&ldquo;Credit&rdquo; here means udhaar — goods taken on account, to be paid later. It is
@@ -509,7 +723,7 @@ export default function NonCashPage() {
           The split across methods for a range, and the same numbers broken out per shop below.
         </p>
 
-        <RangeBar preset={preset} setPreset={setPreset} cf={cf} setCf={setCf} ct={ct} setCt={setCt} />
+        <RetailRange preset={preset} setPreset={setPreset} cf={cf} setCf={setCf} ct={ct} setCt={setCt} />
 
         <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {METHODS.map(({ key, label, Icon }) => {

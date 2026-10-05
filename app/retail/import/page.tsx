@@ -26,7 +26,7 @@ import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { btnPrimary, btnGhost } from "@/components/Modal";
 import {
   Shell, PageHeader, DataTable, Pill, Select, PreviewNote, SourceNote,
-  money, type Col,
+  money, unitForBranch, useIsPhone, type Col,
 } from "@/components/retail/kit";
 import {
   parseCsvRows, detectKind, KIND_LABEL, normStore, withLineHashes,
@@ -36,7 +36,24 @@ import {
 
 type Branch = { id: number; name: string; chain: string | null; nimbus_name: string | null };
 
+/** WHAT ONE LANDED FILE DID, for the phone result log.
+ *
+ *  `tone` is how the run READS, not whether it errored, and `quiet` is how a
+ *  figure is printed. A file whose lines were all already in is the line_hash
+ *  guard doing exactly its job — the best possible outcome of a second drop —
+ *  so that count is printed in the same ink as the rows that landed and never
+ *  in red. Somebody who reads "skipped" as "failed" re-exports the file and
+ *  starts hunting for a problem that does not exist. */
+type ImportResult = {
+  file: string;
+  kind: NimbusKind;
+  tone: "good" | "warn";
+  figures: { l: string; v: string; quiet?: boolean }[];
+  note: string;
+};
+
 export default function ImportPage() {
+  const phone = useIsPhone();
   const fileRef = useRef<HTMLInputElement>(null);
   const [branches, setBranches] = useState<Branch[]>([]);
   const [fileName, setFileName] = useState("");
@@ -48,6 +65,29 @@ export default function ImportPage() {
   const [warn, setWarn] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState<string | null>(null);
+
+  /* THE RESULT LOG — one card per file that has actually landed.
+     A day's import is not one file, it is four or five dropped in sequence:
+     sales, then the account transactions, then the non-cash payments that tag
+     the sales just loaded, then the commission master. This screen kept a
+     single line of prose and threw it away the moment the next file was
+     chosen, so halfway through there was nothing on screen saying which files
+     were already in — and the only safe thing to do when you cannot remember
+     is drop them all again. The log is what makes that unnecessary, so it
+     deliberately survives Clear: only Clear log empties it. */
+  const [results, setResults] = useState<ImportResult[]>([]);
+
+  /* Chunk-by-chunk progress. A sales file goes up 400 lines at a time, and on
+     a phone on mobile data that is a minute during which the only feedback was
+     a button reading "Working…" — indistinguishable from a page that has died,
+     and the natural response to a dead page is to tap Import again, which
+     writes a second import batch. `total` of 0 means "counting, length not
+     known yet" and draws an indeterminate bar. */
+  const [prog, setProg] = useState<{ done: number; total: number; what: string } | null>(null);
+
+  function addResult(r: Omit<ImportResult, "file" | "kind">) {
+    setResults((prev) => [{ file: fileName, kind, ...r }, ...prev]);
+  }
 
   useEffect(() => {
     if (!isSupabaseConfigured || !supabase) return;
@@ -181,11 +221,21 @@ export default function ImportPage() {
      keys on too. */
   async function stampUploads(pairs: { branch_id: number | null; date: string | null }[], kind: string) {
     if (!supabase || !pairs.length) return;
+    /* The unit is unitForBranch(), not the branch id. Top Shop exports as one
+       combined all-stores file, so its six branches share the unit "topshop";
+       each Fashion Collection shop is "b<id>". This is the old app's key, kept
+       so the migrated three years of rows still line up with what is written
+       from today. Stamping the bare branch id orphans all of them and makes
+       the dashboard report one missing Top Shop file as six missing days. */
     const stamps = [...new Set(
-      pairs.filter((p) => p.branch_id && p.date).map((p) => `${p.branch_id}|${p.date}`)
+      pairs.filter((p) => p.date).map((p) => {
+        const b = branches.find((x) => x.id === Number(p.branch_id));
+        const u = unitForBranch(b as never);
+        return u ? `${u}|${p.date}` : "";
+      }).filter(Boolean)
     )].map((k) => {
-      const [unit, log_date] = k.split("|");
-      return { unit, log_date, kind };
+      const i = k.indexOf("|");
+      return { unit: k.slice(0, i), log_date: k.slice(i + 1), kind };
     });
     if (stamps.length) {
       await supabase.from("retail_upload_log")
@@ -210,6 +260,7 @@ export default function ImportPage() {
 
         const hashed = withLineHashes(ok);
         let inserted = 0;
+        setProg({ done: 0, total: hashed.length, what: "Uploading lines" });
         for (let i = 0; i < hashed.length; i += 400) {
           const chunk = hashed.slice(i, i + 400).map(({ _store, _ns, ...rest }: SaleRow & { line_hash: string }) => {
             void _store; void _ns;
@@ -219,14 +270,29 @@ export default function ImportPage() {
             .upsert(chunk, { onConflict: "line_hash", ignoreDuplicates: true }).select("id");
           if (error) throw error;
           inserted += (data as unknown[] | null)?.length ?? 0;
+          /* Lines SENT, not lines inserted — the bar is how far through the file
+             we are, and the duplicate guard means those two are different
+             numbers on any re-import. */
+          setProg({ done: Math.min(i + 400, hashed.length), total: hashed.length, what: "Uploading lines" });
         }
         const skipped = hashed.length - inserted;
         await supabase.from("retail_import_batches").update({ inserted_count: inserted, skipped_count: skipped }).eq("id", batchId);
 
+        setProg({ done: hashed.length, total: hashed.length, what: "Stamping the upload log" });
         await stampUploads(ok.map((p) => ({ branch_id: p.branch_id, date: p.sale_date })), "sales");
 
         setDone(`${inserted.toLocaleString()} new line${inserted === 1 ? "" : "s"} added.` +
           (skipped ? ` ${skipped.toLocaleString()} were already in — that is the duplicate guard working, not an error.` : ""));
+        addResult({
+          tone: "good",
+          figures: [
+            { l: "New lines added", v: inserted.toLocaleString() },
+            { l: "Already in — duplicate guard", v: skipped.toLocaleString(), quiet: true },
+          ],
+          note: skipped
+            ? "Those lines were already in, matched on line_hash. Dropping the same file twice changes nothing, which is what that number means."
+            : "Every line in the file was new.",
+        });
       }
 
       else if (expenses) {
@@ -243,9 +309,18 @@ export default function ImportPage() {
           p_adv_rows: [],
         });
         if (error) throw error;
+        setProg({ done: ok.length, total: ok.length, what: "Stamping the upload log" });
         await stampUploads(ok.map((p) => ({ branch_id: p.branch_id, date: p.expense_date })), "expenses");
         const res = data as { inserted?: number; expenses_replaced?: number } | null;
         setDone(`${(res?.inserted ?? 0).toLocaleString()} expense rows imported. ${(res?.expenses_replaced ?? 0).toLocaleString()} previously-imported rows in the same range were replaced, so an overlapping re-import cannot double anything.`);
+        addResult({
+          tone: "good",
+          figures: [
+            { l: "Rows imported", v: (res?.inserted ?? 0).toLocaleString() },
+            { l: "Replaced in this range", v: (res?.expenses_replaced ?? 0).toLocaleString(), quiet: true },
+          ],
+          note: "Importing replaces previously-imported Nimbus expenses inside the file's own date range, so an overlapping re-import cannot double anything.",
+        });
       }
 
       else if (payments) {
@@ -258,6 +333,7 @@ export default function ImportPage() {
         mapped.forEach((p) => key.set(`${p.bid}|${p.date}|${p.time}`, p.pm));
 
         const lines: { id: number; branch_id: number; sale_date: string; sale_time: string | null }[] = [];
+        setProg({ done: 0, total: 0, what: "Reading the sales already imported" });
         for (let from = 0; ; from += 1000) {
           const { data, error } = await supabase.from("retail_sale_lines")
             .select("id,branch_id,sale_date,sale_time").gte("sale_date", minD).lte("sale_date", maxD)
@@ -265,6 +341,9 @@ export default function ImportPage() {
           if (error) throw error;
           const got = (data as typeof lines) ?? [];
           lines.push(...got);
+          /* Total unknown while paging — there is no count query here and adding
+             one would be a second round trip for a progress bar. */
+          setProg({ done: lines.length, total: 0, what: "Reading the sales already imported" });
           if (got.length < 1000) break;
         }
 
@@ -273,6 +352,8 @@ export default function ImportPage() {
           const m = key.get(`${l.branch_id}|${l.sale_date}|${l.sale_time ?? ""}`);
           if (m) (byMode[m] = byMode[m] ?? []).push(l.id);
         });
+        const toTag = Object.values(byMode).reduce((t, a) => t + a.length, 0);
+        setProg({ done: 0, total: toTag, what: "Tagging sale lines" });
         let updated = 0;
         for (const mode of Object.keys(byMode)) {
           const ids = byMode[mode];
@@ -281,40 +362,79 @@ export default function ImportPage() {
               .update({ payment_method: mode }).in("id", ids.slice(i, i + 300));
             if (error) throw error;
             updated += Math.min(300, ids.length - i);
+            setProg({ done: updated, total: toTag, what: "Tagging sale lines" });
           }
         }
+        setProg({ done: toTag, total: toTag, what: "Stamping the upload log" });
         await stampUploads(mapped.map((p) => ({ branch_id: p.bid as number, date: p.date })), "noncash");
         setDone(updated === 0
           ? "No sale line matched. This file tags sales that are already imported, matched on shop + date + exact time — import that shop's sales first, then drop this again."
           : `${updated.toLocaleString()} sale lines tagged as card or JazzCash.`);
+        addResult({
+          /* Nothing matched is not an error and not a success — it is almost
+             always the files dropped in the wrong order, so it reads amber and
+             says which file to drop first. */
+          tone: updated === 0 ? "warn" : "good",
+          figures: [
+            { l: "Sale lines tagged", v: updated.toLocaleString() },
+            { l: "Payments in file", v: mapped.length.toLocaleString(), quiet: true },
+          ],
+          note: updated === 0
+            ? "Nothing matched. This file only tags sales that are already in, on shop + date + exact time — import that shop's sales first, then drop this again."
+            : "Matched on shop + date + exact time, which is the only way card and JazzCash can be told apart.",
+        });
       }
 
       else if (comm) {
         let n = 0;
+        setProg({ done: 0, total: comm.length, what: "Updating rates" });
         for (let i = 0; i < comm.length; i += 500) {
           const { error } = await supabase.from("retail_commission_master")
             .upsert(comm.slice(i, i + 500) as CommRow[], { onConflict: "item_code" });
           if (error) throw error;
           n += Math.min(500, comm.length - i);
+          setProg({ done: n, total: comm.length, what: "Updating rates" });
         }
         setDone(`${n.toLocaleString()} commission rates updated.`);
+        addResult({
+          tone: "good",
+          figures: [{ l: "Rates updated", v: n.toLocaleString() }],
+          note: "Matched on item code, so re-uploading the master corrects rates rather than adding them again.",
+        });
       }
     } catch (e) {
       setFatal((e as { message?: string })?.message ?? String(e));
     }
+    setProg(null);
     setBusy(false);
+    /* On a phone the result log and the error banner both sit up by the drop
+       zone, while the Import button is halfway down the page. Without this the
+       run ends with the progress bar simply vanishing from under the thumb and
+       nothing on screen saying whether it worked — so go back to the top, where
+       the answer is, with the box for the next file beside it. */
+    if (phone) window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
+  /* Clear takes the FILE away, not the log. Somebody clearing to drop the next
+     file still needs to see which ones have already landed. */
   function reset() {
     setRows([]); setFileName(""); setFatal(""); setWarn([]); setDone(null); setNeedBranch(false); setPickBranch("");
+    setProg(null);
     if (fileRef.current) fileRef.current.value = "";
   }
 
+  /* THE PHONE CARD FOR A SALES PREVIEW answers one question: did this line find
+     its shop? So the shop is the title — it is the cell carrying the red
+     "unmatched" pill — the item is the grey line under it, and the amount is the
+     figure on the right. The receipt number is hidden on a phone: it is a raw
+     POS reference nobody checks before pressing Import, and on a 390px card it
+     costs a whole labelled pair that Date, Qty and MOP can use. It is still
+     there on the computer, where the column is free. */
   const saleCols: Col<SaleRow>[] = [
     { head: "Date", muted: true, cell: (p) => p.sale_date },
-    { head: "Shop", bold: true, cell: (p) => p.branch_id ? (branches.find((b) => b.id === p.branch_id)?.name ?? p._store) : <Pill tone="bad">{p._store || "unmatched"}</Pill> },
-    { head: "Receipt", muted: true, cell: (p) => p.receipt_txn || "—" },
-    { head: "Item", cell: (p) => p.item_name || p.item_code || "—" },
+    { head: "Shop", bold: true, phone: "title", cell: (p) => p.branch_id ? (branches.find((b) => b.id === p.branch_id)?.name ?? p._store) : <Pill tone="bad">{p._store || "unmatched"}</Pill> },
+    { head: "Receipt", muted: true, phone: "hide", cell: (p) => p.receipt_txn || "—" },
+    { head: "Item", phone: "meta", cell: (p) => p.item_name || p.item_code || "—" },
     { head: "Qty", right: true, cell: (p) => p.quantity },
     { head: "Amount", right: true, bold: true, cell: (p) => money(p.sales_amount) },
     { head: "MOP", cell: (p) =>
@@ -323,22 +443,32 @@ export default function ImportPage() {
         : p.payment_method === "online" ? <Pill tone="info">Online</Pill>
         : <Pill tone="warn">{p.mop_raw || "unclassified"}</Pill> },
   ];
+  /* Same reasoning: the shop is what you are checking matched, the category is
+     what the money was, and the amount is the figure. */
   const expCols: Col<ExpenseRow>[] = [
     { head: "Date", muted: true, cell: (p) => p.expense_date },
-    { head: "Shop", bold: true, cell: (p) => p.branch_id ? (branches.find((b) => b.id === p.branch_id)?.name ?? p._store) : <Pill tone="bad">{p._store}</Pill> },
+    { head: "Shop", bold: true, phone: "title", cell: (p) => p.branch_id ? (branches.find((b) => b.id === p.branch_id)?.name ?? p._store) : <Pill tone="bad">{p._store}</Pill> },
     { head: "Type", cell: (p) => p.txn_type === "income" ? <Pill tone="good">Income</Pill> : <Pill tone="warn">Expense</Pill> },
-    { head: "Category", cell: (p) => p.category },
+    { head: "Category", phone: "meta", cell: (p) => p.category },
     { head: "Description", muted: true, cell: (p) => p.description ?? "—" },
     { head: "Paid via", muted: true, cell: (p) => p.paid_via },
     { head: "Amount", right: true, bold: true, cell: (p) => money(p.amount) },
   ];
+  /* This table has no right-aligned column, so the automatic card would have
+     found no figure for the right-hand slot and buried the store in a pair.
+     "Becomes" is the answer the file exists to give — card or JazzCash — so it
+     is the lead; Time stays a pair because the match is on the exact second and
+     a wrong time is the usual reason nothing tags. */
   const payCols: Col<PaymentRow>[] = [
-    { head: "Date", muted: true, cell: (p) => p.date },
+    { head: "Date", muted: true, phone: "meta", cell: (p) => p.date },
     { head: "Time", muted: true, cell: (p) => p.time },
-    { head: "Store", bold: true, cell: (p) => p.store },
+    { head: "Store", bold: true, phone: "title", cell: (p) => p.store },
     { head: "Mode in file", cell: (p) => p.modeRaw || "—" },
-    { head: "Becomes", cell: (p) => p.pm === "jazzcash" ? <Pill tone="warn">JazzCash</Pill> : <Pill tone="info">Card</Pill> },
+    { head: "Becomes", phone: "lead", cell: (p) => p.pm === "jazzcash" ? <Pill tone="warn">JazzCash</Pill> : <Pill tone="info">Card</Pill> },
   ];
+  /* No hints: the automatic card is already right here — item code identifies
+     the row, the name is the grey line, and the percentage is the figure
+     somebody opened the commission master to check. */
   const commCols: Col<CommRow>[] = [
     { head: "Item code", bold: true, cell: (c) => c.item_code },
     { head: "Item name", muted: true, cell: (c) => c.item_name ?? "—" },
@@ -353,26 +483,46 @@ export default function ImportPage() {
 
   const fcBranches = branches.filter((b) => (b.chain ?? "") !== "Topshop");
 
+  /* ON A PHONE THERE IS NO DRAG, so the dashed box becomes the button itself.
+     A drop target that is only a label is a dead end on the device the shop
+     actually has in its hand. Above 767.98px this is the same <div> it always
+     was, so the computer site is untouched. */
+  const Zone = phone ? "button" : "div";
+
   return (
     <Shell>
       <PageHeader title="Import" subtitle="Drop any NimbusRMS export — the file says what it is.">
         {rows.length > 0 && <button onClick={reset} className={btnGhost}><X size={15} /> Clear</button>}
       </PageHeader>
 
-      <div className="mt-5 rounded-card border border-dashed border-line bg-surface p-6 text-center dark:border-white/[0.12] dark:bg-[#201c17]">
+      {/* The picker sits OUTSIDE the zone. Inside it, a programmatic .click()
+          would bubble back up to the zone's own handler and re-open the picker
+          for ever — it is hidden either way, so where it lives changes nothing
+          on screen. */}
+      <input ref={fileRef} type="file" accept=".csv,text/csv" className="hidden"
+        onChange={(e) => { const f = e.target.files?.[0]; if (f) onFile(f); }} />
+
+      <Zone
+        {...(phone ? { type: "button" as const, onClick: () => fileRef.current?.click() } : {})}
+        className="mt-5 w-full rounded-card border border-dashed border-line bg-surface p-6 text-center dark:border-white/[0.12] dark:bg-[#201c17]">
         <span className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-panel text-ink dark:bg-white/[0.08] dark:text-white"><Upload size={22} /></span>
-        <p className="mt-3 text-[14px] font-semibold text-ink dark:text-[#f4f1ea]">Drop a Nimbus CSV here</p>
+        <p className="mt-3 text-[14px] font-semibold text-ink dark:text-[#f4f1ea]">
+          {phone ? "Tap to choose a Nimbus CSV" : "Drop a Nimbus CSV here"}
+        </p>
         <p className="mt-1 text-[12.5px] text-muted dark:text-[#a89f93]">Sales, account transactions, non-cash payments or the commission master.</p>
-        <input ref={fileRef} type="file" accept=".csv,text/csv" className="hidden"
-          onChange={(e) => { const f = e.target.files?.[0]; if (f) onFile(f); }} />
-        <button onClick={() => fileRef.current?.click()} className={`${btnPrimary} mx-auto mt-4`}>Choose file</button>
+        {phone
+          /* A <button> inside a <button> is not valid HTML — the parser lifts it
+             out of the card and the layout comes apart. The whole card is the
+             control here, so this only has to look like the thing you tap. */
+          ? <span className={`${btnPrimary} mx-auto mt-4`}>Choose file</span>
+          : <button onClick={() => fileRef.current?.click()} className={`${btnPrimary} mx-auto mt-4`}>Choose file</button>}
         {fileName && (
           <p className="mt-3 flex flex-wrap items-center justify-center gap-2 text-[12.5px] font-semibold text-muted dark:text-[#a89f93]">
             <FileCheck2 size={14} /> {fileName}
             {kind !== "unknown" && <Pill tone="info">{KIND_LABEL[kind]}</Pill>}
           </p>
         )}
-      </div>
+      </Zone>
 
       {fatal && (
         <div className="mt-4 flex gap-3 rounded-card border border-danger/30 bg-danger-soft p-4 dark:border-danger/30 dark:bg-danger/10">
@@ -389,7 +539,7 @@ export default function ImportPage() {
             Fashion Collection shop exports. Which branch is it? (Top Shop comes as the combined
             all-stores export.)
           </p>
-          <Select value={pickBranch} onChange={setPickBranch}>
+          <Select value={pickBranch} onChange={setPickBranch} className="max-md:w-full">
             <option value="">Pick a branch…</option>
             {fcBranches.map((b) => <option key={b.id} value={String(b.id)}>{b.name}</option>)}
           </Select>
@@ -403,10 +553,57 @@ export default function ImportPage() {
         </div>
       ))}
 
-      {done && (
+      {/* The computer keeps the one banner it had, word for word. The phone gets
+          the log below instead, whose newest card says the same thing. */}
+      {done && !phone && (
         <div className="mt-4 flex gap-3 rounded-card border border-success/30 bg-success-soft p-4 dark:border-success/30 dark:bg-success/10">
           <CheckCircle2 size={18} className="mt-0.5 flex-none text-success" />
           <p className="text-[13px] font-medium leading-relaxed text-ink dark:text-[#e7e2d8]">{done}</p>
+        </div>
+      )}
+
+      {/* THE RESULT LOG, PHONE ONLY. One card per file that landed, newest
+          first: what the file was taken to be, how many rows went in, and how
+          many were already there. Cards rather than a table because the numbers
+          are two or three per file and a table of three columns on a 390px
+          screen is a table you scroll sideways for nothing. */}
+      {phone && results.length > 0 && (
+        <div className="mt-5 space-y-2">
+          <div className="flex items-center justify-between gap-3">
+            <h3 className="text-[13px] font-bold text-ink dark:text-[#f4f1ea]">Landed in this sitting</h3>
+            <button onClick={() => setResults([])}
+              className="rounded-full border border-line bg-surface px-3 py-1.5 text-[12px] font-semibold text-muted dark:border-white/10 dark:bg-white/[0.06] dark:text-[#a89f93]">
+              Clear log
+            </button>
+          </div>
+          {results.map((r, i) => (
+            <div key={i} className={`rounded-card border p-3.5 ${r.tone === "warn"
+              ? "border-amber-strong/40 bg-amber-soft dark:border-white/[0.08] dark:bg-amber/10"
+              : "border-success/30 bg-success-soft dark:border-success/30 dark:bg-success/10"}`}>
+              <div className="flex items-start gap-2.5">
+                {r.tone === "warn"
+                  ? <AlertTriangle size={16} className="mt-0.5 flex-none text-amber-strong dark:text-amber" />
+                  : <CheckCircle2 size={16} className="mt-0.5 flex-none text-success" />}
+                <div className="min-w-0 flex-1">
+                  <div className="break-all text-[13.5px] font-bold text-ink dark:text-[#f4f1ea]">{r.file}</div>
+                  <div className="mt-0.5 text-[12px] text-muted dark:text-[#a89f93]">{KIND_LABEL[r.kind]}</div>
+                </div>
+              </div>
+              <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 border-t border-line pt-3 dark:border-white/[0.08]">
+                {r.figures.map((f, j) => (
+                  <div key={j} className="min-w-0">
+                    {/* `quiet` is grey, never red. A duplicate skip is the
+                        line_hash guard working — the best outcome a second drop
+                        of the same file can have — and a red number there sends
+                        somebody hunting for a problem that does not exist. */}
+                    <dd className={`text-[18px] font-extrabold tabular-nums ${f.quiet ? "text-muted dark:text-[#a89f93]" : "text-ink dark:text-[#f4f1ea]"}`}>{f.v}</dd>
+                    <dt className="text-[11px] uppercase leading-tight tracking-wide text-hint dark:text-[#8a8175]">{f.l}</dt>
+                  </div>
+                ))}
+              </dl>
+              <p className="mt-2.5 text-[12px] leading-relaxed text-muted dark:text-[#a89f93]">{r.note}</p>
+            </div>
+          ))}
         </div>
       )}
 
@@ -421,8 +618,12 @@ export default function ImportPage() {
 
       {summary && !fatal && (
         <>
+          {/* The commission master only has two figures worth printing, so the
+              other two are invisible spacers that keep the computer's 4-across
+              row square. On a phone an invisible card is just 70px of blank
+              scroll, so there it is dropped rather than hidden. */}
           <div className="mt-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
-            {summary.map(({ l, v }, i) => (
+            {(phone ? summary.filter((s) => s.l !== "—") : summary).map(({ l, v }, i) => (
               <div key={i} className={`rounded-card border border-line bg-surface p-4 dark:border-white/[0.06] dark:bg-[#201c17] ${l === "—" ? "opacity-0" : ""}`}>
                 <div className="text-[19px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">{v}</div>
                 <div className="text-[12px] font-medium text-muted dark:text-[#a89f93]">{l}</div>
@@ -430,15 +631,38 @@ export default function ImportPage() {
             ))}
           </div>
 
-          <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+          {/* Reversed on a phone so Import is the first thing under the warnings
+              rather than sitting below a caption about the preview, and full
+              width because it is the one button on the screen that writes. */}
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-3 max-md:flex-col-reverse max-md:items-stretch">
             <p className="text-[12.5px] text-muted dark:text-[#a89f93]">Showing the first 50 rows for checking.</p>
-            <button onClick={run} disabled={busy || readyCount === 0} className={btnPrimary}>
+            <button onClick={run} disabled={busy || readyCount === 0} className={`${btnPrimary} max-md:w-full`}>
               {busy ? "Working…"
                 : kind === "payments" ? `Classify ${readyCount.toLocaleString()} payments`
                 : kind === "comm_master" ? `Update ${readyCount.toLocaleString()} rates`
                 : `Import ${readyCount.toLocaleString()} rows`}
             </button>
           </div>
+
+          {/* PROGRESS, PHONE ONLY — `phone &&`, not a media query, so nothing new
+              can render at 1024px. See the note on `prog`: the old feedback was
+              a button reading "Working…", which on mobile data is the same thing
+              as a page that has died. */}
+          {phone && busy && prog && (
+            <div className="mt-3 rounded-card border border-line bg-surface p-3.5 dark:border-white/[0.06] dark:bg-[#201c17]">
+              <div className="flex items-center justify-between gap-3 text-[12.5px] font-semibold text-ink dark:text-[#e7e2d8]">
+                <span>{prog.what}…</span>
+                <span className="tabular-nums text-muted dark:text-[#a89f93]">
+                  {prog.total ? `${prog.done.toLocaleString()} / ${prog.total.toLocaleString()}` : prog.done.toLocaleString()}
+                </span>
+              </div>
+              <span className="mt-2 block h-1.5 w-full overflow-hidden rounded-full bg-panel dark:bg-white/[0.08]">
+                <span className={`block h-full rounded-full bg-ink dark:bg-white ${prog.total ? "transition-[width]" : "animate-pulse"}`}
+                  style={{ width: prog.total ? `${Math.min(100, Math.round((prog.done / prog.total) * 100))}%` : "35%" }} />
+              </span>
+              <p className="mt-2 text-[11.5px] text-hint dark:text-[#8a8175]">Keep this screen open until it finishes.</p>
+            </div>
+          )}
 
           {sales && <DataTable cols={saleCols} rows={sales.parsed.slice(0, 50)} minWidth={900} empty="Nothing to show." />}
           {expenses && <DataTable cols={expCols} rows={expenses.parsed.slice(0, 50)} minWidth={900} empty="Nothing to show." />}

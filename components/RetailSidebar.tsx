@@ -1,82 +1,40 @@
 "use client";
+/* THE FS TRADERS MENU — computer and tablet only.
+ *
+ * The menu itself is unchanged: same items, same order, same names as the old
+ * app. Somebody who has been running these nine shops for two years knows where
+ * "Non-cash" is and what it holds; renaming it to something tidier would be an
+ * improvement to nobody. The list now lives in components/retail/retailNav.ts so
+ * the phone bars and this panel cannot drift apart — that is how a screen ends
+ * up reachable on a computer and invisible on a phone.
+ *
+ * WHERE IT SHOWS
+ *   ≥ 1024px   permanent 248px panel, exactly as before.
+ *   768–1023   a drawer: hidden until the arrow tab is pressed. 248 out of 768
+ *              leaves 520px for the work, which is not enough for the Cash Book.
+ *   < 768px    not rendered at all — the phone has its own bars.
+ */
 import { useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import {
-  LayoutDashboard, Receipt, Store, BookText, Percent, Wallet, ArrowLeft, LogOut,
-  Building2, Upload, CreditCard, Landmark, Users, CalendarCheck, CalendarRange, Coins,
-  NotebookPen, Banknote, ArrowLeftRight, ChevronDown, Briefcase, type LucideIcon,
-} from "lucide-react";
+import { Store, ArrowLeft, LogOut, ChevronDown } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { usePermissions } from "@/lib/usePermissions";
 import { ROUTE_PERMS } from "@/lib/access";
 import ThemeToggle from "@/components/ThemeToggle";
-
-type Child = { label: string; href: string; Icon: LucideIcon };
-type NavItem = { label: string; href: string; Icon: LucideIcon; children?: Child[] };
-
-/* THE MENU IS THE OLD APP'S MENU.
-   Same items, same order, same names. Somebody who has been running these nine
-   shops for two years knows where "Non-cash" is and what it holds; renaming it
-   to something tidier would be an improvement to nobody.
-
-   Two things did change, both because this sidebar is 248px wide and the old
-   one was a full-screen drawer:
-
-   1. Head Office had Employee as a THIRD level (Head Office › Employee ›
-      Attendance). Three levels in a panel this narrow leaves about 90px for a
-      label. Head Office's staff screens are listed directly under Head Office
-      instead, which is one tap shorter and reads the same.
-
-   2. Import was reachable only from inside the Sales screen. It is the screen
-      the day actually starts on, so it gets a line of its own. */
-const NAV: NavItem[] = [
-  { label: "Dashboard", href: "/retail/dashboard", Icon: LayoutDashboard },
-  { label: "Sales", href: "/retail/sales", Icon: Receipt },
-  { label: "Import", href: "/retail/import", Icon: Upload },
-  { label: "Expenses", href: "/retail/expenses", Icon: NotebookPen },
-  { label: "Non-cash", href: "/retail/payments", Icon: ArrowLeftRight },
-  { label: "Cash Book", href: "/retail/cashbook", Icon: BookText },
-  { label: "Commissions", href: "/retail/commissions", Icon: Percent },
-
-  /* Shop staff. One group, because marking attendance, checking the month and
-     recording an advance against the same person is one job done by one
-     person on one afternoon. */
-  { label: "Employee", href: "/retail/employees", Icon: Users, children: [
-      { label: "Attendance",      href: "/retail/employees/attendance", Icon: CalendarCheck },
-      { label: "Monthly Summary", href: "/retail/employees/summary",    Icon: CalendarRange },
-      { label: "Ledger",          href: "/retail/employees/ledger",     Icon: NotebookPen },
-      { label: "Repayments",      href: "/retail/employees/repayments", Icon: Coins },
-      { label: "Employees",       href: "/retail/employees",            Icon: Users },
-  ] },
-
-  /* Head Office is its own business inside the business: its own cash flow,
-     its own end of day, its own staff. Kept separate for the same reason the
-     old app kept it separate — the shop team never opens any of it. */
-  { label: "Head Office", href: "/retail/ho", Icon: Briefcase, children: [
-      { label: "Daily cash flow", href: "/retail/ho/cashflow",   Icon: ArrowLeftRight },
-      { label: "End of day",      href: "/retail/ho/eod",        Icon: Banknote },
-      { label: "Attendance",      href: "/retail/ho/attendance", Icon: CalendarCheck },
-      { label: "Monthly Summary", href: "/retail/ho/summary",    Icon: CalendarRange },
-      { label: "Employees",       href: "/retail/ho/employees",  Icon: Users },
-      { label: "Ledger",          href: "/retail/ho/ledger",     Icon: NotebookPen },
-      { label: "Repayments",      href: "/retail/ho/repayments", Icon: Coins },
-  ] },
-
-  { label: "Card Reconciliation", href: "/retail/cards", Icon: CreditCard },
-  { label: "Bank Statements", href: "/retail/bank", Icon: Landmark },
-  { label: "Salary", href: "/retail/salaries", Icon: Wallet },
-  { label: "Branches", href: "/retail/branches", Icon: Building2 },
-];
+import { useIsHandheldWide } from "@/components/retail/kit";
+import { RetailHideMenu } from "@/components/retail/RetailPhoneChrome";
+import { visibleNav, isActive, type NavItem } from "@/components/retail/retailNav";
 
 export default function RetailSidebar({ open, onClose }: { open?: boolean; onClose?: () => void }) {
   const pathname = usePathname();
   const router = useRouter();
   const { ready, can } = usePermissions();
+  const handheldWide = useIsHandheldWide();
 
   /* Opened by hand wins; otherwise a group opens because you are standing in
-     it. Same rule as the Hub sidebar — the arrow is a button that owns the
-     state, so pressing it toggles rather than navigating. */
+     it. The arrow is a button that owns this state, so pressing it toggles
+     rather than navigating. */
   const [manual, setManual] = useState<Record<string, boolean>>({});
 
   /* THE MENU SHOWS ONLY WHAT THE PERSON CAN OPEN.
@@ -87,21 +45,28 @@ export default function RetailSidebar({ open, onClose }: { open?: boolean; onClo
 
      A group vanishes when none of its children survive: "Head Office" pointing
      at nothing is a heading that lies. */
-  const visible = NAV.map((n) => {
-    if (n.children) {
-      const kids = n.children.filter((c) => can(ROUTE_PERMS[c.href] ?? null));
-      return kids.length ? { ...n, children: kids } : null;
-    }
-    return can(ROUTE_PERMS[n.href] ?? null) ? n : null;
-  }).filter((n): n is NavItem => n !== null);
+  const visible: NavItem[] = visibleNav(can, ROUTE_PERMS);
 
   async function logout() { if (supabase) await supabase.auth.signOut(); router.replace("/login"); }
-  const active = (href: string) => pathname === href || pathname.startsWith(href + "/");
+
+  /* A drawer that is off-screen must not be reachable by Tab, or the first
+     press of Tab on a tablet lands in a menu nobody can see. Only applied in
+     the 768–1023 band — below that the panel is `hidden` (which already does
+     this) and above it the panel is always on screen. */
+  const hiddenDrawer = handheldWide && !open;
 
   return (
     <>
-      {open && <div className="fixed inset-0 z-40 bg-black/40 md:hidden" onClick={onClose} />}
-      <aside className={`flex w-[248px] shrink-0 flex-col border-r border-line bg-surface dark:border-white/[0.06] dark:bg-[#201c17] fixed inset-y-0 left-0 z-50 transition-transform md:static md:z-auto md:translate-x-0 ${open ? "translate-x-0" : "-translate-x-full"}`}>
+      {/* Backdrop, in the tablet band only and only while open. The phone never
+          renders the drawer, so it never needs this; the computer never hides
+          the menu, so it never needs it either. */}
+      {open && <div className="fixed inset-0 z-40 hidden bg-black/40 md:block lg:hidden" onClick={onClose} />}
+
+      <aside
+        {...(hiddenDrawer ? { inert: true as unknown as boolean } : {})}
+        className={`hidden w-[248px] shrink-0 flex-col border-r border-line bg-surface md:flex md:fixed md:inset-y-0 md:left-0 md:z-50 md:transition-transform lg:static lg:z-auto lg:translate-x-0 dark:border-white/[0.06] dark:bg-[#201c17] ${
+          open ? "md:translate-x-0" : "md:-translate-x-full"}`}
+      >
         <Link href="/" onClick={onClose} className="flex items-center gap-2 px-5 pt-5 text-[12.5px] font-semibold text-muted transition hover:text-ink dark:text-[#a89f93] dark:hover:text-white">
           <ArrowLeft size={15} /> All departments
         </Link>
@@ -113,41 +78,61 @@ export default function RetailSidebar({ open, onClose }: { open?: boolean; onClo
           </div>
         </div>
 
+        {onClose && <RetailHideMenu onClose={onClose} />}
+
         <nav className="flex-1 space-y-1 overflow-y-auto px-3 pb-2" onClick={(e) => { if ((e.target as HTMLElement).closest("a")) onClose?.(); }}>
           {ready && visible.map(({ label, href, Icon, children }) => {
-            const on = active(href);
+            const on = isActive(pathname, href);
             const openGroup = !!children && (manual[href] ?? on);
             /* A group's parent link points at its first surviving child rather
                than at a bare /retail/ho, so pressing the heading lands
                somewhere real instead of on a redirect. */
             const target = children ? children[0].href : href;
-            return (
-              <div key={href}>
-                <Link href={target} className={`flex items-center gap-3 rounded-xl2 px-3.5 py-2.5 text-[14px] transition ${on ? "bg-salmon-soft font-semibold text-ink dark:bg-white/[0.10] dark:text-white" : "text-muted hover:bg-panel hover:text-ink dark:text-[#a89f93] dark:hover:bg-white/[0.06] dark:hover:text-white"}`}>
-                  <Icon size={18} strokeWidth={2} />
-                  <span className="flex-1 truncate">{label}</span>
-                  {children && (
+            const activeCls = "bg-salmon-soft font-semibold text-ink dark:bg-white/[0.10] dark:text-white";
+            const idleCls = "text-muted hover:bg-panel hover:text-ink dark:text-[#a89f93] dark:hover:bg-white/[0.06] dark:hover:text-white";
+
+            /* A GROUP ROW IS A ROW, NOT A LINK WITH A BUTTON INSIDE IT.
+               The chevron used to be nested in the <a>, so every press had to
+               be cancelled with preventDefault + stopPropagation and a thumb
+               that landed 3px off navigated instead of expanding. It is now a
+               sibling: the link is the link, the arrow is the arrow. `py-[11px]`
+               keeps the row at the 43px it has always been. */
+            if (children) {
+              return (
+                <div key={href}>
+                  <div className={`flex items-center gap-1 rounded-xl2 pr-1.5 transition ${on ? activeCls : idleCls}`}>
+                    <Link href={target} className="flex min-w-0 flex-1 items-center gap-3 rounded-xl2 py-[11px] pl-3.5 text-[14px]">
+                      <Icon size={18} strokeWidth={2} />
+                      <span className="flex-1 truncate">{label}</span>
+                    </Link>
                     <button type="button" aria-label={openGroup ? `Collapse ${label}` : `Expand ${label}`}
-                      onClick={(e) => { e.preventDefault(); e.stopPropagation(); setManual((m) => ({ ...m, [href]: !openGroup })); }}
-                      className="-mr-1 rounded-full p-1 hover:bg-black/5 dark:hover:bg-white/10">
+                      onClick={() => setManual((m) => ({ ...m, [href]: !openGroup }))}
+                      className="flex-none rounded-full p-1.5 hover:bg-black/5 dark:hover:bg-white/10">
                       <ChevronDown size={15} className={`transition ${openGroup ? "rotate-180" : ""}`} />
                     </button>
-                  )}
-                </Link>
-                {openGroup && (
-                  <div className="ml-4 mt-1 space-y-0.5 border-l border-line pl-3 dark:border-white/[0.08]">
-                    {children!.map((c) => {
-                      const cOn = pathname === c.href;
-                      return (
-                        <Link key={c.href} href={c.href} className={`flex items-center gap-2.5 rounded-xl2 px-3 py-2 text-[13px] transition ${cOn ? "font-semibold text-ink dark:text-white" : "text-muted hover:text-ink dark:text-[#a89f93] dark:hover:text-white"}`}>
-                          <c.Icon size={15} strokeWidth={2} />
-                          <span className="truncate">{c.label}</span>
-                        </Link>
-                      );
-                    })}
                   </div>
-                )}
-              </div>
+                  {openGroup && (
+                    <div className="ml-4 mt-1 space-y-0.5 border-l border-line pl-3 dark:border-white/[0.08]">
+                      {children.map((c) => {
+                        const cOn = pathname === c.href;
+                        return (
+                          <Link key={c.href} href={c.href} className={`flex items-center gap-2.5 rounded-xl2 px-3 py-2 text-[13px] transition ${cOn ? "font-semibold text-ink dark:text-white" : "text-muted hover:text-ink dark:text-[#a89f93] dark:hover:text-white"}`}>
+                            <c.Icon size={15} strokeWidth={2} />
+                            <span className="truncate">{c.label}</span>
+                          </Link>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            }
+
+            return (
+              <Link key={href} href={href} className={`flex items-center gap-3 rounded-xl2 px-3.5 py-2.5 text-[14px] transition ${on ? activeCls : idleCls}`}>
+                <Icon size={18} strokeWidth={2} />
+                <span className="flex-1 truncate">{label}</span>
+              </Link>
             );
           })}
         </nav>
@@ -157,6 +142,9 @@ export default function RetailSidebar({ open, onClose }: { open?: boolean; onClo
           <button onClick={logout} className="flex w-full items-center gap-2 rounded-xl2 px-3.5 py-2.5 text-[13.5px] font-semibold text-muted transition hover:bg-panel hover:text-ink dark:text-[#a89f93] dark:hover:bg-white/[0.06] dark:hover:text-white"><LogOut size={16} /> Sign out</button>
         </div>
       </aside>
+      {/* The panel is `position: fixed` in the tablet band, so it is out of the
+          flow there and the page runs full width — correct. At lg it is `static`
+          again and takes its 248px back, which is the original computer layout. */}
     </>
   );
 }
