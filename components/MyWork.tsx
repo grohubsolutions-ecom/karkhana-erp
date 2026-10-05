@@ -182,6 +182,9 @@ export default function MyWork() {
   const [customOpen, setCustomOpen] = useState(false);
   const [form, setForm] = useState<CustomForm>(EMPTY_FORM);
   const [sentMsg, setSentMsg] = useState("");
+  /* H292: each article card can be minimized to just its header, so a long
+     list is easy to scroll. Kept per card in memory. */
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
 
   /* Only the newest reply is drawn: an older load that lands late must not
      paint yesterday's buttons over the fresh ones. */
@@ -347,6 +350,7 @@ export default function MyWork() {
   }
 
   function jump(taskId: string) {
+    setCollapsed((m) => (m[taskId] ? { ...m, [taskId]: false } : m));   // H292: open it if minimized
     const el = document.getElementById(`task-${taskId}`);
     if (!el) return;
     el.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -455,6 +459,7 @@ export default function MyWork() {
         const socialWho = firstName(cp?.steps.find((s) => s.stage === "social")?.person ?? "Awais");
         const notTicked = p ? PLATFORMS.filter((pl) => !p.posts[pl.key]).map((pl) => pl.name) : [];
         const last = idx === open.length - 1;
+        const isMin = !!collapsed[t.task_id];   // H292: card minimized to its header
         return (<div key={t.task_id} className="space-y-3">
         {bannerAbove === t.task_id && banner}
         <div id={`task-${t.task_id}`} data-code={t.code ?? undefined} tabIndex={-1}
@@ -473,18 +478,29 @@ export default function MyWork() {
               </div>
               <div className="mt-0.5 text-[12px] font-semibold text-muted dark:text-[#a89f93]">{tc(t.title)}</div>
             </div>
-            {/* While he is waiting, no clock is shown — the days belong to the
-                man making the product, not to him. An ads card that cannot go
-                Live yet is waiting on other people, so it says who. */}
-            <span className={`shrink-0 rounded-full px-2.5 py-1 text-[11.5px] font-semibold ${t.waiting_for || (isAds && !ready)
-                ? "bg-amber-soft text-amber-strong dark:bg-white/[0.08] dark:text-amber"
-                : "bg-panel text-muted dark:bg-white/[0.06] dark:text-[#a89f93]"}`}>
-              {t.waiting_for ? `waiting for ${t.waiting_for}`
-                : isAds && !ready ? `waiting for ${waitingFor.map((w) => w.split(" (")[0].split(" ")[0]).join(", ")}`
-                : `with you ${t.held}`}
-            </span>
+            {/* The status chip, and the minimize arrow (H292). While he is
+                waiting, no clock is shown — the days belong to the man making
+                the product. An ads card that cannot go Live yet is waiting on
+                other people, so it says who. */}
+            <div className="flex shrink-0 items-center gap-1.5">
+              <span className={`rounded-full px-2.5 py-1 text-[11.5px] font-semibold ${t.waiting_for || (isAds && !ready)
+                  ? "bg-amber-soft text-amber-strong dark:bg-white/[0.08] dark:text-amber"
+                  : "bg-panel text-muted dark:bg-white/[0.06] dark:text-[#a89f93]"}`}>
+                {t.waiting_for ? `waiting for ${t.waiting_for}`
+                  : isAds && !ready ? `waiting for ${waitingFor.map((w) => w.split(" (")[0].split(" ")[0]).join(", ")}`
+                  : `with you ${t.held}`}
+              </span>
+              <button type="button" aria-expanded={!isMin}
+                aria-label={isMin ? `Open ${t.code ?? "task"}` : `Minimize ${t.code ?? "task"}`}
+                onClick={() => setCollapsed((m) => ({ ...m, [t.task_id]: !isMin }))}
+                className="flex h-8 w-8 items-center justify-center rounded-full text-muted transition hover:bg-panel hover:text-ink dark:text-[#a89f93] dark:hover:bg-white/[0.06] dark:hover:text-white">
+                <ChevronDown size={18} className={`transition-transform ${isMin ? "-rotate-90" : ""}`} />
+              </button>
+            </div>
           </div>
 
+          {/* H292: everything below the header hides when the card is minimized. */}
+          {!isMin && (<>
           {/* The reason is the instruction, so it is loud.
               "Back with you" rather than "Sent back", because this box now
               carries two different things: Rehman rejecting the work, and the
@@ -703,6 +719,7 @@ export default function MyWork() {
               which steps are finished, what happens after you, and the next
               card in your list. */}
           <ProgressPanel p={p} t={t} fixFor={fixFor} next={open[idx + 1] ?? null} onJump={jump} />
+          </>)}
         </div>
         </div>);
       })}
