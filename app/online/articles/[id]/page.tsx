@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import {
-  ArrowLeft, Pencil, Trash2, Clock3, CornerUpLeft, Loader2, Plus, Wallet, CheckCircle2, Undo2, Rocket,
+  ArrowLeft, Pencil, Trash2, Clock3, CornerUpLeft, Loader2, Plus, Wallet, CheckCircle2, Undo2, Rocket, CheckSquare,
 } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { rs, todayPk, doneOnIso } from "@/lib/dateRange";
@@ -45,6 +45,12 @@ type Ads = {
   status: string; decision_note: string | null;
 };
 type Ev = { kind: string; detail: string | null; at: string; actor: string | null };
+/* H288: Awais's ticks — Instagram, Facebook, TikTok — each with who ticked it
+   and when. Shown on the Social row; ticked from his own portal. */
+type Posts = Partial<Record<"instagram" | "facebook" | "tiktok", { at: string | null; by: string | null }>>;
+const PLATFORMS = [["instagram", "Instagram"], ["facebook", "Facebook"], ["tiktok", "TikTok"]] as const;
+/* History words for the H288 events ("unposted" reads as a typo). */
+const EV_WORD: Record<string, string> = { unposted: "unticked" };
 
 /* A PACK IS A PRICE, NOT AN ARTICLE.
    The same shirt sells as a single, a pack of two and a pack of three. Making
@@ -76,6 +82,7 @@ export default function ArticleDetail() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
   const [d, setD] = useState<Detail | null>(null);
+  const [posts, setPosts] = useState<Posts | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
@@ -105,9 +112,14 @@ export default function ArticleDetail() {
   const load = useCallback(async () => {
     if (!isSupabaseConfigured || !supabase || !id) { setLoading(false); return; }
     setLoading(true); setErr("");
-    const { data, error } = await supabase.rpc("hub_article_detail", { p_article_id: id });
+    const [{ data, error }, tk] = await Promise.all([
+      supabase.rpc("hub_article_detail", { p_article_id: id }),
+      supabase.rpc("hub_article_social_posts", { p_article_id: id }),
+    ]);
     if (error) setErr(error.message);
     setD((data as Detail) ?? null);
+    /* Missing function (H288 not run) → no ticks line, nothing else changes. */
+    setPosts(tk.error ? null : ((tk.data as Posts) ?? {}));
     setLoading(false);
   }, [id]);
   useEffect(() => { load(); }, [load]);
@@ -516,6 +528,25 @@ export default function ArticleDetail() {
               {s.submit_note && (
                 <p className="mt-1.5 text-[12.5px] text-ink dark:text-[#e7e2d8]">&ldquo;{s.submit_note}&rdquo;</p>
               )}
+              {s.stage === "social" && posts && (
+                <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[11.5px]">
+                  <span className="font-semibold text-muted dark:text-[#a89f93]">Posted on</span>
+                  {PLATFORMS.map(([key, name]) => {
+                    const p = posts[key];
+                    return (
+                      <span key={key} title={p ? `Ticked by ${p.by ?? "someone"} · ${when(p.at)}` : "Not ticked yet"}
+                        className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 font-semibold ${p
+                          ? "bg-success-soft text-[#2f7a3d] dark:bg-white/[0.10] dark:text-[#8fd39a]"
+                          : "bg-panel text-muted dark:bg-white/[0.05] dark:text-[#8a8175]"}`}>
+                        {p ? <CheckSquare size={11} className="shrink-0" />
+                          : <span aria-hidden className="h-[10px] w-[10px] shrink-0 rounded-[2px] border-[1.5px] border-current" />}
+                        {name}{p ? ` · ${when(p.at)}` : ""}
+                        <span className="sr-only">{p ? " — posted" : " — not ticked yet"}</span>
+                      </span>
+                    );
+                  })}
+                </div>
+              )}
               {s.on_behalf && s.submitted_by_name && (
                 <p className="mt-1 text-[11.5px] font-semibold text-periwinkle-strong dark:text-periwinkle">
                   recorded by {s.submitted_by_name}, not submitted by {s.person}
@@ -707,7 +738,7 @@ export default function ArticleDetail() {
         {d.events.map((e, i) => (
           <div key={i} className="flex flex-wrap items-baseline gap-x-2 border-b border-line px-4 py-2 text-[12.5px] last:border-0 dark:border-white/[0.05]">
             <span className="w-[110px] shrink-0 text-hint dark:text-[#8a8175]">{when(e.at)}</span>
-            <span className="font-semibold text-ink dark:text-[#e7e2d8]">{e.kind.replace(/_/g, " ")}</span>
+            <span className="font-semibold text-ink dark:text-[#e7e2d8]">{EV_WORD[e.kind] ?? e.kind.replace(/_/g, " ")}</span>
             {e.actor && <span className="text-muted dark:text-[#a89f93]">by {e.actor}</span>}
             {e.detail && <span className="min-w-0 flex-1 text-muted dark:text-[#a89f93]">— {e.detail}</span>}
           </div>

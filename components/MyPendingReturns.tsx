@@ -83,7 +83,7 @@ export default function MyPendingReturns() {
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line px-4 py-3 dark:border-white/10 sm:px-5">
           <div>
             <h2 className="flex items-center gap-2 text-[13px] font-bold text-ink dark:text-[#f4f1ea]">
-              <Undo2 size={15} /> Pending returns
+              <Undo2 size={15} /> Pending Returns
             </h2>
             <p className="mt-0.5 text-[12px] text-muted dark:text-[#a89f93]">
               Coming back from the courier and not yet cancelled in Shopify. When a parcel arrives, cancel it in Shopify and tag it RTS — it leaves this list by itself.

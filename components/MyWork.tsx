@@ -1,7 +1,10 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ClipboardList, CornerUpLeft, CheckCircle2, Loader2, Flag, Rocket } from "lucide-react";
+import {
+  ClipboardList, ClipboardCheck, CornerUpLeft, CheckCircle2, CheckSquare, ChevronDown, Clock3, Loader2, Flag, Rocket, X,
+} from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
+import { tc } from "@/lib/titleCase";
 
 /* WHAT THIS PERSON HAS TO DO — on their own portal, beside their own wages.
  *
@@ -21,6 +24,16 @@ import { supabase, isSupabaseConfigured } from "@/lib/supabase";
  * His Submit is now LIVE, with an optional final comment: it opens only when
  * the other four are done, and it closes the article for everyone. Awais still
  * has no send-back.
+ *
+ * H288 (the owner, 5 Oct):
+ *   - every article card ends with ARTICLE PROGRESS: the five steps ticked off
+ *     as they finish, what happens after this person, and the next card in
+ *     their list. After Submit (or Live) a box takes the finished card's place:
+ *     finished from your side, who has the article now, and the next one.
+ *   - Awais ticks INSTAGRAM, FACEBOOK and TIKTOK on his social card as each
+ *     post goes up — his signature, nothing more. Qaswar sees the ticks on the
+ *     Social row of his checkpoints.
+ *   - headings are Title Case: every word starts with a capital.
  */
 
 /* WHAT HE NEEDS TO KNOW ABOUT THE ARTICLE (H279). The price the customer
@@ -44,14 +57,26 @@ type Comment = {
   mine: boolean; at: string | null; kind: "done" | "sent_back" | "checkpoint" | "live"; note: string;
   recorded_by: string | null; to?: string | null;
 };
+/* Role names, Title Case (H288). STAGE is the longer form used in the team's
+   notes; STEP is the short form on the progress chips and checkpoints. */
 const STAGE: Record<string, string> = {
-  product: "Product & upload", qc: "Quality check", video: "Video",
-  social: "Social media", ads: "Ads",
+  product: "Product & Upload", qc: "Quality Check", video: "Video",
+  social: "Social Media", ads: "Ads",
+};
+const STEP: Record<string, string> = {
+  product: "Product", video: "Video", qc: "Quality Check", social: "Social Media", ads: "Ads",
 };
 const rs = (v: number | null | undefined) => (v == null ? "—" : "Rs " + Math.round(Number(v)).toLocaleString("en-PK"));
-const day = (iso: string | null) => iso
+const day = (iso: string | null | undefined) => iso
   ? new Date(iso).toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: "Asia/Karachi" })
   : "";
+const stamp = (iso: string | null | undefined) => iso
+  ? new Date(iso).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit", hour12: true, timeZone: "Asia/Karachi" })
+  : "";
+const firstName = (name: string | null | undefined) => (name ?? "").trim().split(/\s+/)[0] || "nobody";
+/* The database writes "Awais (Social media)"; the role in brackets is a role
+   heading, so it is shown Title Case like everywhere else on the portal. */
+const roleTc = (w: string) => w.replace(/\(([^)]*)\)/, (_m, r: string) => `(${tc(r)})`);
 
 type Task = {
   task_id: string; article_id: string | null; code: string | null;
@@ -78,6 +103,47 @@ type Step = {
 };
 type Checkpoint = { article_id: string; task_id: string; waiting_for: string[]; steps: Step[] };
 
+/* H288: where each of my articles stands (hub_my_progress), and the ticks. */
+type Platform = "instagram" | "facebook" | "tiktok";
+const PLATFORMS: { key: Platform; name: string }[] = [
+  { key: "instagram", name: "Instagram" }, { key: "facebook", name: "Facebook" }, { key: "tiktok", name: "TikTok" },
+];
+type Posts = Partial<Record<Platform, { at: string | null; by: string | null }>>;
+type PStep = {
+  stage: string; person: string | null; status: string | null; attempt: number | null;
+  opened_at: string | null; submitted_at: string | null; sent_back_by: string | null; mine: boolean;
+};
+type Progress = {
+  article_id: string; code: string; status: string; completed_at: string | null;
+  live: { at: string | null; by: string | null; note: string | null } | null;
+  steps: PStep[]; posts: Posts;
+};
+/* The box that takes a finished card's place: what was finished, and the
+   card that was next after it. */
+type Flash = {
+  kind: "done" | "live" | "sent_back"; task_id: string; code: string | null;
+  article_id: string | null; pos: number;
+};
+
+/* WHAT HAPPENS WHEN THIS STEP IS DONE — the chain as hub_task_submit runs it:
+   the product goes to the quality check (or, when the check finished first,
+   straight to social and ads); the video and the check go to social and ads;
+   social goes to ads; ads is the Live. */
+const AFTER: Record<string, string[]> = {
+  product: ["qc"], video: ["social", "ads"], qc: ["social", "ads"], social: ["ads"], ads: [],
+};
+function afterYou(stage: string | null, p: Progress | undefined, fixFor: string | null): string {
+  if (!stage || stage === "ads" || !AFTER[stage]) return "";
+  /* D1 (2 Oct): a fix sent back from the ads card goes straight back to the
+     man who sent it — no second quality check. */
+  if (fixFor) return `straight back to ${fixFor} for Live — no second quality check.`;
+  const who = (st: string) => p?.steps.find((s) => s.stage === st)?.person;
+  if (stage === "social") return `${STEP.ads}${who("ads") ? ` (${firstName(who("ads"))})` : ""} — then Live, and the article is finished.`;
+  const next = stage === "product" && p?.steps.find((s) => s.stage === "qc")?.status === "submitted"
+    ? ["social", "ads"] : AFTER[stage];
+  return next.map((st) => `${STEP[st]}${who(st) ? ` (${firstName(who(st))})` : ""}`).join(" and ") + ".";
+}
+
 /* "Sent back by Qaswar: make it two videos" / "Sent back by Qaswar (no note)"
    — the wording hub_task_checkpoint stores — read back as who + what. */
 const SENT_BACK = /^Sent back by (.+?)(?:: ([\s\S]+)| \(no note\))$/;
@@ -86,6 +152,7 @@ export default function MyWork() {
   const [rows, setRows] = useState<Task[]>([]);
   const [facts, setFacts] = useState<Record<string, ArticleFacts>>({});
   const [cps, setCps] = useState<Record<string, Checkpoint>>({});
+  const [prog, setProg] = useState<Record<string, Progress>>({});
   const [loading, setLoading] = useState(true);
   const [note, setNote] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
@@ -95,6 +162,9 @@ export default function MyWork() {
   const [sb, setSb] = useState<{ task: string; stage: string } | null>(null);
   const [sbNote, setSbNote] = useState("");
   const [confirmLive, setConfirmLive] = useState<string | null>(null);
+  const [flash, setFlash] = useState<Flash | null>(null);
+  const [glow, setGlow] = useState<string | null>(null);
+  const flashRef = useRef<HTMLDivElement | null>(null);
 
   /* Only the newest reply is drawn: an older load that lands late must not
      paint yesterday's buttons over the fresh ones. */
@@ -102,10 +172,11 @@ export default function MyWork() {
   const load = useCallback(async () => {
     if (!isSupabaseConfigured || !supabase) { setLoading(false); return; }
     const my = ++reqId.current;
-    const [{ data, error }, arts, cp] = await Promise.all([
+    const [{ data, error }, arts, cp, pr] = await Promise.all([
       supabase.rpc("hub_my_work"),
       supabase.rpc("hub_my_articles"),
       supabase.rpc("hub_my_checkpoints"),
+      supabase.rpc("hub_my_progress"),
     ]);
     if (my !== reqId.current) return;
     if (error) setErr(error.message);
@@ -122,9 +193,19 @@ export default function MyWork() {
       for (const c of ((cp.data as Checkpoint[]) ?? [])) map[c.task_id] = c;
       setCps(map);
     }
+    if (!pr.error) {
+      const map: Record<string, Progress> = {};
+      for (const p of ((pr.data as Progress[]) ?? [])) map[p.article_id] = { ...p, posts: p.posts ?? {} };
+      setProg(map);
+    }
     setLoading(false);
   }, []);
   useEffect(() => { load(); }, [load]);
+
+  /* The finished box is read where the finished card was. */
+  useEffect(() => {
+    if (flash) flashRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [flash]);
 
   /* Every action answers { ok, error } instead of throwing, so a refusal has
      to be read out of the reply and shown. Swallowing it looks like a button
@@ -143,31 +224,73 @@ export default function MyWork() {
     return true;
   }
 
+  const open = rows.filter((r) => r.status === "open");
+  /* "To do" counts what he can act on now, not what he is waiting for. */
+  const actionable = open.filter((r) => !r.waiting_for);
+  const done = rows.filter((r) => r.status !== "open").slice(0, 6);
+
+  /* Where the card sits in his list, taken before the list changes: the
+     finished box goes into the same place. */
+  const posOf = (t: Task) => Math.max(0, open.findIndex((o) => o.task_id === t.task_id));
+
   async function act(t: Task, what: "submit" | "send_back") {
     const text = (note[t.task_id] ?? "").trim();
+    const pos = posOf(t);
+    setFlash(null);
     const ok = what === "submit"
       ? await run(t.task_id, "hub_task_submit", { p_task_id: t.task_id, p_note: text })
       : await run(t.task_id, "hub_task_send_back", { p_task_id: t.task_id, p_reason: text });
-    if (ok) setNote((n) => ({ ...n, [t.task_id]: "" }));
+    if (ok) {
+      setNote((n) => ({ ...n, [t.task_id]: "" }));
+      setFlash({ kind: what === "submit" ? "done" : "sent_back", task_id: t.task_id, code: t.code, article_id: t.article_id, pos });
+    }
   }
 
   async function sendBack(t: Task, stage: string) {
+    setFlash(null);
     const ok = await run(`${t.task_id}:${stage}`, "hub_task_checkpoint",
       { p_task_id: t.task_id, p_stage: stage, p_note: sbNote.trim() || null });
     if (ok) { setSb(null); setSbNote(""); }
   }
 
   async function goLive(t: Task) {
+    const pos = posOf(t);
+    setFlash(null);
     const ok = await run(t.task_id, "hub_task_go_live",
       { p_task_id: t.task_id, p_note: (note[t.task_id] ?? "").trim() || null });
     setConfirmLive(null);
-    if (ok) setNote((n) => ({ ...n, [t.task_id]: "" }));
+    if (ok) {
+      setNote((n) => ({ ...n, [t.task_id]: "" }));
+      setFlash({ kind: "live", task_id: t.task_id, code: t.code, article_id: t.article_id, pos });
+    }
   }
 
-  const open = rows.filter((r) => r.status === "open");
-  /* "To do" counts what he can act on now, not what he is waiting for. */
-  const actionable = open.filter((r) => !r.waiting_for);
-  const done = rows.filter((r) => r.status !== "open").slice(0, 6);
+  /* A tick saves on its own and answers with the article's ticks, so only
+     those are redrawn — no reload of the whole list for one tick. */
+  async function tick(t: Task, platform: Platform, on: boolean) {
+    if (!supabase || !t.article_id) return;
+    const art = t.article_id;
+    setBusy(`${t.task_id}:${platform}`); setErr("");
+    const { data, error } = await supabase.rpc("hub_article_post_set",
+      { p_task_id: t.task_id, p_platform: platform, p_posted: on });
+    const res = data as { ok?: boolean; error?: string; posts?: Posts } | null;
+    if (error) setErr(error.message);
+    else if (res && res.ok === false) setErr(res.error ?? "Refused.");
+    else if (res?.posts) {
+      const posts = res.posts;
+      setProg((m) => (m[art] ? { ...m, [art]: { ...m[art], posts } } : m));
+    }
+    setBusy(null);
+  }
+
+  function jump(taskId: string) {
+    const el = document.getElementById(`task-${taskId}`);
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "start" });
+    el.focus({ preventScroll: true });
+    setGlow(taskId);
+    window.setTimeout(() => setGlow((g) => (g === taskId ? null : g)), 1600);
+  }
 
   if (loading) {
     return <div className="flex items-center gap-2 px-1 py-6 text-[13px] text-muted dark:text-[#a89f93]">
@@ -177,10 +300,36 @@ export default function MyWork() {
      behind its own tab, so an empty tab has to say it is empty — a blank
      panel reads as a page that failed to load. */
 
+  /* The finished box goes where the finished card was — above the card that
+     came after it, or at the end when it was the last one. Its "next" is that
+     card, or the first in the list. */
+  const flashAt = flash ? Math.min(flash.pos, open.length) : -1;
+  const flashNext = flash ? open[flashAt] ?? open[0] ?? null : null;
+  const banner = flash ? (
+    <DoneBanner key="flash" f={flash} p={flash.article_id ? prog[flash.article_id] : undefined}
+      next={flashNext} onJump={jump} onClose={() => setFlash(null)} boxRef={flashRef} />
+  ) : null;
+  const bannerAbove = flash && flashAt < open.length ? open[flashAt].task_id : null;
+  const trailingBanner = !!flash && !bannerAbove;
+
+  /* A social row in Recently Submitted keeps its ticks until the article is
+     Live — the newest one per article, and only while no open card for that
+     article carries them already. */
+  const ticksOnDone = new Set<string>();
+  {
+    const seen = new Set<string>();
+    for (const t of done) {
+      if (!t.article_id || seen.has(t.article_id)) continue;
+      seen.add(t.article_id);
+      const p = prog[t.article_id];
+      if (t.stage === "social" && p && p.status !== "completed" && !open.some((o) => o.article_id === t.article_id)) ticksOnDone.add(t.task_id);
+    }
+  }
+
   return (
     <section className="overflow-hidden rounded-card border border-line bg-surface shadow-card dark:border-white/10 dark:bg-[#201c17]">
       <h2 className="flex items-center gap-2 border-b border-line px-4 py-3 text-[13px] font-bold text-ink dark:border-white/10 dark:text-[#f4f1ea] sm:px-5">
-        <ClipboardList size={15} /> Your work
+        <ClipboardList size={15} /> Your Work
         {actionable.length > 0 && (
           <span className="rounded-full bg-periwinkle-soft px-2 py-0.5 text-[11px] font-bold text-periwinkle-strong dark:bg-white/[0.10] dark:text-periwinkle">
             {actionable.length} to do
@@ -195,27 +344,40 @@ export default function MyWork() {
 
       {err && <p className="border-b border-line bg-danger-soft px-4 py-2.5 text-[12.5px] font-medium text-danger dark:border-white/10 sm:px-5">{err}</p>}
 
-      {open.length === 0 ? (
-        <p className="px-4 py-5 text-[13px] text-muted dark:text-[#a89f93] sm:px-5">
-          Nothing waiting on you right now.
-        </p>
-      ) : open.map((t) => {
+      {open.length === 0 ? (<>
+        {banner}
+        {!flash && (
+          <p className="px-4 py-5 text-[13px] text-muted dark:text-[#a89f93] sm:px-5">
+            Nothing waiting on you right now.
+          </p>
+        )}
+      </>) : open.map((t, idx) => {
         /* H286: an open ads card gets the checkpoints and the Live button.
            With no checkpoint data (the function missing) it still shows Live —
            the database enforces the rule either way. */
         const isAds = t.stage === "ads" && !!t.article_id;
+        const isSocial = t.stage === "social" && !!t.article_id;
         const cp = isAds ? cps[t.task_id] : undefined;
+        const p = t.article_id ? prog[t.article_id] : undefined;
         const waitingFor = cp?.waiting_for ?? [];
         const ready = waitingFor.length === 0;
         const back = t.returned_note ? SENT_BACK.exec(t.returned_note) : null;
-        return (
-        <div key={t.task_id} className="border-b border-line px-4 py-4 last:border-0 dark:border-white/[0.06] sm:px-5">
+        /* who this fix goes back to: the checkpoint's sender (H286) */
+        const fixFor = p?.steps.find((s) => s.mine && s.stage === t.stage)?.sent_back_by ?? (back ? back[1] : null);
+        const socialWho = firstName(cp?.steps.find((s) => s.stage === "social")?.person ?? "Awais");
+        const notTicked = p ? PLATFORMS.filter((pl) => !p.posts[pl.key]).map((pl) => pl.name) : [];
+        const last = idx === open.length - 1;
+        return (<div key={t.task_id}>
+        {bannerAbove === t.task_id && banner}
+        <div id={`task-${t.task_id}`} data-code={t.code ?? undefined} tabIndex={-1}
+          className={`border-line px-4 py-4 outline-none transition-colors dark:border-white/[0.06] sm:px-5 ${last && !trailingBanner ? "" : "border-b"} ${
+            glow === t.task_id ? "bg-periwinkle-soft/40 ring-2 ring-inset ring-periwinkle-strong dark:bg-white/[0.05]" : ""}`}>
           <div className="flex flex-wrap items-baseline justify-between gap-2">
             <div className="min-w-0">
-              <span className="text-[14px] font-bold text-ink dark:text-[#f4f1ea]">{t.title}</span>
+              <span className="text-[14px] font-bold text-ink dark:text-[#f4f1ea]">{tc(t.title)}</span>
               {t.code && (
                 <span className="ml-2 text-[12.5px] text-muted dark:text-[#a89f93]">
-                  {t.code} · {t.article_name}
+                  {t.code} · {tc(t.article_name)}
                 </span>
               )}
             </div>
@@ -271,8 +433,8 @@ export default function MyWork() {
             /* CHECKPOINTS (H286). Every earlier step, who did it and when, and a
                Send back on each finished one. The note is optional. */
             <div className="mt-3 overflow-hidden rounded-xl2 border border-line dark:border-white/10">
-              <div className="flex items-center gap-1.5 border-b border-line bg-panel/60 px-3 py-2 text-[11px] font-bold uppercase tracking-wide text-hint dark:border-white/10 dark:bg-white/[0.03] dark:text-[#8a8175]">
-                <Flag size={12} className="shrink-0" /> Checkpoints · send a step back
+              <div className="flex items-center gap-1.5 border-b border-line bg-panel/60 px-3 py-2 text-[12px] font-bold text-muted dark:border-white/10 dark:bg-white/[0.03] dark:text-[#a89f93]">
+                <Flag size={12} className="shrink-0" /> Checkpoints · Send A Step Back
               </div>
               {cp.steps.map((s) => {
                 const formOpen = sb?.task === t.task_id && sb.stage === s.stage;
@@ -287,7 +449,7 @@ export default function MyWork() {
                         button always keeps the right edge. */}
                     <div className="flex items-center gap-3">
                       <div className="min-w-0 flex-1 sm:flex sm:items-center sm:gap-3">
-                        <div className="text-[13px] font-bold text-ink sm:w-[104px] sm:shrink-0 dark:text-[#f4f1ea]">{s.name}</div>
+                        <div className="text-[13px] font-bold text-ink sm:w-[104px] sm:shrink-0 dark:text-[#f4f1ea]">{STEP[s.stage] ?? tc(s.name)}</div>
                         <div className="min-w-0 text-[12px] text-muted dark:text-[#a89f93]">
                           {who} · {state}
                           {(s.attempt ?? 1) > 1 && (
@@ -311,6 +473,8 @@ export default function MyWork() {
                         </span>
                       ) : null}
                     </div>
+                    {/* H288: what Awais has ticked, as he ticked it. */}
+                    {s.stage === "social" && p && <PostsLine posts={p.posts} />}
                     {s.status === "open" && s.sent_back_by && s.sent_back_note && (
                       <p className="mt-1 text-[11.5px] text-red-800 [overflow-wrap:anywhere] dark:text-salmon">“{s.sent_back_note}”</p>
                     )}
@@ -341,6 +505,12 @@ export default function MyWork() {
                 );
               })}
             </div>
+          )}
+
+          {/* H288: Awais's three ticks, right where he writes what he did. */}
+          {isSocial && p && (
+            <SocialTicks posts={p.posts} busy={busy} taskId={t.task_id} locked={p.status === "completed"}
+              onToggle={(pl, on) => tick(t, pl, on)} />
           )}
 
           {t.waiting_for ? (
@@ -374,6 +544,7 @@ export default function MyWork() {
               </button>
               <span className="text-[11.5px] text-hint dark:text-[#8a8175]">
                 This closes {t.code} for everyone. Only the administration can undo it.
+                {notTicked.length > 0 && <b className="font-semibold text-[#7a4f12] dark:text-amber"> {socialWho} has not ticked {notTicked.join(", ")} yet.</b>}
               </span>
             </>) : (<>
               <button disabled={!!busy || !ready} onClick={() => { setConfirmLive(t.task_id); setSb(null); }}
@@ -383,7 +554,7 @@ export default function MyWork() {
               <span className="text-[11.5px] text-hint dark:text-[#8a8175]">
                 {ready
                   ? "Live closes the article for everyone. Until then you can send any step back."
-                  : `Live opens when everyone is done — waiting for ${waitingFor.join(", ")}.`}
+                  : `Live opens when everyone is done — waiting for ${waitingFor.map(roleTc).join(", ")}.`}
               </span>
             </>)}
           </div>
@@ -418,39 +589,260 @@ export default function MyWork() {
             </span>
           </div>
           </>)}
+
+          {/* ARTICLE PROGRESS (H288) — the space at the bottom of every card:
+              which steps are finished, what happens after you, and the next
+              card in your list. */}
+          <ProgressPanel p={p} t={t} fixFor={fixFor} next={open[idx + 1] ?? null} onJump={jump} />
         </div>
-        );
+        </div>);
       })}
+      {open.length > 0 && trailingBanner && banner}
 
       {done.length > 0 && (
-        <div className="bg-panel/60 px-4 py-3 dark:bg-white/[0.03] sm:px-5">
-          <div className="mb-2 text-[11.5px] font-bold uppercase tracking-wide text-hint dark:text-[#8a8175]">Recently submitted</div>
-          <ul className="space-y-1.5">
-            {done.map((t) => (
-              <li key={t.task_id} className="flex flex-wrap items-baseline gap-x-2 text-[12.5px]">
-                <CheckCircle2 size={12} className="shrink-0 text-success" />
-                <span className="font-semibold text-ink dark:text-[#e7e2d8]">{t.code ?? "Task"}</span>
-                {/* An ads card is closed by Live; with no final comment there is
-                    no note to show, so say what happened instead. */}
-                <span className="min-w-0 flex-1 truncate text-muted dark:text-[#a89f93]">
-                  {t.stage === "ads" ? `Live${t.submit_note ? ` · ${t.submit_note}` : ""}` : t.submit_note}
-                </span>
-                {/* A clock figure would be a lie on a record written by hand —
-                    the system never held that work. Say who wrote it instead. */}
-                {t.recorded_by ? (
-                  <span className="shrink-0 font-semibold text-periwinkle-strong dark:text-periwinkle">
-                    recorded by {t.recorded_by}
-                    {t.submitted_at ? ` · ${new Date(t.submitted_at).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}` : ""}
+        <div className={`border-line bg-panel/60 px-4 py-3 dark:border-white/[0.06] dark:bg-white/[0.03] sm:px-5 ${trailingBanner ? "" : "border-t"}`}>
+          <div className="mb-2 text-[12px] font-bold text-muted dark:text-[#a89f93]">Recently Submitted</div>
+          <ul className="space-y-2">
+            {done.map((t) => {
+              const p = t.article_id ? prog[t.article_id] : undefined;
+              const now = p && p.status !== "completed"
+                ? p.steps.filter((s) => s.status === "open" && !s.mine).map((s) => firstName(s.person)) : [];
+              return (
+              <li key={t.task_id} className="text-[12.5px]">
+                <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                  <CheckCircle2 size={12} className="shrink-0 self-center text-success" />
+                  <span className="font-semibold text-ink dark:text-[#e7e2d8]">{t.code ?? "Task"}</span>
+                  {/* An ads card is closed by Live; with no final comment there is
+                      no note to show, so say what happened instead. */}
+                  <span className="min-w-0 flex-1 truncate text-muted dark:text-[#a89f93]">
+                    {t.stage === "ads" ? `Live${t.submit_note ? ` · ${t.submit_note}` : ""}` : t.submit_note}
                   </span>
-                ) : (
-                  <span className="shrink-0 text-hint dark:text-[#8a8175]">took {t.held}</span>
+                  {/* H288: where the article is now — finished, or with whom. */}
+                  {p && (p.status === "completed" ? (
+                    <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-success-soft px-2 py-0.5 text-[11px] font-bold text-[#2f7a3d] dark:text-[#8fd39a] dark:bg-white/[0.10]">
+                      <Rocket size={11} /> finished · Live {day(p.live?.at ?? p.completed_at)}
+                    </span>
+                  ) : (
+                    <span className="shrink-0 rounded-full bg-amber-soft px-2 py-0.5 text-[11px] font-semibold text-[#7a4f12] dark:bg-white/[0.08] dark:text-amber">
+                      {now.length ? `now with ${now.join(", ")}` : "in progress"}
+                    </span>
+                  ))}
+                  {/* A clock figure would be a lie on a record written by hand —
+                      the system never held that work. Say who wrote it instead. */}
+                  {t.recorded_by ? (
+                    <span className="shrink-0 font-semibold text-periwinkle-strong dark:text-periwinkle">
+                      recorded by {t.recorded_by}
+                      {t.submitted_at ? ` · ${day(t.submitted_at)}` : ""}
+                    </span>
+                  ) : (
+                    <span className="shrink-0 text-hint dark:text-[#8a8175]">took {t.held}</span>
+                  )}
+                </div>
+                {ticksOnDone.has(t.task_id) && p && (
+                  <SocialTicks compact posts={p.posts} busy={busy} taskId={t.task_id} locked={false}
+                    onToggle={(pl, on) => tick(t, pl, on)} />
                 )}
               </li>
-            ))}
+              );
+            })}
           </ul>
         </div>
       )}
     </section>
+  );
+}
+
+/* ARTICLE PROGRESS — the space at the bottom of every card (H288).
+   The five steps as chips, ticked as they finish; what happens after this
+   person presses Submit; and the next card in his list, one tap away.
+   Qaswar's ads card already lists every step in its checkpoints, so there it
+   only points to the next card. */
+function ProgressPanel({ p, t, fixFor, next, onJump }: {
+  p: Progress | undefined; t: Task; fixFor: string | null; next: Task | null; onJump: (taskId: string) => void;
+}) {
+  const steps = p && t.stage !== "ads" ? p.steps : null;
+  const doneN = steps ? steps.filter((s) => s.status === "submitted").length : 0;
+  const after = t.article_id ? afterYou(t.stage, p, fixFor) : "";
+  return (
+    <div className="mt-3 rounded-xl2 border border-line bg-panel/50 px-3 py-2.5 dark:border-white/10 dark:bg-white/[0.03]">
+      {steps && (<>
+        <div className="flex items-center justify-between gap-2">
+          <span className="flex items-center gap-1.5 text-[12px] font-bold text-ink dark:text-[#f4f1ea]">
+            <ClipboardCheck size={13} className="shrink-0" /> Article Progress
+          </span>
+          <span className="text-[11.5px] font-semibold tabular-nums text-muted dark:text-[#a89f93]">
+            {doneN} of {steps.length} done
+          </span>
+        </div>
+        <ol className="mt-2 flex flex-wrap gap-1.5" aria-label="Steps of this article">
+          {steps.map((s) => <StepChip key={s.stage} s={s} />)}
+        </ol>
+      </>)}
+      {after && (
+        <p className={`${steps ? "mt-2" : ""} text-[12px] leading-snug text-muted dark:text-[#a89f93]`}>
+          <b className="font-semibold text-ink dark:text-[#e7e2d8]">After You:</b> {after}
+        </p>
+      )}
+      <p className={`${steps || after ? "mt-1.5" : ""} flex min-w-0 flex-wrap items-center gap-x-1.5 text-[12px] text-muted dark:text-[#a89f93]`}>
+        <b className="font-semibold text-ink dark:text-[#e7e2d8]">Next In Your List:</b>
+        {next ? (
+          <button onClick={() => onJump(next.task_id)}
+            className="inline-flex min-w-0 max-w-full items-center gap-1 rounded-full py-0.5 text-left font-semibold text-[#3d5c99] underline-offset-2 hover:underline dark:text-periwinkle">
+            <span className="shrink-0">{next.code ?? "Task"} ·</span>
+            <span className="min-w-0 truncate">{tc(next.article_name ?? next.title)}</span>
+            <ChevronDown size={13} className="shrink-0" />
+          </button>
+        ) : <span>this is the last one.</span>}
+      </p>
+    </div>
+  );
+}
+
+function StepChip({ s }: { s: PStep }) {
+  const done = s.status === "submitted";
+  const fixing = s.status === "open" && !!s.sent_back_by;
+  const open = s.status === "open";
+  const back = s.status === "returned";
+  const name = STEP[s.stage] ?? tc(s.stage);
+  const state = done ? (s.stage === "ads" ? "live" : "done")
+    : fixing ? "being fixed" : open ? (s.mine ? "with you now" : "in progress")
+    : back ? "sent back" : "not started";
+  const tone = done ? "border-transparent bg-success-soft text-[#2f7a3d] dark:text-[#8fd39a] dark:bg-white/[0.10]"
+    : fixing || back ? "border-transparent bg-salmon-soft text-red-800 dark:bg-white/[0.08] dark:text-salmon"
+    : open ? (s.mine
+      ? "border-ink/50 bg-surface text-ink dark:border-white/40 dark:bg-white/[0.06] dark:text-white"
+      : "border-transparent bg-amber-soft text-[#7a4f12] dark:bg-white/[0.08] dark:text-amber")
+    : "border-dashed border-[#d6cfc4] text-muted dark:border-white/15 dark:text-[#8a8175]";
+  const title = `${name} — ${s.person ?? "nobody"} · ${state}${done && s.submitted_at ? ` ${day(s.submitted_at)}` : ""}${(s.attempt ?? 1) > 1 ? ` · attempt ${s.attempt}` : ""}`;
+  return (
+    <li title={title} className={`inline-flex max-w-full items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11.5px] font-semibold ${tone}`}>
+      {done ? (s.stage === "ads" ? <Rocket size={12} className="shrink-0" /> : <CheckCircle2 size={12} className="shrink-0" />)
+        : fixing || back ? <CornerUpLeft size={12} className="shrink-0" />
+        : open ? <Clock3 size={12} className="shrink-0" />
+        : <span aria-hidden className="h-2 w-2 shrink-0 rounded-full border border-current" />}
+      <span>{name}</span>
+      <span className="truncate font-normal opacity-80">· {s.mine ? "You" : firstName(s.person)}</span>
+      <span className="sr-only">— {state}</span>
+    </li>
+  );
+}
+
+/* AWAIS'S TICKS (H288). Ticked or unticked, nothing more — each one is his
+   signature that the post is up on that platform, saved the moment he taps
+   it, with his name and the time. Closed once the article is Live. */
+function SocialTicks({ posts, busy, taskId, locked, compact, onToggle }: {
+  posts: Posts; busy: string | null; taskId: string; locked: boolean; compact?: boolean;
+  onToggle: (platform: Platform, on: boolean) => void;
+}) {
+  const buttons = (
+    <div className="flex flex-wrap gap-2" role="group" aria-label="Posted on">
+      {PLATFORMS.map((pl) => {
+        const on = !!posts[pl.key];
+        const mine = busy === `${taskId}:${pl.key}`;
+        return (
+          <button key={pl.key} type="button" role="checkbox" aria-checked={on} disabled={!!busy || locked}
+            onClick={() => onToggle(pl.key, !on)}
+            title={on ? `Ticked by ${posts[pl.key]?.by ?? "someone"} · ${stamp(posts[pl.key]?.at)}` : `Tick when the ${pl.name} post is up`}
+            className={`inline-flex items-center gap-1.5 rounded-full border font-semibold transition disabled:opacity-50 ${compact
+              ? "min-h-[36px] px-2.5 text-[11.5px] sm:min-h-0 sm:py-1" : "min-h-[40px] px-3 text-[12.5px] sm:min-h-0 sm:py-1.5"} ${on
+              ? "border-[#2f7a3d]/40 bg-success-soft text-[#2f7a3d] dark:text-[#8fd39a] dark:border-[#8fd39a]/40 dark:bg-white/[0.10]"
+              : "border-line bg-surface text-ink hover:bg-panel dark:border-white/15 dark:bg-white/[0.03] dark:text-white dark:hover:bg-white/[0.06]"}`}>
+            {mine ? <Loader2 size={13} className="shrink-0 animate-spin" />
+              : on ? <CheckSquare size={14} className="shrink-0" />
+              : <span aria-hidden className="h-[13px] w-[13px] shrink-0 rounded-[3px] border-2 border-current opacity-60" />}
+            {pl.name}
+            {on && !compact && <span className="font-normal opacity-80">· {day(posts[pl.key]?.at)}</span>}
+          </button>
+        );
+      })}
+    </div>
+  );
+  if (compact) return <div className="mt-1.5 pl-5">{buttons}</div>;
+  return (
+    <div className="mt-3 rounded-xl2 border border-line px-3 py-2.5 dark:border-white/10">
+      <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
+        <span className="text-[12px] font-bold text-ink dark:text-[#f4f1ea]">Posted On</span>
+        <span className="text-[11.5px] text-hint dark:text-[#8a8175]">
+          {locked ? "The article is live — the ticks are closed." : "Tick each one when the post is up — Qaswar sees these on his card."}
+        </span>
+      </div>
+      {buttons}
+    </div>
+  );
+}
+
+/* What Awais ticked, read-only — on the Social row of Qaswar's checkpoints. */
+function PostsLine({ posts }: { posts: Posts }) {
+  return (
+    <ul className="mt-1.5 flex flex-wrap gap-1.5" aria-label="Posted on">
+      {PLATFORMS.map((pl) => {
+        const p = posts[pl.key];
+        return (
+          <li key={pl.key} title={p ? `Ticked by ${p.by ?? "someone"} · ${stamp(p.at)}` : "Not ticked yet"}
+            className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold ${p
+              ? "bg-success-soft text-[#2f7a3d] dark:text-[#8fd39a] dark:bg-white/[0.10]"
+              : "bg-panel text-muted dark:bg-white/[0.05] dark:text-[#8a8175]"}`}>
+            {p ? <CheckSquare size={11} className="shrink-0" />
+              : <span aria-hidden className="h-[10px] w-[10px] shrink-0 rounded-[2px] border-[1.5px] border-current" />}
+            {pl.name}
+            <span className="sr-only">{p ? " — posted" : " — not ticked yet"}</span>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+/* THE FINISHED BOX (H288) — in the place of the card that was just
+   submitted: it is finished from your side, who has the article now, and the
+   next card, with a button that takes you to it. */
+function DoneBanner({ f, p, next, onJump, onClose, boxRef }: {
+  f: Flash; p: Progress | undefined; next: Task | null;
+  onJump: (taskId: string) => void; onClose: () => void;
+  boxRef: { current: HTMLDivElement | null };
+}) {
+  const finished = f.kind === "live" || p?.status === "completed";
+  const withNow = p && !finished
+    ? p.steps.filter((s) => s.status === "open" && !s.mine).map((s) => `${s.person ?? "nobody"} (${STEP[s.stage] ?? tc(s.stage)})`) : [];
+  const head = f.kind === "live" ? `${f.code ?? "The Article"} Is Live — Finished For Everyone`
+    : f.kind === "sent_back" ? `${f.code ?? "It"} Sent Back To Product`
+    : finished ? `${f.code ?? "The Article"} Is Finished`
+    : `${f.code ?? "This Task"} Is Finished From Your Side`;
+  const line = finished ? "Nothing more can change on it — only the administration can undo a Live."
+    : f.kind === "sent_back" ? "Hamza Mukhtar has it back with your reason; it comes back to you when he fixes it."
+    : !f.article_id ? "Your note went to the administration with your name on it."
+    : withNow.length ? `It is with ${withNow.join(" and ")} now.`
+    : "The next step opens by itself — you will be told if it comes back to you.";
+  return (
+    <div ref={boxRef} role="status"
+      className="border-b border-line bg-success-soft/60 px-4 py-3 last:border-b-0 dark:border-white/[0.06] dark:bg-white/[0.04] sm:px-5">
+      <div className="flex items-start gap-2.5">
+        <span className="mt-0.5 shrink-0 text-[#2f7a3d] dark:text-[#8fd39a]">
+          {f.kind === "live" ? <Rocket size={16} /> : f.kind === "sent_back" ? <CornerUpLeft size={16} /> : <CheckCircle2 size={16} />}
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="text-[13.5px] font-bold text-ink dark:text-[#f4f1ea]">{head}</div>
+          <p className="mt-0.5 text-[12.5px] leading-snug text-muted dark:text-[#a89f93]">{line}</p>
+          <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[12.5px]">
+            {next ? (<>
+              <span className="min-w-0 font-semibold text-ink dark:text-[#e7e2d8]">
+                Next: {next.code ?? "Task"} · {tc(next.article_name ?? next.title)}
+              </span>
+              <button onClick={() => onJump(next.task_id)}
+                className="inline-flex min-h-[36px] items-center gap-1 rounded-full bg-ink px-3.5 text-[12px] font-semibold text-white sm:min-h-0 sm:py-1 dark:bg-white dark:text-[#141414]">
+                Go To It <ChevronDown size={13} />
+              </button>
+            </>) : (
+              <span className="font-semibold text-ink dark:text-[#e7e2d8]">Nothing else is waiting on you right now.</span>
+            )}
+          </div>
+        </div>
+        <button onClick={onClose} aria-label="Close"
+          className="-mr-1.5 -mt-1 flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-muted hover:bg-black/[0.05] dark:text-[#a89f93] dark:hover:bg-white/[0.08]">
+          <X size={15} />
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -466,13 +858,10 @@ function Linked({ text }: { text: string }) {
 }
 
 function Comments({ list }: { list: Comment[] }) {
-  const when = (iso: string | null) => iso
-    ? new Date(iso).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit", hour12: true, timeZone: "Asia/Karachi" })
-    : "";
   return (
     <div className="mt-2 rounded-xl2 border border-line px-3 py-2.5 dark:border-white/10">
-      <div className="mb-1.5 text-[11px] font-bold uppercase tracking-wide text-hint dark:text-[#8a8175]">
-        What the team wrote · {list.length}
+      <div className="mb-1.5 text-[12px] font-bold text-muted dark:text-[#a89f93]">
+        What The Team Wrote · {list.length}
       </div>
       <ul className="space-y-2">
         {list.map((c) => {
@@ -484,14 +873,14 @@ function Comments({ list }: { list: Comment[] }) {
                 {c.kind === "checkpoint" ? (
                   /* by = who sent it back, to = who has it now */
                   <span className="font-semibold text-red-700 dark:text-salmon">
-                    · sent {STAGE[c.stage ?? ""] ?? c.title ?? "it"} back to {c.to ?? "them"}
+                    · sent {STAGE[c.stage ?? ""] ?? (c.title ? tc(c.title) : "it")} back to {c.to ?? "them"}
                   </span>
                 ) : (
-                  <span className="text-muted dark:text-[#a89f93]">· {STAGE[c.stage ?? ""] ?? c.title ?? "Task"}</span>
+                  <span className="text-muted dark:text-[#a89f93]">· {STAGE[c.stage ?? ""] ?? (c.title ? tc(c.title) : "Task")}</span>
                 )}
                 {c.kind === "sent_back" && <span className="font-semibold text-red-700 dark:text-salmon">· sent it back</span>}
                 {c.kind === "live" && <span className="font-semibold text-[#2f7a3d] dark:text-[#8fd39a]">· went live</span>}
-                <span className="text-[11.5px] text-hint dark:text-[#8a8175]">· {when(c.at)}</span>
+                <span className="text-[11.5px] text-hint dark:text-[#8a8175]">· {stamp(c.at)}</span>
                 {c.recorded_by && <span className="text-[11.5px] text-periwinkle-strong dark:text-periwinkle">· recorded by {c.recorded_by}</span>}
               </div>
               {c.note ? (
@@ -526,10 +915,11 @@ function Facts({ a, detail }: { a: ArticleFacts; detail: string | null }) {
   const live = (a.brief ?? "").trim();
   const showSnap = snap !== "" && snap !== live;
   const basis = a.ads_basis === "daily" ? "a day" : a.ads_basis === "monthly" ? "a month" : "in total";
+  const label = "w-[62px] shrink-0 text-[11.5px] font-bold text-hint dark:text-[#8a8175]";
   return (
     <div className="mt-2 space-y-2 rounded-xl2 bg-panel/70 px-3 py-2.5 text-[12.5px] dark:bg-white/[0.04]">
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1.5">
-        <span className="w-[62px] shrink-0 text-[11px] font-bold uppercase tracking-wide text-hint dark:text-[#8a8175]">Price</span>
+        <span className={label}>Price</span>
         {priced.length === 0 ? (
           <span className="text-muted dark:text-[#a89f93]">No price set yet — ask the administration before it goes live.</span>
         ) : priced.map((p, i) => (
@@ -543,33 +933,33 @@ function Facts({ a, detail }: { a: ArticleFacts; detail: string | null }) {
       </div>
       {a.ads_budget != null && (
         <div className="flex flex-wrap items-baseline gap-x-2">
-          <span className="w-[62px] shrink-0 text-[11px] font-bold uppercase tracking-wide text-hint dark:text-[#8a8175]">Budget</span>
+          <span className={label}>Budget</span>
           <span className="font-semibold tabular-nums text-ink dark:text-[#f4f1ea]">{rs(a.ads_budget)}</span>
           <span className="text-muted dark:text-[#a89f93]">{basis}</span>
         </div>
       )}
       {a.final_name && (
         <div className="flex flex-wrap items-baseline gap-x-2">
-          <span className="w-[62px] shrink-0 text-[11px] font-bold uppercase tracking-wide text-hint dark:text-[#8a8175]">Name</span>
+          <span className={label}>Name</span>
           <span className="font-semibold text-ink dark:text-[#f4f1ea]">{a.final_name}</span>
         </div>
       )}
       {live && (
         <div className="flex gap-x-2">
-          <span className="w-[62px] shrink-0 pt-px text-[11px] font-bold uppercase tracking-wide text-hint dark:text-[#8a8175]">Brief</span>
+          <span className={`${label} pt-px`}>Brief</span>
           <p className="min-w-0 flex-1 whitespace-pre-line leading-relaxed text-ink dark:text-[#e7e2d8]">{live}</p>
         </div>
       )}
       {video && (
         <div className="flex gap-x-2">
-          <span className="w-[62px] shrink-0 pt-px text-[11px] font-bold uppercase tracking-wide text-[#2f7a3d] dark:text-[#8fd39a]">Video</span>
+          <span className="w-[62px] shrink-0 pt-px text-[11.5px] font-bold text-[#2f7a3d] dark:text-[#8fd39a]">Video</span>
           <p className="min-w-0 flex-1 whitespace-pre-line font-semibold leading-relaxed text-ink dark:text-[#f4f1ea]">{video}</p>
         </div>
       )}
       {showSnap && (
         <div className="flex gap-x-2">
-          <span className="w-[62px] shrink-0 pt-px text-[11px] font-bold uppercase leading-tight tracking-wide text-hint dark:text-[#8a8175]">
-            Earlier brief
+          <span className={`${label} pt-px leading-tight`}>
+            Earlier Brief
           </span>
           <p className="min-w-0 flex-1 whitespace-pre-line leading-relaxed text-muted dark:text-[#a89f93]">
             {snap}

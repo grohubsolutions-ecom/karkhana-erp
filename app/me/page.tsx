@@ -28,6 +28,9 @@ import MyPendingReturns from "@/components/MyPendingReturns";
 import FirstAttemptDesk from "@/components/FirstAttemptDesk";
 import HubSessionGuard from "@/components/HubSessionGuard";
 import HubBell from "@/components/HubBell";
+/* Headings are Title Case — every word starts with a capital (the owner,
+   5 Oct 2026). */
+import { tc } from "@/lib/titleCase";
 /* The Hub's phone rules (16px inputs so iPhones do not zoom, thumb-sized
    buttons, no sideways drift) apply here too — this is the page staff open on
    their phones. They are scoped to html.hub, switched on below. */
@@ -173,7 +176,7 @@ export default function MyPortal() {
       <div className="flex min-h-screen items-center justify-center bg-canvas p-6 dark:bg-[#17140f]">
         <div className="max-w-sm rounded-card border border-line bg-surface p-6 text-center dark:border-white/10 dark:bg-[#201c17]">
           <AlertTriangle size={22} className="mx-auto text-amber-600" />
-          <div className="mt-3 text-[15px] font-bold text-ink dark:text-[#f4f1ea]">Not linked yet</div>
+          <div className="mt-3 text-[15px] font-bold text-ink dark:text-[#f4f1ea]">Not Linked Yet</div>
           <p className="mt-1.5 text-[13px] text-muted dark:text-[#a89f93]">
             Your login is not attached to an employee record, so there is nothing to show.
             Ask whoever manages the department to link it.
@@ -204,11 +207,11 @@ export default function MyPortal() {
 
           <div className="flex items-start justify-between gap-4">
             <div className="min-w-0">
-              <div className="text-[11px] font-extrabold uppercase tracking-[0.16em] text-white/55">
-                {me.department ?? "Employee"}
+              <div className="text-[12.5px] font-bold tracking-wide text-white/60">
+                {tc(me.department) || "Employee"}
               </div>
               <h1 className="mt-1.5 truncate text-[26px] font-extrabold leading-none tracking-tight sm:text-[32px]">
-                {me.name}
+                {tc(me.name)}
               </h1>
               <p className="mt-1.5 text-[13px] text-white/60">
                 {me.designation ?? "—"} · {rs(me.salary)} a month
@@ -228,8 +231,8 @@ export default function MyPortal() {
 
           <div className="mt-6 flex flex-wrap items-end justify-between gap-x-6 gap-y-4">
             <div>
-              <div className="text-[11.5px] font-semibold uppercase tracking-wide text-white/55">
-                {isCurrent ? `Earned up to ${today.getDate()} ${MONTHS[month]}` : `Payable for ${MONTHS[month]}`}
+              <div className="text-[12.5px] font-semibold text-white/60">
+                {isCurrent ? `Earned Up To ${today.getDate()} ${MONTHS[month]}` : `Payable For ${MONTHS[month]}`}
               </div>
               <div className="mt-1 text-[42px] font-extrabold leading-none tabular-nums tracking-tight sm:text-[54px]">
                 {rs(pay?.payable ?? 0)}
@@ -283,8 +286,8 @@ export default function MyPortal() {
         <div role="tablist" aria-label="Your portal"
           className="mb-4 grid w-full grid-cols-2 gap-1 rounded-[24px] bg-panel p-1 [&>button:last-child:nth-child(odd)]:col-span-2 dark:bg-white/[0.06] sm:flex sm:w-max sm:rounded-full">
           {([...(canRescue ? [["attempt", "Delivery Under Review"] as const] : []),
-             ["work", "My work"] as const, ["pay", "Attendance & pay"] as const,
-             ...(canReturns ? [["returns", "Pending returns"] as const] : [])]).map(([key, label]) => (
+             ["work", "My Work"] as const, ["pay", "Attendance & Pay"] as const,
+             ...(canReturns ? [["returns", "Pending Returns"] as const] : [])]).map(([key, label]) => (
             <button key={key} role="tab" aria-selected={shown === key} onClick={() => setTab(key)}
               className={`h-11 min-w-0 flex-1 truncate rounded-full px-3 text-[13.5px] font-semibold transition sm:h-auto sm:flex-none sm:whitespace-nowrap sm:px-5 sm:py-2 sm:text-[13px] ${
                 shown === key ? "bg-ink text-white shadow-soft dark:bg-white dark:text-[#141414]"
@@ -295,7 +298,7 @@ export default function MyPortal() {
                   anything, so it is seen from the other tabs too. */}
               {key === "attempt"
                 ? <>
-                    <span className="sm:hidden">Under review</span><span className="hidden sm:inline">{label}</span>
+                    <span className="sm:hidden">Under Review</span><span className="hidden sm:inline">{label}</span>
                     {rescueCount != null && (
                       <span className={`ml-1.5 inline-block min-w-[20px] rounded-full px-1.5 text-center text-[11px] font-bold leading-[18px] tabular-nums ${
                         rescueCount > 0 ? "bg-[#E5786B] text-white"
@@ -341,7 +344,7 @@ export default function MyPortal() {
 
             <section className="overflow-hidden rounded-card border border-line bg-surface shadow-card dark:border-white/10 dark:bg-[#201c17]">
               <h2 className="border-b border-line px-4 py-3 text-[13px] font-bold text-ink dark:border-white/10 dark:text-[#f4f1ea] sm:px-5">
-                How this is worked out
+                How This Is Worked Out
               </h2>
               <dl className="text-[13px]">
                 <div className="flex items-baseline justify-between gap-4 border-b border-line px-4 py-2.5 dark:border-white/[0.06] sm:px-5">
@@ -388,7 +391,7 @@ export default function MyPortal() {
                 reader has to check and then discard. */}
             <section className="overflow-hidden rounded-card border border-line bg-surface shadow-card dark:border-white/10 dark:bg-[#201c17]">
               <h2 className="border-b border-line px-4 py-3 text-[13px] font-bold text-ink dark:border-white/10 dark:text-[#f4f1ea] sm:px-5">
-                The {pay?.counted_days ?? 0} days you are paid for
+                The {pay?.counted_days ?? 0} Days You Are Paid For
               </h2>
               <dl className="text-[13px]">
                 {([
@@ -431,7 +434,7 @@ export default function MyPortal() {
 
             <section className="rounded-card border border-line bg-surface p-4 shadow-card dark:border-white/10 dark:bg-[#201c17] sm:p-5">
               <h2 className="mb-3 flex items-center gap-2 text-[13px] font-bold text-ink dark:text-[#f4f1ea]">
-                <CalendarDays size={15} /> Your days in {MONTHS[month]}
+                <CalendarDays size={15} /> Your Days In {MONTHS[month]}
               </h2>
               <div className="grid grid-cols-7 gap-1 text-center sm:gap-1.5">
                 {["S", "M", "T", "W", "T", "F", "S"].map((d, i) => (
@@ -472,7 +475,7 @@ export default function MyPortal() {
 
             <section className="overflow-hidden rounded-card border border-line bg-surface shadow-card dark:border-white/10 dark:bg-[#201c17]">
               <h2 className="flex items-center gap-2 border-b border-line px-4 py-3 text-[13px] font-bold text-ink dark:border-white/10 dark:text-[#f4f1ea] sm:px-5">
-                <HandCoins size={15} /> Advances taken
+                <HandCoins size={15} /> Advances Taken
               </h2>
               {advs.length === 0 ? (
                 <p className="px-4 py-5 text-[13px] text-muted dark:text-[#a89f93] sm:px-5">

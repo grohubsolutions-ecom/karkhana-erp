@@ -89,7 +89,7 @@ export default function HubSessionGuard() {
         className="w-full rounded-t-card border border-line bg-surface p-5 pb-[calc(20px+env(safe-area-inset-bottom))] shadow-xl sm:max-w-md sm:rounded-card sm:pb-5 dark:border-white/[0.08] dark:bg-[#201c17]">
         <div className="flex items-center gap-2 text-red-700 dark:text-red-300">
           <AlertTriangle size={18} />
-          <h2 id="hub-signed-out-title" className="text-[17px] font-extrabold tracking-tight">You have been signed out</h2>
+          <h2 id="hub-signed-out-title" className="text-[17px] font-extrabold tracking-tight">You Have Been Signed Out</h2>
         </div>
         <p className="mt-2 text-[13.5px] leading-relaxed text-ink dark:text-[#f4f1ea]">
           Your sign-in to the ERP ended, so this page can no longer save anything — a button pressed now

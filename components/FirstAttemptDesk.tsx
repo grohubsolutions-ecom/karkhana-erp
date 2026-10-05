@@ -47,6 +47,9 @@ import {
 } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { Segmented, Sheet, Detail, useIsPhone, waNumber } from "@/components/HubUI";
+/* Headings are Title Case — every word starts with a capital (the owner,
+   5 Oct 2026). */
+import { tc } from "@/lib/titleCase";
 
 /* How a failed try left the desk. "desk" = it has not: it is on today's desk. */
 type LeftAs = "desk" | "reattempt" | "return" | "done" | "failed_again" | "delivered" | "returned"
@@ -820,14 +823,14 @@ export default function FirstAttemptDesk({ compact = false, onCount }: {
         <div className="mt-3 hidden xl:block">
           <div className="overflow-x-auto rounded-card border border-line bg-surface dark:border-white/[0.06] dark:bg-[#201c17]">
             <table className="w-full min-w-[760px] text-[13px]">
-              <thead className="bg-panel text-left text-[11px] uppercase tracking-wide text-muted dark:bg-white/[0.05] dark:text-[#a89f93]">
+              <thead className="bg-panel text-left text-[12px] text-muted dark:bg-white/[0.05] dark:text-[#a89f93]">
                 <tr>
                   <th className="w-10 px-3 py-2">
                     <input type="checkbox" checked={allPicked} onChange={toggleAll} aria-label="Pick every row"
                       ref={(el) => { if (el) el.indeterminate = pickedRows.length > 0 && !allPicked; }}
                       className="h-4 w-4 accent-[#141414] dark:accent-white" />
                   </th>
-                  {["Order", "Why it failed", "Amount", "Customer", "Customer no.", "Rider no.", "Decide"].map((h, i) => (
+                  {["Order", "Why It Failed", "Amount", "Customer", "Customer No.", "Rider No.", "Decide"].map((h, i) => (
                     <th key={h + i} className="whitespace-nowrap px-2 py-2 font-semibold">{h}</th>
                   ))}
                 </tr>
@@ -927,7 +930,7 @@ export default function FirstAttemptDesk({ compact = false, onCount }: {
         <section key={day} className="mt-4">
           <h3 className="flex items-baseline gap-2 px-1 text-[13px] font-bold text-ink dark:text-[#f4f1ea]">
             <History size={13} className="self-center text-muted dark:text-[#a89f93]" />
-            {day === "—" ? "No date" : dayName(day, hist.today)}
+            {day === "—" ? "No Date" : dayName(day, hist.today)}
             {day !== "—" && dayName(day, hist.today) !== dateOf(day, true) && (
               <span className="font-semibold text-muted dark:text-[#a89f93]">{dateOf(day, true)}</span>
             )}
@@ -1027,8 +1030,8 @@ export default function FirstAttemptDesk({ compact = false, onCount }: {
 function Stat({ label, value, sub, tone }: { label: string; value: string; sub: string; tone: string }) {
   return (
     <div className="rounded-card border border-line bg-surface p-3.5 dark:border-white/[0.06] dark:bg-[#201c17]">
-      <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted dark:text-[#a89f93]">
-        <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: tone }} />{label}
+      <div className="flex items-center gap-1.5 text-[12px] font-semibold text-muted dark:text-[#a89f93]">
+        <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: tone }} />{tc(label)}
       </div>
       <div className="mt-1 text-[22px] font-extrabold leading-none tabular-nums text-ink dark:text-[#f4f1ea]">{value}</div>
       <div className="mt-1 text-[11.5px] leading-snug text-muted dark:text-[#a89f93]">{sub}</div>
@@ -1073,7 +1076,7 @@ function ReturnDialog({ rows, err, busy, onClose, onConfirm }: {
   const courierSays = [...new Set(rows.map((r) => r.reason).filter(Boolean))] as string[];
   return (
     <Sheet open onClose={onClose}
-      title={one ? `Return ${one.order_number ?? one.tracking_id}?` : `Return ${rows.length} parcels?`}
+      title={one ? `Return ${one.order_number ?? one.tracking_id}?` : `Return ${rows.length} Parcels?`}
       subtitle="Say why it should come back. The reason is kept with the parcel in History."
       footer={
         <div className="grid grid-cols-2 gap-2">
@@ -1400,7 +1403,7 @@ function Block({ n, title, done, children }: { n: string; title: string; done: b
           ? "bg-success-soft text-[#2f7a3d]" : "bg-panel text-muted dark:bg-white/[0.07] dark:text-[#a89f93]"}`}>
           {done ? "✓" : n}
         </span>
-        {title}
+        {tc(title)}
       </h3>
       {children}
     </section>
