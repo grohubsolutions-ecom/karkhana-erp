@@ -26,6 +26,7 @@ import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import Modal, { btnPrimary, btnGhost, inputCls, Field } from "@/components/Modal";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { PageActions, useIsPhone } from "@/components/HubUI";
+import { todayPk } from "@/lib/dateRange";
 
 const BUSINESS_CODE = "HUB";
 
@@ -580,12 +581,19 @@ export default function HubEmployeesPage() {
                 old rate, so months already paid do not move. Blank means today.
               </p>
             </Field>
-            <Field label="Joined"><input type="date" className={inputCls} value={form.join_date}
+            {/* H289: this date decides the wage. Sundays and holidays before
+                it are not paid, so a man who starts on the 15th is not paid for
+                the two Sundays he was not here. Left empty, every Sunday of his
+                first month is paid. */}
+            <Field label="Joined" hint="Sundays before this date are not paid">
+              <input type="date" data-field="joined" className={inputCls} value={form.join_date} max={todayPk()}
                  onChange={(e) => setForm({ ...form, join_date: e.target.value })} />
-            <p className="mt-1 text-[11.5px] text-hint dark:text-[#8a8175]">
-              Leave blank unless they started this month. A join date stops Sundays
-              before it being paid.
-            </p></Field>
+              <p className="mt-1 text-[11.5px] text-hint dark:text-[#8a8175]">
+                The day they started. Sundays and holidays before it are not paid, so
+                somebody who starts on the 15th is not paid for the Sundays he was not
+                here. Blank means every Sunday of their first month is paid.
+              </p>
+            </Field>
         </div>
         <p className="mt-3 text-[12px] text-hint dark:text-[#8a8175]">
           A login is not created here. Adding someone to the payroll and giving them

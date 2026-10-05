@@ -38,6 +38,10 @@ import PaySalaryDialog, { type PayTarget } from "@/components/PaySalaryDialog";
 import GiveExtraDay from "@/components/GiveExtraDay";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { useIsPhone } from "@/components/HubUI";
+/* H289: what is missing about a person before anybody is paid — and the
+   joining date fixed from here, because that is the one that silently pays
+   Sundays somebody was not here for. */
+import StaffHealth from "@/components/StaffHealth";
 
 export type SummaryRow = {
   emp_id: string; name: string; designation: string | null; salary: number;
@@ -201,7 +205,7 @@ export default function MonthlySummary({ department = "HUB" }: { department?: st
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div className="flex w-full items-end justify-between gap-3 sm:w-auto">
           <div>
-            <h2 className="text-[16px] font-bold text-ink dark:text-[#f4f1ea]">Monthly summary</h2>
+            <h2 className="text-[16px] font-bold text-ink dark:text-[#f4f1ea]">Monthly Summary</h2>
             <p className="text-[12.5px] text-muted dark:text-[#a89f93]">Days, advances &amp; payable salary</p>
           </div>
           {/* "Give extra day" at the top — on a phone beside the title, on a
@@ -223,6 +227,8 @@ export default function MonthlySummary({ department = "HUB" }: { department?: st
           </button>
         </div>
       </div>
+
+      <StaffHealth onChanged={load} />
 
       {err && (
         <div className="mt-3 flex gap-2 rounded-card border border-red-300 bg-red-50 p-3 text-[13px] text-red-800">
