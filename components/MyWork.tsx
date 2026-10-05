@@ -1,8 +1,9 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  ClipboardList, ClipboardCheck, CornerUpLeft, CheckCircle2, CheckSquare, ChevronDown, Clock3, Loader2, Flag, Rocket, X,
+  ClipboardList, ClipboardCheck, CornerUpLeft, CheckCircle2, CheckSquare, ChevronDown, Clock3, Loader2, Flag, Rocket, X, Plus, Send, CalendarDays,
 } from "lucide-react";
+import { todayPk } from "@/lib/dateRange";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { tc } from "@/lib/titleCase";
 
@@ -103,6 +104,12 @@ type Step = {
 };
 type Checkpoint = { article_id: string; task_id: string; waiting_for: string[]; steps: Step[] };
 
+/* H290: the Custom task form in Qaswar's work — the people he can send to, and
+   what he fills in. */
+type Person = { id: string; name: string; designation: string | null };
+type CustomForm = { assignee: string; article: string; inventory: string; name: string; details: string; deadline: string };
+const EMPTY_FORM: CustomForm = { assignee: "", article: "", inventory: "", name: "", details: "", deadline: "" };
+
 /* H288: where each of my articles stands (hub_my_progress), and the ticks. */
 type Platform = "instagram" | "facebook" | "tiktok";
 const PLATFORMS: { key: Platform; name: string }[] = [
@@ -165,6 +172,12 @@ export default function MyWork() {
   const [flash, setFlash] = useState<Flash | null>(null);
   const [glow, setGlow] = useState<string | null>(null);
   const flashRef = useRef<HTMLDivElement | null>(null);
+  /* H290: the custom-task people (empty unless the caller may send tasks —
+     Qaswar or an admin), the open form, and what it says after a send. */
+  const [people, setPeople] = useState<Person[]>([]);
+  const [customOpen, setCustomOpen] = useState(false);
+  const [form, setForm] = useState<CustomForm>(EMPTY_FORM);
+  const [sentMsg, setSentMsg] = useState("");
 
   /* Only the newest reply is drawn: an older load that lands late must not
      paint yesterday's buttons over the fresh ones. */
@@ -172,13 +185,18 @@ export default function MyWork() {
   const load = useCallback(async () => {
     if (!isSupabaseConfigured || !supabase) { setLoading(false); return; }
     const my = ++reqId.current;
-    const [{ data, error }, arts, cp, pr] = await Promise.all([
+    const [{ data, error }, arts, cp, pr, ppl] = await Promise.all([
       supabase.rpc("hub_my_work"),
       supabase.rpc("hub_my_articles"),
       supabase.rpc("hub_my_checkpoints"),
       supabase.rpc("hub_my_progress"),
+      supabase.rpc("hub_custom_task_people"),
     ]);
     if (my !== reqId.current) return;
+    /* H290: the dropdown for the Custom task button. Empty unless the caller
+       may send tasks (Qaswar or an admin), so the button only appears for them.
+       A missing function (migration not run) just leaves the button off. */
+    if (!ppl.error) setPeople((ppl.data as Person[]) ?? []);
     if (error) setErr(error.message);
     setRows((data as Task[]) ?? []);
     /* A missing function (migration not run yet) must not take the work list
@@ -251,6 +269,26 @@ export default function MyWork() {
     const ok = await run(`${t.task_id}:${stage}`, "hub_task_checkpoint",
       { p_task_id: t.task_id, p_stage: stage, p_note: sbNote.trim() || null });
     if (ok) { setSb(null); setSbNote(""); }
+  }
+
+  /* H290: send a custom task. On success the form closes and a line names who
+     got it; a refusal (no details, past deadline, …) is read back by run(). */
+  async function sendCustom() {
+    if (!supabase) return;
+    setBusy("custom"); setErr(""); setSentMsg("");
+    const { data, error } = await supabase.rpc("hub_create_custom_task", {
+      p_assignee: form.assignee || null,
+      p_article_name: form.article.trim() || null,
+      p_inventory_code: form.inventory.trim() || null,
+      p_name: form.name.trim() || null,
+      p_details: form.details.trim() || null,
+      p_deadline: form.deadline || null,
+    });
+    const res = data as { ok?: boolean; error?: string; person?: string } | null;
+    if (error) { setBusy(null); setErr(error.message); return; }
+    if (res && res.ok === false) { setBusy(null); setErr(res.error ?? "Refused."); return; }
+    setBusy(null); setCustomOpen(false); setForm(EMPTY_FORM);
+    setSentMsg(`Task sent to ${res?.person ?? "them"}.`);
   }
 
   async function goLive(t: Task) {
@@ -328,7 +366,7 @@ export default function MyWork() {
 
   return (
     <section className="overflow-hidden rounded-card border border-line bg-surface shadow-card dark:border-white/10 dark:bg-[#201c17]">
-      <h2 className="flex items-center gap-2 border-b border-line px-4 py-3 text-[13px] font-bold text-ink dark:border-white/10 dark:text-[#f4f1ea] sm:px-5">
+      <h2 className="flex flex-wrap items-center gap-2 border-b border-line px-4 py-3 text-[13px] font-bold text-ink dark:border-white/10 dark:text-[#f4f1ea] sm:px-5">
         <ClipboardList size={15} /> Your Work
         {actionable.length > 0 && (
           <span className="rounded-full bg-periwinkle-soft px-2 py-0.5 text-[11px] font-bold text-periwinkle-strong dark:bg-white/[0.10] dark:text-periwinkle">
@@ -340,14 +378,37 @@ export default function MyWork() {
             {open.length - actionable.length} coming
           </span>
         )}
+        {/* H290: the Custom task button — only for whoever may send tasks
+            (Qaswar or an admin), i.e. only when the people list came back. */}
+        {people.length > 0 && (
+          <button onClick={() => { setCustomOpen((v) => !v); setErr(""); setSentMsg(""); }}
+            className={`ml-auto flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[12px] font-semibold transition ${customOpen
+              ? "bg-ink text-white dark:bg-white dark:text-[#141414]"
+              : "border border-line text-ink hover:bg-panel dark:border-white/15 dark:text-white dark:hover:bg-white/[0.06]"}`}>
+            <Plus size={13} /> Custom task
+          </button>
+        )}
       </h2>
 
       {err && <p className="border-b border-line bg-danger-soft px-4 py-2.5 text-[12.5px] font-medium text-danger dark:border-white/10 sm:px-5">{err}</p>}
+      {sentMsg && (
+        <p className="flex items-center gap-2 border-b border-line bg-success-soft/60 px-4 py-2.5 text-[12.5px] font-medium text-[#2f7a3d] dark:border-white/10 dark:bg-white/[0.04] dark:text-[#8fd39a] sm:px-5">
+          <CheckCircle2 size={14} className="shrink-0" /> {sentMsg}
+          <button onClick={() => setSentMsg("")} aria-label="Dismiss" className="ml-auto shrink-0 opacity-60 hover:opacity-100"><X size={14} /></button>
+        </p>
+      )}
+      {customOpen && people.length > 0 && (
+        <CustomTaskForm people={people} form={form} setForm={setForm} busy={busy === "custom"}
+          onSend={sendCustom} onClose={() => { setCustomOpen(false); setForm(EMPTY_FORM); }} />
+      )}
 
+      {/* H290: the articles sit in a tray with a real gap between them, each its
+          own card, instead of one block split by hairlines. */}
+      <div className="space-y-3 bg-panel/40 p-3 dark:bg-white/[0.02] sm:p-4">
       {open.length === 0 ? (<>
         {banner}
         {!flash && (
-          <p className="px-4 py-5 text-[13px] text-muted dark:text-[#a89f93] sm:px-5">
+          <p className="px-1 py-4 text-center text-[13px] text-muted dark:text-[#a89f93]">
             Nothing waiting on you right now.
           </p>
         )}
@@ -357,7 +418,9 @@ export default function MyWork() {
            the database enforces the rule either way. */
         const isAds = t.stage === "ads" && !!t.article_id;
         const isSocial = t.stage === "social" && !!t.article_id;
-        const cp = isAds ? cps[t.task_id] : undefined;
+        /* H290: product, video and social get the checkpoint panel too, not
+           only ads — each sends back the other finished steps. */
+        const cp = cps[t.task_id];
         const p = t.article_id ? prog[t.article_id] : undefined;
         const waitingFor = cp?.waiting_for ?? [];
         const ready = waitingFor.length === 0;
@@ -367,11 +430,11 @@ export default function MyWork() {
         const socialWho = firstName(cp?.steps.find((s) => s.stage === "social")?.person ?? "Awais");
         const notTicked = p ? PLATFORMS.filter((pl) => !p.posts[pl.key]).map((pl) => pl.name) : [];
         const last = idx === open.length - 1;
-        return (<div key={t.task_id}>
+        return (<div key={t.task_id} className="space-y-3">
         {bannerAbove === t.task_id && banner}
         <div id={`task-${t.task_id}`} data-code={t.code ?? undefined} tabIndex={-1}
-          className={`border-line px-4 py-4 outline-none transition-colors dark:border-white/[0.06] sm:px-5 ${last && !trailingBanner ? "" : "border-b"} ${
-            glow === t.task_id ? "bg-periwinkle-soft/40 ring-2 ring-inset ring-periwinkle-strong dark:bg-white/[0.05]" : ""}`}>
+          className={`rounded-2xl border bg-surface px-4 py-4 shadow-sm outline-none transition-colors dark:bg-[#211d17] sm:px-5 ${
+            glow === t.task_id ? "border-periwinkle-strong ring-2 ring-inset ring-periwinkle-strong bg-periwinkle-soft/30 dark:bg-white/[0.05]" : "border-line dark:border-white/[0.07]"}`}>
           <div className="flex flex-wrap items-baseline justify-between gap-2">
             <div className="min-w-0">
               <span className="text-[14px] font-bold text-ink dark:text-[#f4f1ea]">{tc(t.title)}</span>
@@ -429,9 +492,10 @@ export default function MyWork() {
             <Comments list={facts[t.article_id].comments!} />
           )}
 
-          {isAds && cp && cp.steps.length > 0 && (
-            /* CHECKPOINTS (H286). Every earlier step, who did it and when, and a
-               Send back on each finished one. The note is optional. */
+          {cp && cp.steps.length > 0 && (
+            /* CHECKPOINTS (H286 ads; H290 product/video/social too). Every other
+               step, who did it and when, and a Send back on each finished one.
+               The note is optional. */
             <div className="mt-3 overflow-hidden rounded-xl2 border border-line dark:border-white/10">
               <div className="flex items-center gap-1.5 border-b border-line bg-panel/60 px-3 py-2 text-[12px] font-bold text-muted dark:border-white/10 dark:bg-white/[0.03] dark:text-[#a89f93]">
                 <Flag size={12} className="shrink-0" /> Checkpoints · Send A Step Back
@@ -598,9 +662,10 @@ export default function MyWork() {
         </div>);
       })}
       {open.length > 0 && trailingBanner && banner}
+      </div>
 
       {done.length > 0 && (
-        <div className={`border-line bg-panel/60 px-4 py-3 dark:border-white/[0.06] dark:bg-white/[0.03] sm:px-5 ${trailingBanner ? "" : "border-t"}`}>
+        <div className="border-t border-line bg-panel/60 px-4 py-3 dark:border-white/[0.06] dark:bg-white/[0.03] sm:px-5">
           <div className="mb-2 text-[12px] font-bold text-muted dark:text-[#a89f93]">Recently Submitted</div>
           <ul className="space-y-2">
             {done.map((t) => {
@@ -611,7 +676,12 @@ export default function MyWork() {
               <li key={t.task_id} className="text-[12.5px]">
                 <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
                   <CheckCircle2 size={12} className="shrink-0 self-center text-success" />
-                  <span className="font-semibold text-ink dark:text-[#e7e2d8]">{t.code ?? "Task"}</span>
+                  {/* H290: the article NAME next to the code, not just "A-1010".
+                      A custom task has no code, so its own name is the label. */}
+                  <span className="font-semibold text-ink dark:text-[#e7e2d8]">{t.code ?? tc(t.title) ?? "Task"}</span>
+                  {t.code && t.article_name && (
+                    <span className="min-w-0 max-w-full truncate font-medium text-ink/75 dark:text-[#cfc8bd]">{tc(t.article_name)}</span>
+                  )}
                   {/* An ads card is closed by Live; with no final comment there is
                       no note to show, so say what happened instead. */}
                   <span className="min-w-0 flex-1 truncate text-muted dark:text-[#a89f93]">
@@ -649,6 +719,76 @@ export default function MyWork() {
         </div>
       )}
     </section>
+  );
+}
+
+/* THE CUSTOM TASK FORM (H290) — Qaswar picks a person and sends them a job
+   that is not one of the five article steps: an article name, an inventory
+   code, a short name, the details, and a deadline. It lands in that person's
+   "Your work" like any other task. */
+function CustomTaskForm({ people, form, setForm, busy, onSend, onClose }: {
+  people: Person[]; form: CustomForm; setForm: (f: CustomForm) => void;
+  busy: boolean; onSend: () => void; onClose: () => void;
+}) {
+  const set = (k: keyof CustomForm) => (e: { target: { value: string } }) => setForm({ ...form, [k]: e.target.value });
+  const box = "w-full rounded-xl2 border border-line bg-canvas px-3 py-2 text-[16px] sm:text-[13px] text-ink outline-none placeholder:text-hint dark:border-white/10 dark:bg-white/[0.04] dark:text-[#f4f1ea]";
+  const cap = "block text-[12px] font-semibold text-ink dark:text-[#e7e2d8]";
+  const ready = !!form.assignee && !!form.details.trim();
+  return (
+    <div className="border-b border-line bg-panel/50 px-4 py-4 dark:border-white/10 dark:bg-white/[0.03] sm:px-5">
+      <div className="mb-3 flex items-center gap-2 text-[13px] font-bold text-ink dark:text-[#f4f1ea]">
+        <Send size={14} className="shrink-0" /> Send A Custom Task
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <label className="sm:col-span-2">
+          <span className={cap}>Who is it for?</span>
+          <select value={form.assignee} onChange={set("assignee")} className={`mt-1 ${box}`}>
+            <option value="">Pick an employee…</option>
+            {people.map((p) => (
+              <option key={p.id} value={p.id}>{p.name}{p.designation ? ` — ${p.designation}` : ""}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span className={cap}>Article name</span>
+          <input value={form.article} onChange={set("article")} placeholder="e.g. Winter Hoodie" className={`mt-1 ${box}`} />
+        </label>
+        <label>
+          <span className={cap}>Inventory code</span>
+          <input value={form.inventory} onChange={set("inventory")} placeholder="e.g. INV-5567" className={`mt-1 ${box}`} />
+        </label>
+        <label className="sm:col-span-2">
+          <span className={cap}>Name</span>
+          <input value={form.name} onChange={set("name")} placeholder="A short name for the task" className={`mt-1 ${box}`} />
+        </label>
+        <label className="sm:col-span-2">
+          <span className={cap}>Required data <span className="font-normal text-hint dark:text-[#8a8175]">— what has to be done</span></span>
+          <textarea value={form.details} onChange={set("details")} rows={3}
+            placeholder="Describe the scenario and exactly what you need back."
+            className={`mt-1 min-h-[88px] ${box}`} />
+        </label>
+        <label>
+          <span className={cap}>Deadline <span className="font-normal text-hint dark:text-[#8a8175]">(optional)</span></span>
+          <div className="relative mt-1">
+            <CalendarDays size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-hint" />
+            <input type="date" value={form.deadline} min={todayPk()} onChange={set("deadline")} className={`${box} pl-9`} />
+          </div>
+        </label>
+      </div>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <button disabled={busy || !ready} onClick={onSend}
+          className="flex items-center gap-1.5 rounded-full bg-[#2f7a3d] px-4 py-2 text-[12.5px] font-semibold text-white disabled:opacity-40 dark:bg-[#8fd39a] dark:text-[#141414]">
+          <Send size={13} /> {busy ? "Sending…" : "Send task"}
+        </button>
+        <button disabled={busy} onClick={onClose}
+          className="rounded-full border border-line px-4 py-2 text-[12.5px] font-semibold text-ink dark:border-white/15 dark:text-white">
+          Cancel
+        </button>
+        <span className="text-[11.5px] text-hint dark:text-[#8a8175]">
+          It goes straight to that person&rsquo;s work, with your name on it.
+        </span>
+      </div>
+    </div>
   );
 }
 
@@ -815,7 +955,7 @@ function DoneBanner({ f, p, next, onJump, onClose, boxRef }: {
     : "The next step opens by itself — you will be told if it comes back to you.";
   return (
     <div ref={boxRef} role="status"
-      className="border-b border-line bg-success-soft/60 px-4 py-3 last:border-b-0 dark:border-white/[0.06] dark:bg-white/[0.04] sm:px-5">
+      className="rounded-2xl border border-[#2f7a3d]/30 bg-success-soft/70 px-4 py-3 shadow-sm dark:border-[#8fd39a]/25 dark:bg-white/[0.05] sm:px-5">
       <div className="flex items-start gap-2.5">
         <span className="mt-0.5 shrink-0 text-[#2f7a3d] dark:text-[#8fd39a]">
           {f.kind === "live" ? <Rocket size={16} /> : f.kind === "sent_back" ? <CornerUpLeft size={16} /> : <CheckCircle2 size={16} />}

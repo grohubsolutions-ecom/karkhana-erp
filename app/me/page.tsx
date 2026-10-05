@@ -28,6 +28,7 @@ import MyPendingReturns from "@/components/MyPendingReturns";
 import FirstAttemptDesk from "@/components/FirstAttemptDesk";
 import HubSessionGuard from "@/components/HubSessionGuard";
 import HubBell from "@/components/HubBell";
+import PushToggle from "@/components/PushToggle";
 /* Headings are Title Case — every word starts with a capital (the owner,
    5 Oct 2026). */
 import { tc } from "@/lib/titleCase";
@@ -221,6 +222,8 @@ export default function MyPortal() {
                 looking when the page opens. Work assigned to them is the one
                 thing here that is time-sensitive; their wages are not. */}
             <div className="flex shrink-0 items-center gap-2">
+              {/* H290: ring this phone when a bell notification arrives. */}
+              <PushToggle dark />
               <HubBell dark size="lg" />
               <button onClick={signOut} aria-label="Sign out"
                       className="flex h-11 w-11 items-center justify-center rounded-full border border-white/20 text-white/70 transition hover:bg-white/10 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white">
