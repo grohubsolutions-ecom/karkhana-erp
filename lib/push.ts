@@ -68,7 +68,9 @@ export async function enablePush(): Promise<{ state: PushState; error?: string }
     if (!sub) {
       sub = await reg.pushManager.subscribe({
         userVisibleOnly: true,
-        applicationServerKey: urlB64ToUint8Array(VAPID),
+        /* Uint8Array is a valid applicationServerKey at runtime; the cast is
+           only to satisfy the DOM BufferSource typing across TS lib versions. */
+        applicationServerKey: urlB64ToUint8Array(VAPID) as unknown as BufferSource,
       });
     }
     const j = sub.toJSON();
