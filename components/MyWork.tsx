@@ -185,6 +185,12 @@ export default function MyWork() {
   /* H292: each article card can be minimized to just its header, so a long
      list is easy to scroll. Kept per card in memory. */
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  /* H293: the product owner (Hamza Mukhtar) or an admin can start an article
+     from here. The button shows only for them. */
+  const [canArticle, setCanArticle] = useState(false);
+  const [articleOpen, setArticleOpen] = useState(false);
+  const [artName, setArtName] = useState("");
+  const [artBrief, setArtBrief] = useState("");
 
   /* Only the newest reply is drawn: an older load that lands late must not
      paint yesterday's buttons over the fresh ones. */
@@ -192,14 +198,17 @@ export default function MyWork() {
   const load = useCallback(async () => {
     if (!isSupabaseConfigured || !supabase) { setLoading(false); return; }
     const my = ++reqId.current;
-    const [{ data, error }, arts, cp, pr, ppl] = await Promise.all([
+    const [{ data, error }, arts, cp, pr, ppl, mk] = await Promise.all([
       supabase.rpc("hub_my_work"),
       supabase.rpc("hub_my_articles"),
       supabase.rpc("hub_my_checkpoints"),
       supabase.rpc("hub_my_progress"),
       supabase.rpc("hub_custom_task_people"),
+      supabase.rpc("hub_can_make_article"),
     ]);
     if (my !== reqId.current) return;
+    /* H293: show the "New article" button only to whoever may start one. */
+    if (!mk.error) setCanArticle(mk.data === true);
     /* H290: the dropdown for the Custom task button. Empty unless the caller
        may send tasks (Qaswar or an admin), so the button only appears for them.
        A missing function (migration not run) just leaves the button off. */
@@ -276,6 +285,22 @@ export default function MyWork() {
     const ok = await run(`${t.task_id}:${stage}`, "hub_task_checkpoint",
       { p_task_id: t.task_id, p_stage: stage, p_note: sbNote.trim() || null });
     if (ok) { setSb(null); setSbNote(""); }
+  }
+
+  /* H293: start a new article (product owner / admin). Name required; cost,
+     price and budget are left for the administration. */
+  async function createArticle() {
+    if (!supabase) return;
+    setBusy("article"); setErr(""); setSentMsg("");
+    const { data, error } = await supabase.rpc("hub_article_create_own",
+      { p_rough_name: artName.trim() || null, p_brief: artBrief.trim() || null });
+    const res = data as { ok?: boolean; error?: string; code?: string } | null;
+    if (error) { setBusy(null); setErr(error.message); return; }
+    if (res && res.ok === false) { setBusy(null); setErr(res.error ?? "Refused."); return; }
+    setArticleOpen(false); setArtName(""); setArtBrief("");
+    setSentMsg(`${res?.code ?? "Article"} created — it is now in your work.`);
+    await load();
+    setBusy(null);
   }
 
   /* H290: send a custom task. On success the form closes and a line names who
@@ -407,11 +432,20 @@ export default function MyWork() {
             {open.length - actionable.length} coming
           </span>
         )}
-        {/* H290: the Custom task button — only for whoever may send tasks
-            (Qaswar or an admin), i.e. only when the people list came back. */}
+        {/* H293: New article — the product owner (Hamza Mukhtar) or an admin.
+            H290: Custom task — Qaswar or an admin. The first button present
+            takes the ml-auto so the group sits at the right. */}
+        {canArticle && (
+          <button onClick={() => { setArticleOpen((v) => !v); setCustomOpen(false); setErr(""); setSentMsg(""); }}
+            className={`ml-auto flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[12px] font-semibold transition ${articleOpen
+              ? "bg-ink text-white dark:bg-white dark:text-[#141414]"
+              : "border border-line text-ink hover:bg-panel dark:border-white/15 dark:text-white dark:hover:bg-white/[0.06]"}`}>
+            <Plus size={13} /> New article
+          </button>
+        )}
         {people.length > 0 && (
-          <button onClick={() => { setCustomOpen((v) => !v); setErr(""); setSentMsg(""); }}
-            className={`ml-auto flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[12px] font-semibold transition ${customOpen
+          <button onClick={() => { setCustomOpen((v) => !v); setArticleOpen(false); setErr(""); setSentMsg(""); }}
+            className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[12px] font-semibold transition ${canArticle ? "" : "ml-auto"} ${customOpen
               ? "bg-ink text-white dark:bg-white dark:text-[#141414]"
               : "border border-line text-ink hover:bg-panel dark:border-white/15 dark:text-white dark:hover:bg-white/[0.06]"}`}>
             <Plus size={13} /> Custom task
@@ -429,6 +463,11 @@ export default function MyWork() {
       {customOpen && people.length > 0 && (
         <CustomTaskForm people={people} form={form} setForm={setForm} busy={busy === "custom"}
           onSend={sendCustom} onClose={() => { setCustomOpen(false); setForm(EMPTY_FORM); }} />
+      )}
+      {articleOpen && canArticle && (
+        <NewArticleForm name={artName} brief={artBrief} setName={setArtName} setBrief={setArtBrief}
+          busy={busy === "article"} onCreate={createArticle}
+          onClose={() => { setArticleOpen(false); setArtName(""); setArtBrief(""); }} />
       )}
 
       {/* H290/H291: the articles sit in a tray with a clear gap between them,
@@ -781,6 +820,48 @@ export default function MyWork() {
         </div>
       )}
     </section>
+  );
+}
+
+/* NEW ARTICLE (H293) — the product owner starts an article with just a name
+   and an optional brief. The cost, price and ad budget stay for the office. */
+function NewArticleForm({ name, brief, setName, setBrief, busy, onCreate, onClose }: {
+  name: string; brief: string; setName: (v: string) => void; setBrief: (v: string) => void;
+  busy: boolean; onCreate: () => void; onClose: () => void;
+}) {
+  const box = "w-full rounded-xl2 border border-line bg-canvas px-3 py-2 text-[16px] sm:text-[13px] text-ink outline-none placeholder:text-hint dark:border-white/10 dark:bg-white/[0.04] dark:text-[#f4f1ea]";
+  const cap = "block text-[12px] font-semibold text-ink dark:text-[#e7e2d8]";
+  return (
+    <div className="border-b border-line bg-panel/50 px-4 py-4 dark:border-white/10 dark:bg-white/[0.03] sm:px-5">
+      <div className="mb-3 flex items-center gap-2 text-[13px] font-bold text-ink dark:text-[#f4f1ea]">
+        <Plus size={14} className="shrink-0" /> Start A New Article
+      </div>
+      <div className="space-y-3">
+        <label className="block">
+          <span className={cap}>Article name</span>
+          <input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Boys Denim Jacket"
+            onKeyDown={(e) => { if (e.key === "Enter" && name.trim() && !busy) onCreate(); }} className={`mt-1 ${box}`} />
+        </label>
+        <label className="block">
+          <span className={cap}>Brief <span className="font-normal text-hint dark:text-[#8a8175]">(optional)</span></span>
+          <textarea value={brief} onChange={(e) => setBrief(e.target.value)} rows={2}
+            placeholder="Anything to note for the shoot / upload." className={`mt-1 min-h-[64px] ${box}`} />
+        </label>
+      </div>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <button disabled={busy || !name.trim()} onClick={onCreate}
+          className="flex items-center gap-1.5 rounded-full bg-ink px-4 py-2 text-[12.5px] font-semibold text-white disabled:opacity-40 dark:bg-white dark:text-[#141414]">
+          <Plus size={13} /> {busy ? "Creating…" : "Create article"}
+        </button>
+        <button disabled={busy} onClick={onClose}
+          className="rounded-full border border-line px-4 py-2 text-[12.5px] font-semibold text-ink dark:border-white/15 dark:text-white">
+          Cancel
+        </button>
+        <span className="text-[11.5px] text-hint dark:text-[#8a8175]">
+          It opens with you on Product, plus Video and the quality check. The office sets the price and budget.
+        </span>
+      </div>
+    </div>
   );
 }
 
