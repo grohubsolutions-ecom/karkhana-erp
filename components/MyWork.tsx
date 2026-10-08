@@ -1,7 +1,7 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  ClipboardList, ClipboardCheck, CornerUpLeft, CheckCircle2, CheckSquare, ChevronDown, Clock3, Loader2, Flag, Rocket, X, Plus, Send, CalendarDays,
+  ClipboardList, ClipboardCheck, CornerUpLeft, CheckCircle2, CheckSquare, ChevronDown, Clock3, Loader2, Flag, Rocket, X, Plus, Send, CalendarDays, UserCheck,
 } from "lucide-react";
 import { todayPk } from "@/lib/dateRange";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
@@ -164,6 +164,9 @@ export default function MyWork() {
   const [facts, setFacts] = useState<Record<string, ArticleFacts>>({});
   const [cps, setCps] = useState<Record<string, Checkpoint>>({});
   const [prog, setProg] = useState<Record<string, Progress>>({});
+  /* H294: task_id -> the name of the person this card is being covered for
+     (e.g. Awais covering Hamza Khan). Only set on cover cards. */
+  const [covers, setCovers] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [note, setNote] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
@@ -198,15 +201,19 @@ export default function MyWork() {
   const load = useCallback(async () => {
     if (!isSupabaseConfigured || !supabase) { setLoading(false); return; }
     const my = ++reqId.current;
-    const [{ data, error }, arts, cp, pr, ppl, mk] = await Promise.all([
+    const [{ data, error }, arts, cp, pr, ppl, mk, cv] = await Promise.all([
       supabase.rpc("hub_my_work"),
       supabase.rpc("hub_my_articles"),
       supabase.rpc("hub_my_checkpoints"),
       supabase.rpc("hub_my_progress"),
       supabase.rpc("hub_custom_task_people"),
       supabase.rpc("hub_can_make_article"),
+      supabase.rpc("hub_my_covers"),
     ]);
     if (my !== reqId.current) return;
+    /* H294: which of the work cards are someone else's, covered by this person.
+       A missing function (migration not run) just leaves every card as their own. */
+    if (!cv.error) setCovers((cv.data as Record<string, string>) ?? {});
     /* H293: show the "New article" button only to whoever may start one. */
     if (!mk.error) setCanArticle(mk.data === true);
     /* H290: the dropdown for the Custom task button. Empty unless the caller
@@ -516,6 +523,14 @@ export default function MyWork() {
                 </span>
               </div>
               <div className="mt-0.5 text-[12px] font-semibold text-muted dark:text-[#a89f93]">{tc(t.title)}</div>
+              {/* H294: a card that belongs to someone this person is covering for
+                  (e.g. Awais standing in for Hamza Khan). Finishing it records
+                  "done by <me> for <them>" and tells them. */}
+              {covers[t.task_id] && (
+                <div className="mt-1.5 inline-flex items-center gap-1 rounded-full bg-periwinkle-soft px-2 py-0.5 text-[11px] font-bold text-periwinkle-strong dark:bg-white/[0.08] dark:text-periwinkle">
+                  <UserCheck size={11} className="shrink-0" /> Covering for {covers[t.task_id]}
+                </div>
+              )}
             </div>
             {/* The status chip, and the minimize arrow (H292). While he is
                 waiting, no clock is shown — the days belong to the man making
