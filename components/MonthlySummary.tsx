@@ -183,8 +183,9 @@ export default function MonthlySummary({ department = "HUB" }: { department?: st
     given: a.given + Number(r.given_days ?? 0),
     advances: a.advances + Number(r.advance_cut ?? r.advances),
     carried: a.carried + Number(r.carried ?? 0),
+    earned: a.earned + Number(r.gross),
     payable: a.payable + Number(r.payable),
-  }), { present: 0, half: 0, absent: 0, lost: 0, given: 0, advances: 0, carried: 0, payable: 0 });
+  }), { present: 0, half: 0, absent: 0, lost: 0, given: 0, advances: 0, carried: 0, earned: 0, payable: 0 });
 
   const isCurrentMonth = year === today.getFullYear() && month === today.getMonth() + 1;
   const stale = rowsKey !== key;
@@ -255,7 +256,12 @@ export default function MonthlySummary({ department = "HUB" }: { department?: st
                   <div className="truncate text-[12px] text-muted dark:text-[#a89f93]">{r.designation ? `${r.designation} · ` : ""}{rs(r.salary)} a month</div>
                 </button>
                 <div className="shrink-0 text-right">
-                  <div className="text-[15px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">{rs(r.payable)}</div>
+                  {/* Earned = the full wage before anything is cut; payable is
+                      what is left after advances (and absent days, which simply
+                      are not earned). Both shown so the gap is never a mystery. */}
+                  <div className="text-[13px] font-semibold tabular-nums text-ink dark:text-[#e7e2d8]">{rs(r.gross)}</div>
+                  <div className="text-[11px] text-muted dark:text-[#a89f93]">earned</div>
+                  <div className="mt-1 text-[15px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">{rs(r.payable)}</div>
                   <div className="text-[11px] text-muted dark:text-[#a89f93]">payable</div>
                 </div>
               </div>
@@ -285,7 +291,8 @@ export default function MonthlySummary({ department = "HUB" }: { department?: st
           ))}
           {!stale && rows.length > 0 && (
             <div className="rounded-xl2 bg-panel px-4 py-3 text-[12.5px] tabular-nums dark:bg-white/[0.05]">
-              <div className="flex justify-between text-[14px] font-extrabold text-ink dark:text-[#f4f1ea]"><span>Total payable</span><span>{rs(t.payable)}</span></div>
+              <div className="flex justify-between text-[13px] font-semibold text-muted dark:text-[#a89f93]"><span>Total earned</span><span className="tabular-nums">{rs(t.earned)}</span></div>
+              <div className="mt-0.5 flex justify-between text-[14px] font-extrabold text-ink dark:text-[#f4f1ea]"><span>Total payable</span><span>{rs(t.payable)}</span></div>
               <div className="mt-1 text-muted dark:text-[#a89f93]">
                 {t.present} present · {t.half} half · {t.absent} absent (− {rs(t.lost)}){t.given > 0 ? ` · +${dayCount(t.given)} extra` : ""} · advances {rs(t.advances)}
                 {t.carried > 0 ? ` · ${rs(t.carried)} carried to ${nextShort}` : ""}
@@ -307,6 +314,7 @@ export default function MonthlySummary({ department = "HUB" }: { department?: st
               <th className="px-3 py-3 text-right font-semibold">Paid off</th>
               <th className="px-3 py-3 text-right font-semibold text-emerald-700">Extra day</th>
               <th className="px-3 py-3 text-right font-semibold">Counted</th>
+              <th className="px-3 py-3 text-right font-semibold">Earned</th>
               <th className="px-3 py-3 text-right font-semibold">Advance</th>
               <th className="px-3 py-3 text-right font-semibold">Payable</th>
               <th className="px-3 py-3 text-right font-semibold">Paid</th>
@@ -314,11 +322,11 @@ export default function MonthlySummary({ department = "HUB" }: { department?: st
           </thead>
           <tbody className="divide-y divide-line dark:divide-white/[0.05]">
             {stale ? (
-              <tr><td colSpan={12} className="px-3 py-10 text-center text-muted">
+              <tr><td colSpan={13} className="px-3 py-10 text-center text-muted">
                 <Loader2 size={15} className="mr-2 inline animate-spin" /> Loading…
               </td></tr>
             ) : rows.length === 0 ? (
-              <tr><td colSpan={12} className="px-3 py-14 text-center text-[13px] text-muted dark:text-[#a89f93]">
+              <tr><td colSpan={13} className="px-3 py-14 text-center text-[13px] text-muted dark:text-[#a89f93]">
                 Nobody in this department for {MONTHS[month]} {year}.
               </td></tr>
             ) : rows.map((r) => (
@@ -353,6 +361,9 @@ export default function MonthlySummary({ department = "HUB" }: { department?: st
                     : <span className="text-hint dark:text-[#6f675d]">—</span>}
                 </td>
                 <td className="px-3 py-3 text-right font-semibold tabular-nums">{dayCount(r.counted_days)}</td>
+                {/* Earned = the full wage for the counted days, before the
+                    advance is taken off. Payable is what is left. */}
+                <td className="px-3 py-3 text-right tabular-nums">{rs(r.gross)}</td>
                 <td className="px-3 py-3 text-right tabular-nums text-muted dark:text-[#a89f93]">
                   {Number(r.advance_cut) ? rs(r.advance_cut) : "—"}
                   {Number(r.carried) > 0 && (
@@ -391,6 +402,7 @@ export default function MonthlySummary({ department = "HUB" }: { department?: st
                 <td />
                 <td className="px-3 py-3 text-right tabular-nums text-emerald-700">{t.given > 0 ? `+${dayCount(t.given)}` : ""}</td>
                 <td />
+                <td className="px-3 py-3 text-right tabular-nums font-semibold">{rs(t.earned)}</td>
                 <td className="px-3 py-3 text-right tabular-nums">
                   {rs(t.advances)}
                   {t.carried > 0 && <div className="text-[11px] text-amber-700">+{rs(t.carried)} → {nextShort}</div>}
