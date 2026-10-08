@@ -238,8 +238,19 @@ export default function MyPortal() {
                 {isCurrent ? `Earned Up To ${today.getDate()} ${MONTHS[month]}` : `Payable For ${MONTHS[month]}`}
               </div>
               <div className="mt-1 text-[42px] font-extrabold leading-none tabular-nums tracking-tight sm:text-[54px]">
-                {rs(pay?.payable ?? 0)}
+                {rs(isCurrent ? gross : (pay?.payable ?? 0))}
               </div>
+              {/* Earned and payable are a pair: the big figure matches the label
+                  above (earned this month, or payable for a past month), and the
+                  small one is its mate — shown only when they differ, i.e. when
+                  an advance or an absent day sits between the two. */}
+              {Number(pay?.payable ?? 0) !== gross && (
+                <div className="mt-1 text-[12.5px] font-semibold text-white/55 tabular-nums">
+                  {isCurrent
+                    ? `To be paid after advances: ${rs(pay?.payable ?? 0)}`
+                    : `Earned: ${rs(gross)}`}
+                </div>
+              )}
             </div>
 
             <div className="flex items-center gap-2">
