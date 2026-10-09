@@ -332,23 +332,41 @@ export default function NonCashPage() {
        The .or() rather than a plain .neq('cash') is because `neq` drops NULLs
        in SQL, and a line with no payment_method at all is precisely the kind
        of row this screen is supposed to surface. */
-    const { rows, error } = await fetchAll<Row>((lo, hi) => {
-      let q = db.from("retail_sale_lines")
-        .select("branch_id,payment_method,sales_amount")
-        .or("payment_method.neq.cash,payment_method.is.null");
-      if (from) q = q.gte("sale_date", from);
-      if (to) q = q.lte("sale_date", to);
-      if (branch) q = q.eq("branch_id", Number(branch));
-      return q.order("id", { ascending: true }).range(lo, hi);
+    /* THIS SCREEN ONLY EVER WANTED SUMS, so the database does them now.
+       Reading the lines was one of the four statements that was timing out
+       (measured 7,406 ms worst). retail_sales_agg groups by branch and method
+       and returns about fifty rows instead of tens of thousands — same
+       arithmetic, done where the rows are.
+
+       `cash` is dropped here rather than in the query because the point of this
+       screen is the NON-cash mix. The old `.or(neq.cash, is.null)` existed
+       because SQL's `neq` drops NULLs and a line with no method at all is
+       exactly what this screen surfaces; grouping keeps the null group, so
+       filtering on the result keeps that behaviour without the filter. */
+    const { data, error } = await db.rpc("retail_sales_agg", {
+      p_from: from, p_to: to,
+      p_branch: branch ? Number(branch) : null,
+      p_by: ["branch_id", "payment_method"],
     });
-    if (error) setErrMix(error);
-    setMix(rows);
+    if (error) { setErrMix(error.message); setMix([]); setLoadingMix(false); return; }
+    const agg = ((data as Row[]) ?? [])
+      .filter((r) => String(r.payment_method ?? "") !== "cash")
+      .map((r) => ({ branch_id: r.branch_id, payment_method: r.payment_method,
+                     sales_amount: r.sales, lines: r.lines })) as Row[];
+    setMix(agg);
     setLoadingMix(false);
   }, [preset, cf, ct, branch]);
   useEffect(() => { loadMix(); }, [loadMix]);
 
-  /* Aggregated in the browser rather than by a view, because the line grain is
-     what makes a drill-down possible later and a view would throw it away. */
+  /* The rows arriving here are already one per (branch, method) — the database
+     grouped them, because reading the lines to do it in the browser was one of
+     the four statements that was timing out. The reduce stays because null and
+     '' both mean "unclassified" and come back as separate groups, exactly as
+     they did as separate lines, so they still have to be merged into one.
+
+     `lines` is TAKEN FROM THE ROW, not counted as one per row. Each row is a
+     group now, so `+= 1` would have reported every method as a single line and
+     the "lines" figure beside each shop would read 1 for a thousand sales. */
   const agg: Agg[] = useMemo(() => {
     const map = new Map<string, Agg>();
     mix.forEach((r) => {
@@ -358,7 +376,8 @@ export default function NonCashPage() {
       /* sales_amount only — see the note at the top of this file. */
       const amt = num(r.sales_amount);
       const cur = map.get(k) ?? { branch_id: bid, method: m, amount: 0, lines: 0 };
-      cur.amount += amt; cur.lines += 1;
+      cur.amount += amt;
+      cur.lines += r.lines === undefined ? 1 : num(r.lines);
       map.set(k, cur);
     });
     return [...map.values()].sort((a, b) => b.amount - a.amount);

@@ -56,7 +56,7 @@ import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import Modal, { Field, inputCls, btnPrimary, btnGhost } from "@/components/Modal";
 import {
   Shell, PageHeader, StatCards, DataTable, Tabs, Pill, Select, PreviewNote, SourceNote,
-  money, num, text, today, addDays, fetchAll, commBonus,
+  money, num, text, today, addDays, fetchAll, fetchKeyset, commBonus,
   useIsPhone, RowCard,
   type CommCfg, type Row, type Col,
 } from "@/components/retail/kit";
@@ -259,9 +259,16 @@ export default function CommissionsPage() {
        skipped line underpays them, and both look like a plausible number on a
        payout sheet. `id` is unique, so ordering on it makes the sequence of
        pages one stable list. */
-    const { rows, error } = await fetchAll<Row>((lo, hi) => db.from("retail_sale_lines")
-      .select("branch_id,sale_date,item_code,quantity,sales_amount,receipt_txn")
-      .gte("sale_date", from).lte("sale_date", qTo).order("id").range(lo, hi));
+    /* KEYSET, NOT OFFSET. This exact query was the slowest statement in the
+       whole project: measured 7,563 ms worst / 4,639 ms mean against an 8-second
+       statement timeout, because OFFSET reads and discards every row it skips and
+       page 55 of 59 discarded 56,000 of them. Asking for "the next 1,000 after
+       id N" costs 8 ms a page instead of 307, and stays flat as the table grows.
+       `id` is selected because it IS the cursor. */
+    const { rows, error } = await fetchKeyset<Row>((afterId) => db.from("retail_sale_lines")
+      .select("id,branch_id,sale_date,item_code,quantity,sales_amount,receipt_txn")
+      .gte("sale_date", from).lte("sale_date", qTo)
+      .gt("id", afterId).order("id", { ascending: true }).limit(1000));
     if (error) setErr(error);
     setLines(rows);
     setLoading(false);

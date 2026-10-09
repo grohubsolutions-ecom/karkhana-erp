@@ -259,6 +259,66 @@ export async function fetchAll<T = Row>(
   return { rows: out, error: "", truncated: true };
 }
 
+/* ── KEYSET PAGING — THE FIX FOR THE STATEMENT TIMEOUTS ──────────────────────
+ *
+ * `fetchAll` above pages with PostgREST's `.range(lo, hi)`, which is
+ * LIMIT/OFFSET. That is fine for a few thousand rows and quietly catastrophic
+ * after that, because OFFSET does not skip rows — it READS them and throws them
+ * away. Measured on the live database at 58,303 sale lines:
+ *
+ *     one page at offset 55,000   307 ms   (scans and discards 56,000 rows)
+ *     the same page by key          8 ms   (index range scan, 1,000 rows read)
+ *
+ * and the cost of reading a whole range is the SUM of every page, so it grows
+ * with the square of the table: about 1.7 million row visits to return 58,000
+ * rows. Under real load those 307 ms became 7,563 ms — against the 8-second
+ * statement timeout Supabase sets on the `authenticated` role. That is the
+ * "canceling statement due to statement timeout" the shops started seeing, and
+ * why it got worse every single day.
+ *
+ * Keyset paging asks for "the next 1,000 rows after id N" instead of "rows
+ * 55,000 to 56,000". The primary key takes it straight to the right place, so
+ * every page costs the same as the first one however large the table gets.
+ *
+ * WHAT A CALLER MUST DO
+ *   Order by `id` ascending ONLY, and apply no other sort. A keyset cursor is
+ *   the sort order — ordering by something else and then paging on `id` is not
+ *   keyset paging, it is a different query per page. Sort the finished rows in
+ *   JavaScript if the screen needs a different order; by then they are in memory
+ *   and it is free.
+ *
+ * WHY THIS IS ALSO SAFER THAN WHAT IT REPLACES
+ *   OFFSET paging over a table that is being appended to can return a row twice
+ *   or skip it entirely — the offsets shift under you mid-read. On the
+ *   commissions screen those rows ARE somebody's payout. A cursor on a unique,
+ *   ever-increasing id cannot do either.
+ */
+export async function fetchKeyset<T = Row>(
+  build: (afterId: number) => PromiseLike<{ data: unknown; error: { message: string } | null }>,
+  step = 1000,
+  hardCap = 500000
+): Promise<{ rows: T[]; error: string; truncated: boolean }> {
+  const out: T[] = [];
+  let after = 0;
+  while (out.length < hardCap) {
+    const { data, error } = await build(after);
+    if (error) return { rows: out, error: error.message, truncated: false };
+    const got = (data as T[]) ?? [];
+    out.push(...got);
+    if (got.length < step) return { rows: out, error: "", truncated: false };
+    /* The cursor is the last row's id, so the caller MUST select `id`. A page
+       that comes back without one would loop for ever on the same rows, so this
+       stops instead and says the read is incomplete. */
+    const last = got[got.length - 1] as unknown as { id?: number };
+    const nextId = Number(last?.id);
+    if (!Number.isFinite(nextId) || nextId <= after) {
+      return { rows: out, error: "", truncated: true };
+    }
+    after = nextId;
+  }
+  return { rows: out, error: "", truncated: true };
+}
+
 type QueryBuilder = { select: (cols: string) => unknown };
 
 /** The fetch-with-loading-and-error dance every screen repeats.

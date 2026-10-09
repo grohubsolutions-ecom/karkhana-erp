@@ -43,7 +43,7 @@ import {
   RetailRange,
   Shell, PageHeader, StatCards, DataTable, Tabs, Pill, Select, PreviewNote, SourceNote,
   RowCard, Sheet, Detail, useIsPhone,
-  useBranches, money, moneyOrDash, num, text, today, fetchAll,
+  useBranches, money, moneyOrDash, num, text, today, fetchAll, fetchKeyset,
   CARD_RATE_PCT, cardExpected, crTol, CR_AGE_DAYS,
   type Row, type Col,
 } from "@/components/retail/kit";
@@ -483,11 +483,17 @@ export default function CardReconPage() {
        imports while somebody is reading it. `id` after `sale_date` makes the
        order total. The visible ordering is unchanged; it is only the tie that
        was undefined before. */
-    const { rows: saleRows, error: se, truncated: saleCut } = await fetchAll<Row>((a, b) =>
-      db.from("retail_sale_lines").select("branch_id,sale_date,sales_amount")
+    /* Keyset, and ordered by `id` ALONE. The previous version ordered by
+       sale_date then id and paged with OFFSET — which made every page a fresh
+       sort of the whole range, and was one of the four reads timing out. A
+       keyset cursor IS the sort order, so a second sort key cannot be mixed in;
+       these rows are summed per shop-day afterwards, so their arrival order
+       never mattered. */
+    const { rows: saleRows, error: se, truncated: saleCut } = await fetchKeyset<Row>((afterId) =>
+      db.from("retail_sale_lines").select("id,branch_id,sale_date,sales_amount")
         .eq("payment_method", "meezan_card")
         .gte("sale_date", from).lte("sale_date", to)
-        .order("sale_date").order("id").range(a, b));
+        .gt("id", afterId).order("id", { ascending: true }).limit(1000));
 
     /* THE CREDIT WINDOW IS WIDER THAN THE SALES WINDOW, by lag + roll + 4 days.
        Sales on the last day of the range settle after the last day of the range.

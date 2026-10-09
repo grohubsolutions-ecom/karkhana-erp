@@ -81,7 +81,7 @@ import Modal, { Field, inputCls, btnPrimary, btnGhost } from "@/components/Modal
 import {
   Shell, PageHeader, StatCards, DataTable, Pill, Select, PreviewNote, SourceNote,
   CardList, RowCard, useIsPhone,
-  useBranches, money, moneyOrDash, num, text, today, iso, fetchAll, Diff,
+  useBranches, money, moneyOrDash, num, text, today, iso, fetchAll, fetchKeyset, Diff,
   type Row, type Col,
 } from "@/components/retail/kit";
 
@@ -134,7 +134,7 @@ type Book = {
   updated_at?: string | null;
 };
 
-type SaleLine = { sale_date: string; sales: number | null; sales_amount: number | null; payment_method: string | null; quantity: number | null };
+type SaleLine = { id?: number; sale_date: string; sales: number | null; sales_amount: number | null; payment_method: string | null; quantity: number | null };
 type ExpLine = { expense_date: string; amount: number | null; txn_type: string | null; category: string | null };
 
 /** What Nimbus reported for a day, before any manual override. */
@@ -328,11 +328,15 @@ export default function CashBookPage() {
        lines here is a wrong cash position that looks entirely plausible, so
        this pages. Ordered by id because an unordered .range() may repeat or
        skip rows across pages. */
-    const { rows: sales, error: salesErr } = await fetchAll<SaleLine>((f, t) =>
+    /* Keyset rather than OFFSET: see fetchKeyset in the kit. One shop over 399
+       days is small enough today (measured 10 ms a page) but it grows every day,
+       and OFFSET paging grows with the square of the table — this one stays
+       flat. `id` is selected because it is the cursor. */
+    const { rows: sales, error: salesErr } = await fetchKeyset<SaleLine>((afterId) =>
       supabase!.from("retail_sale_lines")
-        .select("sale_date,sales,sales_amount,payment_method,quantity")
+        .select("id,sale_date,sales,sales_amount,payment_method,quantity")
         .eq("branch_id", bid).gte("sale_date", from).lte("sale_date", to)
-        .order("id", { ascending: true }).range(f, t)
+        .gt("id", afterId).order("id", { ascending: true }).limit(1000)
     );
 
     /* A partial load is not shown. Half a chain reads exactly like a whole one

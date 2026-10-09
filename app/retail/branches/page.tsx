@@ -306,12 +306,28 @@ export default function BranchesPage() {
   }
 
   async function save() {
+    /* THREE OF THESE COLUMNS ARE NOT NULL IN THE DATABASE.
+       `code`, `chain` and `business` are all `text not null` on retail_branches,
+       and this form was sending `trim() || null` for each of them — so leaving
+       any one blank produced a raw Postgres string in the error box:
+       "null value in column \"code\" of relation \"retail_branches\" violates
+       not-null constraint". Nobody adding a shop can act on that. The rule is
+       checked here, in words, before anything is sent.
+
+       Code is asked for rather than generated: it is the short name that goes on
+       reports and that people say out loud, and a code this screen invented would
+       be the one nobody recognises. */
     if (!form.name.trim()) { setErr("A branch name is required."); return; }
+    if (!editing) {
+      if (!form.code.trim()) { setErr("A short code is required — it is how this shop is named everywhere else. Something like TS01 or FC02."); return; }
+      if (!form.business.trim()) { setErr("Business is required — what this shop sells. Garments, cosmetics, and so on."); return; }
+    }
+    if (!form.chain.trim()) { setErr("Chain is required — which group this shop belongs to, like Top Shop or Fashion Collection."); return; }
     if (!supabase) { setErr("Not connected."); return; }
     setSaving(true); setErr("");
     const payload = {
       name: form.name.trim(),
-      chain: form.chain.trim() || null,
+      chain: form.chain.trim(),
       color: form.color || null,
       /* Normalised on the way in, NULL when blank — see the note at the top.
          The importer matches normStore(file) against this value. */
@@ -325,11 +341,24 @@ export default function BranchesPage() {
       ? await supabase.from("retail_branches").update(payload).eq("id", editing.id)
       : await supabase.from("retail_branches").insert({
           ...payload,
-          code: form.code.trim() || null,
-          business: form.business.trim() || null,
+          code: form.code.trim(),
+          business: form.business.trim(),
         });
     setSaving(false);
-    if (error) { setErr(error.message); return; }
+    if (error) {
+      /* A duplicate code is the one database rejection a person can actually fix,
+         so it gets said in words. Anything else still shows the real message —
+         inventing a friendly sentence for an unknown fault just hides it. */
+      const m = error.message || "";
+      if (m.includes("retail_branches_code_key") || (m.includes("duplicate key") && m.includes("code"))) {
+        setErr(`The code ${form.code.trim().toUpperCase()} is already used by another shop. Codes have to be unique — try adding a number.`);
+      } else if (m.includes("not-null constraint")) {
+        setErr("Name, code, chain and business all have to be filled in.");
+      } else {
+        setErr(m);
+      }
+      return;
+    }
     setOpen(false); load();
   }
 
@@ -541,7 +570,7 @@ export default function BranchesPage() {
           {/* One column on a phone. Two 165px fields side by side with a 16px
               font is two fields you cannot read what you typed into. */}
           <div className="grid grid-cols-2 gap-3 max-md:grid-cols-1">
-            <Field label="Chain">
+            <Field label="Chain (required)">
               {/* A list of what already exists, and still typeable: a new chain
                   is a real thing, and a fixed two-item dropdown would rewrite
                   the chain of anything that is neither. */}
@@ -573,8 +602,8 @@ export default function BranchesPage() {
           )}
           {!editing && (
             <div className="grid grid-cols-2 gap-3 max-md:grid-cols-1">
-              <Field label="Code"><input value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} className={inputCls} placeholder="short code" autoCapitalize="characters" autoCorrect="off" spellCheck={false} /></Field>
-              <Field label="Business">
+              <Field label="Code (required)"><input value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} className={inputCls} placeholder="short code" autoCapitalize="characters" autoCorrect="off" spellCheck={false} /></Field>
+              <Field label="Business (required)">
                 <input value={form.business} onChange={(e) => setForm({ ...form, business: e.target.value })} list="rt-branch-biz" className={inputCls} />
                 <datalist id="rt-branch-biz">{businesses.map((x) => <option key={x} value={x} />)}</datalist>
               </Field>
