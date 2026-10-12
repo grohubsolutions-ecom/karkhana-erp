@@ -46,7 +46,7 @@ export default function OnlineLayout({ children }: { children: React.ReactNode }
   }, [menu]);
 
   return (
-    <div className="min-h-[100dvh] bg-canvas md:flex md:h-[100dvh] md:overflow-hidden dark:bg-[#17140f]">
+    <div className="min-h-[100dvh] bg-canvas md:fixed md:inset-0 md:flex md:h-[100dvh] md:overflow-hidden dark:bg-[#17140f]">
       <SidebarTab open={menu} onOpen={() => setMenu(true)} />
       <OnlineSidebar open={menu} onClose={() => setMenu(false)} />
       <div className="flex min-w-0 flex-1 flex-col">
