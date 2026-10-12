@@ -46,6 +46,7 @@ import {
   useBranches, money, moneyOrDash, num, today, addDays, unitForBranch,
   type Branch,
 } from "@/components/retail/kit";
+import { useScopedBranchId } from "@/lib/retailShop";
 import { shopSummary, shareOrCopy, dayLabel } from "@/lib/retailShare";
 
 /* ── the shape retail_day_summary returns ─────────────────────────────────── */
@@ -103,7 +104,9 @@ export default function RetailDayClose() {
     [branches],
   );
 
-  const [bid, setBid] = useState("");
+  /* THE SHOP, shared with the left menu — see lib/retailShop.ts. Head Office
+     is excluded from the pool because it has no till to close. */
+  const { id: bid, list: pickable, set: setBid } = useScopedBranchId(branches, shops);
   const [date, setDate] = useState(() => addDays(today(), -1));
   const [d, setD] = useState<DaySummary | null>(null);
   const [loading, setLoading] = useState(false);
@@ -113,7 +116,6 @@ export default function RetailDayClose() {
 
   /* First shop, once the list arrives. A screen that opens on "choose a shop"
      costs a tap every single evening. */
-  useEffect(() => { if (!bid && shops.length) setBid(String(shops[0].id)); }, [bid, shops]);
 
   const branch: Branch | undefined = shops.find((b) => String(b.id) === bid);
 
@@ -255,7 +257,7 @@ export default function RetailDayClose() {
         onRefresh={load} loading={loading}
       >
         <Select value={bid} onChange={setBid} className="max-md:w-full">
-          {shops.map((b) => <option key={b.id} value={String(b.id)}>{b.name}</option>)}
+          {pickable.map((b) => <option key={b.id} value={String(b.id)}>{b.name}</option>)}
         </Select>
       </PageHeader>
 

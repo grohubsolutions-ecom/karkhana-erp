@@ -26,7 +26,7 @@ import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { btnPrimary, btnGhost } from "@/components/Modal";
 import {
   Shell, PageHeader, DataTable, Pill, Select, PreviewNote, SourceNote,
-  money, unitForBranch, useIsPhone, type Col,
+  money, unitForBranch, useIsPhone, useBranches, type Col,
 } from "@/components/retail/kit";
 import {
   parseCsvRows, detectKind, KIND_LABEL, normStore, withLineHashes,
@@ -55,7 +55,9 @@ type ImportResult = {
 export default function ImportPage() {
   const phone = useIsPhone();
   const fileRef = useRef<HTMLInputElement>(null);
-  const [branches, setBranches] = useState<Branch[]>([]);
+  /* The shared branch cache, which now carries nimbus_name for this screen —
+     rather than this screen fetching the same nine rows again on every mount. */
+  const { branches } = useBranches();
   const [fileName, setFileName] = useState("");
   const [rows, setRows] = useState<string[][]>([]);
   const [kind, setKind] = useState<NimbusKind>("unknown");
@@ -88,12 +90,6 @@ export default function ImportPage() {
   function addResult(r: Omit<ImportResult, "file" | "kind">) {
     setResults((prev) => [{ file: fileName, kind, ...r }, ...prev]);
   }
-
-  useEffect(() => {
-    if (!isSupabaseConfigured || !supabase) return;
-    supabase.from("retail_branches").select("id,name,chain,nimbus_name").order("name")
-      .then(({ data }) => setBranches((data as Branch[]) ?? []));
-  }, []);
 
   const resolveBranch = useCallback((ns: string): number | null => {
     const b = branches.find((x) => x.nimbus_name && normStore(x.nimbus_name) === ns);

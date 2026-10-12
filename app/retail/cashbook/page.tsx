@@ -84,6 +84,7 @@ import {
   useBranches, money, moneyOrDash, num, text, today, iso, fetchAll, fetchKeyset, Diff,
   type Row, type Col,
 } from "@/components/retail/kit";
+import { useScopedBranchId } from "@/lib/retailShop";
 
 /* ── what each number is, in words ───────────────────────────────────────────
  * Ported from CB_FIELDS. A total nobody can explain is a total nobody trusts,
@@ -271,7 +272,13 @@ const TD = "px-2.5 py-2 text-right tabular-nums whitespace-nowrap";
 export default function CashBookPage() {
   const { branches } = useBranches();
   const phone = useIsPhone();
-  const [bid, setBid] = useState<number | null>(null);
+  /* THE SHOP, shared with the left menu. A cash book is one shop's cash
+     drawer, so this screen takes the shop's single branch — and when the shop
+     is Top Shop (six drawers, no combined answer) the dropdown narrows to its
+     six and opens on the first. */
+  const { id: bidStr, list: pickable, shop } = useScopedBranchId(branches);
+  const bid = bidStr ? Number(bidStr) : null;
+  const setBid = shop.set;
 
   const [days, setDays] = useState<Day[]>([]);
   const [basePrev, setBasePrev] = useState(0);
@@ -284,15 +291,11 @@ export default function CashBookPage() {
   const [dayRow, setDayRow] = useState<CBRow | null>(null);
   const [hiCol, setHiCol] = useState<number | null>(null);
 
-  /* Land on a shop as soon as there is one, and never sit on a shop that has
-     gone from the list. Inactive shops are kept: a closed branch still has a
-     cash book worth reading back. */
-  useEffect(() => {
-    if (!branches.length) return;
-    setBid((cur) => (cur && branches.some((b) => b.id === cur) ? cur : branches[0].id));
-  }, [branches]);
-
-  const chains = useMemo(() => [...new Set(branches.map((b) => b.chain ?? "").filter(Boolean))], [branches]);
+  /* Landing on the first shop is now useScopedBranchId's job, and it also
+     stops this sitting on a shop that has gone from the list. Inactive shops
+     stay pickable: a closed branch still has a cash book worth reading back. */
+  const chains = useMemo(
+    () => [...new Set(pickable.map((b) => b.chain ?? "").filter(Boolean))], [pickable]);
 
   const load = useCallback(async () => {
     if (!isSupabaseConfigured || !supabase || !bid) { setLoading(false); return; }
@@ -496,14 +499,14 @@ export default function CashBookPage() {
         {/* `max-md:py-2.5` only: the phone CSS forces every select to 16px to stop
             iOS zooming the page, and 16px in a py-2 pill is a 35px control — under
             the department's 40px floor for a thumb. Inert from 768px up. */}
-        <Select className="max-md:py-2.5" value={bid ? String(bid) : ""} onChange={(v) => setBid(v ? Number(v) : null)}>
+        <Select className="max-md:py-2.5" value={bidStr} onChange={setBid}>
           {chains.length > 1
             ? chains.map((ch) => (
                 <optgroup key={ch} label={ch}>
-                  {branches.filter((b) => (b.chain ?? "") === ch).map((b) => <option key={b.id} value={String(b.id)}>{b.name}</option>)}
+                  {pickable.filter((b) => (b.chain ?? "") === ch).map((b) => <option key={b.id} value={String(b.id)}>{b.name}</option>)}
                 </optgroup>
               ))
-            : branches.map((b) => <option key={b.id} value={String(b.id)}>{b.name}</option>)}
+            : pickable.map((b) => <option key={b.id} value={String(b.id)}>{b.name}</option>)}
         </Select>
       </PageHeader>
 

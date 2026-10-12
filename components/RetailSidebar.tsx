@@ -1,65 +1,114 @@
 "use client";
-/* THE FS TRADERS MENU — computer and tablet only.
+/* THE FS TRADERS MENU — computer and tablet. The phone has its own, in
+ * components/retail/RetailPhoneChrome.tsx.
  *
- * The menu itself is unchanged: same items, same order, same names as the old
- * app. Somebody who has been running these nine shops for two years knows where
- * "Non-cash" is and what it holds; renaming it to something tidier would be an
- * improvement to nobody. The list now lives in components/retail/retailNav.ts so
- * the phone bars and this panel cannot drift apart — that is how a screen ends
- * up reachable on a computer and invisible on a phone.
+ * ────────────────────────────────────────────────────────────────────────────
+ * SHOPS AT THE TOP, SCREENS UNDERNEATH. The old app's shape, restored.
  *
- * WHERE IT SHOWS
- *   ≥ 1024px   permanent 248px panel, exactly as before.
- *   768–1023   a drawer: hidden until the arrow tab is pressed. 248 out of 768
- *              leaves 520px for the work, which is not enough for the Cash Book.
- *   < 768px    not rendered at all — the phone has its own bars.
+ *   Dashboard
+ *
+ *   SHOPS
+ *   › Top Shop          →  Sales · Import · Expenses · Non-cash · Cash Book
+ *                          Commissions · Day Close · Employee ▸
+ *   › FC Paragon        →  the same, for that shop
+ *   › FC DHA
+ *   …
+ *
+ *   › Head Office       →  Daily cash flow · End of day · Employee ▸
+ *
+ *   MANAGE
+ *   Card Reconciliation · Bank Statements · Salary · Branches
+ *
+ * The first port of this department had it the other way round: the seven
+ * screens at the top level with a branch dropdown on each. Same data, same
+ * figures — and wrong, because it asks you to re-state which shop you mean
+ * every time you move. Nobody thinks "cash book, which shop again". They think
+ * "FC DHA" and then spend ten minutes inside FC DHA. The shop is the context;
+ * the screen is what you are doing to it. That is why this reads as the old app
+ * did, down to the accordion closing one shop when you open another.
+ *
+ * WHAT THE MENU DOES BEYOND NAVIGATE: choosing anything under a shop sets the
+ * selected shop (lib/retailShop.ts), and every shop screen starts from that.
+ * So Top Shop → Cash Book → Expenses stays in Top Shop, with no second picker
+ * to set. Head Office and the Manage screens clear it, because they are not
+ * about one shop.
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { Store, ArrowLeft, LogOut, ChevronDown } from "lucide-react";
+import { Store, ArrowLeft, LogOut, ChevronRight, Users } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { usePermissions } from "@/lib/usePermissions";
 import { ROUTE_PERMS } from "@/lib/access";
 import ThemeToggle from "@/components/ThemeToggle";
-import { useIsHandheldWide } from "@/components/retail/kit";
+import { useIsHandheldWide, useBranches, useUnclassifiedCount } from "@/components/retail/kit";
 import { RetailHideMenu } from "@/components/retail/RetailPhoneChrome";
-import { visibleNav, isActive, type NavItem } from "@/components/retail/retailNav";
+import {
+  SHOP_SCREENS, SHOP_STAFF, HO_SCREENS, HO_STAFF, MANAGE, DASHBOARD, HEAD_OFFICE,
+  navShops, isActive, visible, type NavLeaf,
+} from "@/components/retail/retailNav";
+import { useShopKey, setShopKey, shopCovers } from "@/lib/retailShop";
 
 export default function RetailSidebar({ open, onClose }: { open?: boolean; onClose?: () => void }) {
   const pathname = usePathname();
   const router = useRouter();
   const { ready, can } = usePermissions();
   const handheldWide = useIsHandheldWide();
+  const { branches } = useBranches();
+  const shopKey = useShopKey();
 
-  /* Opened by hand wins; otherwise a group opens because you are standing in
-     it. The arrow is a button that owns this state, so pressing it toggles
-     rather than navigating. */
-  const [manual, setManual] = useState<Record<string, boolean>>({});
+  const shops = navShops(branches);
+  const inHO = pathname.startsWith("/retail/ho");
 
-  /* THE MENU SHOWS ONLY WHAT THE PERSON CAN OPEN.
-     Until 0119 this department had a single permission, so this filter had
-     nothing to filter on and every line showed for everybody. Now the shop
-     accounts person sees Expenses and Cash Book and does not see Bank
-     Statements, which is the arrangement that was always intended.
+  /* WHICH ACCORDION IS OPEN. One at a time, as before: a nine-shop menu with
+     every shop expanded is 90 lines and a scrollbar. `null` means all closed;
+     'ho' is Head Office. Seeded from where you are standing, so arriving on a
+     shop screen from a link opens that shop rather than showing a closed list
+     with no indication of where you are. */
+  const [openKey, setOpenKey] = useState<string | null>(null);
+  useEffect(() => {
+    if (inHO) { setOpenKey("ho"); return; }
+    /* The covering shop, not the raw key: a Top Shop branch chosen on a screen
+       is stored as 'b7', and it is Top Shop's menu entry that should open. */
+    const owner = shops.find((s) => shopCovers(s, shopKey));
+    if (owner) setOpenKey(owner.key);
+    /* eslint-disable-next-line react-hooks/exhaustive-deps */
+  }, [inHO, shopKey, branches.length]);
 
-     A group vanishes when none of its children survive: "Head Office" pointing
-     at nothing is a heading that lies. */
-  const visible: NavItem[] = visibleNav(can, ROUTE_PERMS);
+  /* THE SCREENS THIS PERSON MAY OPEN. Until the permission work this was a
+     no-op filter and every line showed for everybody; now the shop accounts
+     person sees Expenses and Cash Book and not Bank Statements. A shop with no
+     surviving screen is dropped from the list entirely — an entry that expands
+     to nothing is worse than no entry. */
+  const shopScreens = visible(SHOP_SCREENS, can, ROUTE_PERMS);
+  const shopStaff   = visible(SHOP_STAFF,   can, ROUTE_PERMS);
+  const hoScreens   = visible(HO_SCREENS,   can, ROUTE_PERMS);
+  const hoStaff     = visible(HO_STAFF,     can, ROUTE_PERMS);
+  const manage      = visible(MANAGE,       can, ROUTE_PERMS);
+  const canDash     = can(ROUTE_PERMS[DASHBOARD.href] ?? null);
+
+  /* The badge only makes sense to somebody who can open the screen it points
+     at, and asking for the count otherwise would just be a 403 in the console. */
+  const unc = useUnclassifiedCount(shopScreens.some((l) => l.href === "/retail/payments"));
 
   async function logout() { if (supabase) await supabase.auth.signOut(); router.replace("/login"); }
 
+  /** Pressing a shop's name: select it and go to its first screen. The old app
+   *  landed on Sales; if this person cannot see Sales it lands on whatever of
+   *  their screens comes first rather than on a page that will bounce them. */
+  function openShop(key: string) {
+    setShopKey(key);
+    setOpenKey(key);
+    if (shopScreens.length) router.push(shopScreens[0].href);
+  }
+
   /* A drawer that is off-screen must not be reachable by Tab, or the first
-     press of Tab on a tablet lands in a menu nobody can see. Only applied in
-     the 768–1023 band — below that the panel is `hidden` (which already does
-     this) and above it the panel is always on screen. */
+     press of Tab on a tablet lands in a menu nobody can see. Only in the
+     768–1023 band: below it the panel is `hidden`, above it always visible. */
   const hiddenDrawer = handheldWide && !open;
 
   return (
     <>
-      {/* Backdrop, in the tablet band only and only while open. The phone never
-          renders the drawer, so it never needs this; the computer never hides
-          the menu, so it never needs it either. */}
       {open && <div className="fixed inset-0 z-40 hidden bg-black/40 md:block lg:hidden" onClick={onClose} />}
 
       <aside
@@ -70,7 +119,7 @@ export default function RetailSidebar({ open, onClose }: { open?: boolean; onClo
         <Link href="/" onClick={onClose} className="flex items-center gap-2 px-5 pt-5 text-[12.5px] font-semibold text-muted transition hover:text-ink dark:text-[#a89f93] dark:hover:text-white">
           <ArrowLeft size={15} /> All departments
         </Link>
-        <div className="flex items-center gap-2.5 px-5 pb-5 pt-4">
+        <div className="flex items-center gap-2.5 px-5 pb-4 pt-4">
           <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-ink text-white dark:bg-white dark:text-[#141414]"><Store size={18} /></span>
           <div className="min-w-0 leading-tight">
             <div className="text-[15px] font-extrabold tracking-tight dark:text-[#f4f1ea]">FS Traders</div>
@@ -80,61 +129,103 @@ export default function RetailSidebar({ open, onClose }: { open?: boolean; onClo
 
         {onClose && <RetailHideMenu onClose={onClose} />}
 
-        <nav className="flex-1 space-y-1 overflow-y-auto px-3 pb-2" onClick={(e) => { if ((e.target as HTMLElement).closest("a")) onClose?.(); }}>
-          {ready && visible.map(({ label, href, Icon, children }) => {
-            const on = isActive(pathname, href);
-            const openGroup = !!children && (manual[href] ?? on);
-            /* A group's parent link points at its first surviving child rather
-               than at a bare /retail/ho, so pressing the heading lands
-               somewhere real instead of on a redirect. */
-            const target = children ? children[0].href : href;
-            const activeCls = "bg-salmon-soft font-semibold text-ink dark:bg-white/[0.10] dark:text-white";
-            const idleCls = "text-muted hover:bg-panel hover:text-ink dark:text-[#a89f93] dark:hover:bg-white/[0.06] dark:hover:text-white";
+        <nav className="flex-1 overflow-y-auto px-3 pb-2">
+          {ready && (
+            <>
+              {canDash && (
+                <TopRow leaf={DASHBOARD} on={isActive(pathname, DASHBOARD.href)}
+                  onClick={() => { setShopKey(null); setOpenKey(null); onClose?.(); }} />
+              )}
 
-            /* A GROUP ROW IS A ROW, NOT A LINK WITH A BUTTON INSIDE IT.
-               The chevron used to be nested in the <a>, so every press had to
-               be cancelled with preventDefault + stopPropagation and a thumb
-               that landed 3px off navigated instead of expanding. It is now a
-               sibling: the link is the link, the arrow is the arrow. `py-[11px]`
-               keeps the row at the 43px it has always been. */
-            if (children) {
-              return (
-                <div key={href}>
-                  <div className={`flex items-center gap-1 rounded-xl2 pr-1.5 transition ${on ? activeCls : idleCls}`}>
-                    <Link href={target} className="flex min-w-0 flex-1 items-center gap-3 rounded-xl2 py-[11px] pl-3.5 text-[14px]">
-                      <Icon size={18} strokeWidth={2} />
-                      <span className="flex-1 truncate">{label}</span>
-                    </Link>
-                    <button type="button" aria-label={openGroup ? `Collapse ${label}` : `Expand ${label}`}
-                      onClick={() => setManual((m) => ({ ...m, [href]: !openGroup }))}
-                      className="flex-none rounded-full p-1.5 hover:bg-black/5 dark:hover:bg-white/10">
-                      <ChevronDown size={15} className={`transition ${openGroup ? "rotate-180" : ""}`} />
-                    </button>
+              {shops.length > 0 && shopScreens.length > 0 && <GroupLabel>Shops</GroupLabel>}
+
+              {shopScreens.length > 0 && shops.map((s) => {
+                const expanded = openKey === s.key;
+                /* "Current" is the selected shop, which is not the same as
+                   "expanded": you can leaf through the other shops' menus
+                   without leaving the one you are working in, and the dot
+                   stays on the one your figures belong to.
+                   shopCovers, not ===, so drilling into one Top Shop branch
+                   from a screen's own picker keeps Top Shop lit. */
+                const current = shopCovers(s, shopKey) && !inHO;
+                return (
+                  <div key={s.key}>
+                    <AccordionRow
+                      label={s.label}
+                      sub={s.ids.length > 1 ? `${s.ids.length} branches` : undefined}
+                      current={current}
+                      expanded={expanded}
+                      onOpen={() => { openShop(s.key); onClose?.(); }}
+                      onToggle={() => setOpenKey(expanded ? null : s.key)}
+                    />
+                    {expanded && (
+                      <Children>
+                        {shopScreens.map((l) => (
+                          <ChildLink key={l.href} leaf={l} pathname={pathname} current={current}
+                            badge={l.href === "/retail/payments" ? unc : null}
+                            onClick={() => { setShopKey(s.key); onClose?.(); }} />
+                        ))}
+                        {shopStaff.length > 0 && (
+                          <SubGroup label="Employee" icon={Users}
+                            openWhen={shopStaff.some((l) => isActive(pathname, l.href))}>
+                            {shopStaff.map((l) => (
+                              <ChildLink key={l.href} leaf={l} pathname={pathname} current={current} nested
+                                onClick={() => { setShopKey(s.key); onClose?.(); }} />
+                            ))}
+                          </SubGroup>
+                        )}
+                      </Children>
+                    )}
                   </div>
-                  {openGroup && (
-                    <div className="ml-4 mt-1 space-y-0.5 border-l border-line pl-3 dark:border-white/[0.08]">
-                      {children.map((c) => {
-                        const cOn = pathname === c.href;
-                        return (
-                          <Link key={c.href} href={c.href} className={`flex items-center gap-2.5 rounded-xl2 px-3 py-2 text-[13px] transition ${cOn ? "font-semibold text-ink dark:text-white" : "text-muted hover:text-ink dark:text-[#a89f93] dark:hover:text-white"}`}>
-                            <c.Icon size={15} strokeWidth={2} />
-                            <span className="truncate">{c.label}</span>
-                          </Link>
-                        );
-                      })}
-                    </div>
+                );
+              })}
+
+              {/* HEAD OFFICE IS NOT A SHOP. It sells nothing, it has no till and
+                  no commissions, and it sits outside the SHOPS group for the
+                  same reason it did in the old menu: so that nobody reads it as
+                  the tenth shop. */}
+              {(hoScreens.length > 0 || hoStaff.length > 0) && (
+                <div className="mt-1">
+                  <AccordionRow
+                    label={HEAD_OFFICE.label}
+                    icon={HEAD_OFFICE.Icon}
+                    colour={HEAD_OFFICE.colour}
+                    current={inHO}
+                    expanded={openKey === "ho"}
+                    onOpen={() => {
+                      setShopKey(null); setOpenKey("ho");
+                      if (hoScreens.length) router.push(hoScreens[0].href);
+                      onClose?.();
+                    }}
+                    onToggle={() => setOpenKey(openKey === "ho" ? null : "ho")}
+                  />
+                  {openKey === "ho" && (
+                    <Children>
+                      {hoScreens.map((l) => (
+                        <ChildLink key={l.href} leaf={l} pathname={pathname} current={inHO}
+                          onClick={() => { setShopKey(null); onClose?.(); }} />
+                      ))}
+                      {hoStaff.length > 0 && (
+                        <SubGroup label="Employee" icon={Users}
+                          openWhen={hoStaff.some((l) => isActive(pathname, l.href))}>
+                          {hoStaff.map((l) => (
+                            <ChildLink key={l.href} leaf={l} pathname={pathname} current={inHO} nested
+                              onClick={() => { setShopKey(null); onClose?.(); }} />
+                          ))}
+                        </SubGroup>
+                      )}
+                    </Children>
                   )}
                 </div>
-              );
-            }
+              )}
 
-            return (
-              <Link key={href} href={href} className={`flex items-center gap-3 rounded-xl2 px-3.5 py-2.5 text-[14px] transition ${on ? activeCls : idleCls}`}>
-                <Icon size={18} strokeWidth={2} />
-                <span className="flex-1 truncate">{label}</span>
-              </Link>
-            );
-          })}
+              {manage.length > 0 && <GroupLabel>Manage</GroupLabel>}
+              {manage.map((l) => (
+                <TopRow key={l.href} leaf={l} on={isActive(pathname, l.href)}
+                  onClick={() => { setShopKey(null); setOpenKey(null); onClose?.(); }} />
+              ))}
+            </>
+          )}
         </nav>
 
         <div className="space-y-1 border-t border-line p-3 dark:border-white/[0.06]">
@@ -142,9 +233,137 @@ export default function RetailSidebar({ open, onClose }: { open?: boolean; onClo
           <button onClick={logout} className="flex w-full items-center gap-2 rounded-xl2 px-3.5 py-2.5 text-[13.5px] font-semibold text-muted transition hover:bg-panel hover:text-ink dark:text-[#a89f93] dark:hover:bg-white/[0.06] dark:hover:text-white"><LogOut size={16} /> Sign out</button>
         </div>
       </aside>
-      {/* The panel is `position: fixed` in the tablet band, so it is out of the
-          flow there and the page runs full width — correct. At lg it is `static`
-          again and takes its 248px back, which is the original computer layout. */}
     </>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   THE PIECES
+   Small components rather than one long render, because the shop accordion and
+   the Head Office accordion must stay identical — the moment they are two
+   copies of the same markup, one of them gets a fix and the other does not.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+const ACTIVE = "bg-salmon-soft font-semibold text-ink dark:bg-white/[0.10] dark:text-white";
+const IDLE   = "text-muted hover:bg-panel hover:text-ink dark:text-[#a89f93] dark:hover:bg-white/[0.06] dark:hover:text-white";
+
+function GroupLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="px-3.5 pb-1 pt-4 text-[10.5px] font-bold uppercase tracking-[0.07em] text-hint dark:text-[#8a8175]">
+      {children}
+    </div>
+  );
+}
+
+/** Dashboard and the Manage screens: a plain row, no children. */
+function TopRow({ leaf, on, onClick }: { leaf: NavLeaf; on: boolean; onClick: () => void }) {
+  return (
+    <Link href={leaf.href} onClick={onClick}
+      className={`flex items-center gap-3 rounded-xl2 px-3.5 py-2.5 text-[14px] transition ${on ? ACTIVE : IDLE}`}>
+      <leaf.Icon size={18} strokeWidth={2} />
+      <span className="flex-1 truncate">{leaf.label}</span>
+    </Link>
+  );
+}
+
+/** A shop, or Head Office.
+ *
+ *  THE NAME IS A LINK AND THE ARROW IS A BUTTON, as two siblings. They used to
+ *  be a button nested inside the link, which meant every press of the arrow had
+ *  to be cancelled with preventDefault + stopPropagation, and a thumb landing
+ *  3px off navigated instead of expanding. Separate elements, no cancelling. */
+function AccordionRow({
+  label, sub, icon: Icon, colour, current, expanded, onOpen, onToggle,
+}: {
+  label: string; sub?: string; icon?: NavLeaf["Icon"]; colour?: string;
+  current: boolean; expanded: boolean; onOpen: () => void; onToggle: () => void;
+}) {
+  return (
+    <div className={`flex items-center gap-1 rounded-xl2 pr-1 transition ${current ? ACTIVE : IDLE}`}>
+      <button type="button" onClick={onOpen}
+        className="flex min-w-0 flex-1 items-center gap-2.5 rounded-xl2 py-[9px] pl-3.5 text-left text-[14px]">
+        {Icon
+          ? <Icon size={17} strokeWidth={2} className="flex-none" />
+          /* The old menu marked each shop with its chain's colour dot. Kept:
+             with nine shops it is how you find the one you want without
+             reading, and Top Shop and the FC branches group by eye. */
+          : <span className="h-[7px] w-[7px] flex-none rounded-full"
+              style={{ background: current ? "currentColor" : (colour ?? "#9aa0a6") }} />}
+        <span className="min-w-0 flex-1 leading-tight">
+          <span className="block truncate">{label}</span>
+          {sub && <span className="block truncate text-[10.5px] font-normal text-hint dark:text-[#8a8175]">{sub}</span>}
+        </span>
+      </button>
+      <button type="button" aria-label={expanded ? `Collapse ${label}` : `Expand ${label}`}
+        aria-expanded={expanded} onClick={onToggle}
+        className="flex-none rounded-full p-1.5 hover:bg-black/5 dark:hover:bg-white/10">
+        <ChevronRight size={15} className={`transition ${expanded ? "rotate-90" : ""}`} />
+      </button>
+    </div>
+  );
+}
+
+function Children({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="ml-4 mt-0.5 mb-1 space-y-0.5 border-l border-line pl-2.5 dark:border-white/[0.08]">
+      {children}
+    </div>
+  );
+}
+
+/** One screen under a shop.
+ *
+ *  `current` matters: the highlight is only right when BOTH the route matches
+ *  and this is the shop you are in. Without it, expanding FC DHA while looking
+ *  at Top Shop's cash book highlights Cash Book under FC DHA — telling you that
+ *  you are looking at numbers you are not. */
+function ChildLink({
+  leaf, pathname, current, nested, badge, onClick,
+}: {
+  leaf: NavLeaf; pathname: string; current: boolean; nested?: boolean;
+  badge?: number | null; onClick: () => void;
+}) {
+  const on = isActive(pathname, leaf.href) && current;
+  return (
+    <Link href={leaf.href} onClick={onClick}
+      className={`flex items-center gap-2.5 rounded-xl2 py-[7px] pr-2 text-[13px] transition ${nested ? "pl-5" : "pl-2.5"} ${
+        on ? "bg-salmon-soft font-semibold text-ink dark:bg-white/[0.10] dark:text-white"
+           : "text-muted hover:text-ink dark:text-[#a89f93] dark:hover:text-white"}`}>
+      <leaf.Icon size={15} strokeWidth={2} className="flex-none"
+        style={!on && leaf.colour ? { color: leaf.colour } : undefined} />
+      <span className="min-w-0 flex-1 truncate">{leaf.label}</span>
+      {/* THE BACKLOG COUNT. The one number the old menu carried, because it is
+          the only warning the app gives that money has come in and nobody has
+          said what kind of money it was. Hidden at zero — a badge reading 0 is
+          a badge you stop reading. */}
+      {!!badge && (
+        <span className="flex-none rounded-full bg-danger px-1.5 py-[1px] text-[10px] font-bold leading-[14px] text-white">
+          {badge > 99 ? "99+" : badge}
+        </span>
+      )}
+    </Link>
+  );
+}
+
+/** The Employee sub-menu, one level deeper. Collapsed by default because four
+ *  of the five screens under it are opened once a month, and expanded when you
+ *  are already on one of them. */
+function SubGroup({
+  label, icon: Icon, openWhen, children,
+}: {
+  label: string; icon: NavLeaf["Icon"]; openWhen: boolean; children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(openWhen);
+  useEffect(() => { if (openWhen) setOpen(true); }, [openWhen]);
+  return (
+    <div>
+      <button type="button" onClick={() => setOpen(!open)} aria-expanded={open}
+        className="flex w-full items-center gap-2.5 rounded-xl2 py-[7px] pl-2.5 pr-2 text-[13px] text-muted transition hover:text-ink dark:text-[#a89f93] dark:hover:text-white">
+        <Icon size={15} strokeWidth={2} className="flex-none" />
+        <span className="flex-1 truncate text-left">{label}</span>
+        <ChevronRight size={13} className={`flex-none transition ${open ? "rotate-90" : ""}`} />
+      </button>
+      {open && <div className="space-y-0.5">{children}</div>}
+    </div>
   );
 }

@@ -57,7 +57,7 @@ import Modal, { Field, inputCls, btnPrimary, btnGhost } from "@/components/Modal
 import {
   Shell, PageHeader, StatCards, DataTable, Tabs, Pill, Select, PreviewNote, SourceNote,
   money, num, text, today, addDays, fetchAll, fetchKeyset, commBonus,
-  useIsPhone, RowCard,
+  useIsPhone, RowCard, useBranches,
   type CommCfg, type Row, type Col,
 } from "@/components/retail/kit";
 
@@ -140,8 +140,11 @@ export default function CommissionsPage() {
   const [refLoading, setRefLoading] = useState(true);
   const [err, setErr] = useState("");
 
-  /* reference data */
-  const [branches, setBranches] = useState<Branch[]>([]);
+  /* reference data.
+     Branches come from the shared cache, not from a fetch of this screen's
+     own — nine rows that every screen in the department asks for, and asking
+     again on every mount is what made moving between screens feel slow. */
+  const { branches } = useBranches();
   const [master, setMaster] = useState<Master[]>([]);
   const [fc, setFc] = useState<FcRate[]>([]);
   const [cfg, setCfg] = useState<CommCfg>(DEFAULT_CFG);
@@ -203,8 +206,7 @@ export default function CommissionsPage() {
     if (!isSupabaseConfigured || !supabase) { setRefLoading(false); return; }
     setRefLoading(true);
     const db = supabase;
-    const [b, c] = await Promise.all([
-      db.from("retail_branches").select("id,name,code,chain,active").order("name"),
+    const [c] = await Promise.all([
       db.from("retail_commission_config").select("bonus_mode,bonus_basis,bonus_slab,bonus_per_slab").eq("id", 1).maybeSingle(),
     ]);
     /* Both rate sheets are paged. An un-paged master stops at row 1000 and
@@ -221,10 +223,9 @@ export default function CommissionsPage() {
       fetchAll<FcRate>((lo, hi) => db.from("retail_fc_dha_comm")
         .select("item_code,commission").order("item_code").range(lo, hi)),
     ]);
-    setBranches((b.data as Branch[]) ?? []);
     setCfg((c.data as CommCfg) ?? DEFAULT_CFG);
     setMaster(m.rows); setFc(f.rows);
-    const e = b.error?.message || m.error || f.error || "";
+    const e = m.error || f.error || "";
     if (e) setErr(e);
     setRefLoading(false);
   }, []);

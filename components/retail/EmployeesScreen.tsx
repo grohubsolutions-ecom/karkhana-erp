@@ -54,6 +54,7 @@ import {
   monthKey, monthBounds, monthLabel, fetchAll,
   type Employee, type Col, type Row,
 } from "@/components/retail/kit";
+import { useShopScope } from "@/lib/retailShop";
 import { EmployeeStatement, balancesByEmployee } from "@/components/retail/LedgerScreen";
 
 type Scope = "shops" | "ho";
@@ -110,6 +111,17 @@ export default function EmployeesScreen({ scope }: { scope: Scope }) {
     () => branches.filter((b) => (scope === "ho" ? isHeadOffice(b) : !isHeadOffice(b))),
     [branches, scope]
   );
+
+  /* THE SHOP, from the left menu — Head Office excepted, which is not a shop.
+     It narrows the LIST only. The form's branch dropdown keeps the full
+     `pickable`, because moving somebody from Top Shop to FC DHA is a thing
+     that happens and a form that could not express it would send people back
+     to the database. */
+  const shop = useShopScope(branches);
+  const listed = useMemo(() => {
+    if (scope === "ho" || !shop.ids) return null;
+    return new Set(shop.ids);
+  }, [scope, shop.ids]);
   const branchName = useCallback(
     (id: unknown) => branches.find((b) => b.id === Number(id))?.name ?? "—",
     [branches]
@@ -183,9 +195,10 @@ export default function EmployeesScreen({ scope }: { scope: Scope }) {
   const rows = useMemo(() => {
     const needle = q.trim().toLowerCase();
     return allEmployees
+      .filter((e) => !listed || listed.has(Number(e.branch_id)))
       .filter((e) => showInactive || e.active !== false)
       .filter((e) => !needle || e.name.toLowerCase().includes(needle) || (e.designation ?? "").toLowerCase().includes(needle));
-  }, [allEmployees, q, showInactive]);
+  }, [allEmployees, q, showInactive, listed]);
 
   const totals = useMemo(() => {
     const sal = rows.reduce((t, e) => t + earned(e), 0);

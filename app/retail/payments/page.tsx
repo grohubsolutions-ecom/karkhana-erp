@@ -44,11 +44,12 @@ import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { rangeDates } from "@/lib/dateRange";
 import {
   RetailRange,
-  Shell, PageHeader, StatCards, DataTable, Pill, BranchPicker, PreviewNote, SourceNote,
+  Shell, PageHeader, StatCards, DataTable, Pill, ShopSelect, PreviewNote, SourceNote,
   ActionBar, CardList, RowCard, useIsPhone,
   useBranches, money, num, text, today, addDays, fetchAll, fetchKeyset, CARD_RATE_PCT, cardExpected,
   type Row, type Col,
 } from "@/components/retail/kit";
+import { useShopScope } from "@/lib/retailShop";
 
 /* 'cash' is deliberately absent from the mix below — this screen is the other
    side of it. 'unclassified' IS here, because a row nobody has categorised is
@@ -104,7 +105,10 @@ const dateInputCls =
 export default function NonCashPage() {
   const { branches, branchName } = useBranches();
   const phone = useIsPhone();
-  const [branch, setBranch] = useState("");
+  /* The shop, shared with the left menu and every other screen — not this
+     screen's own dropdown state. See lib/retailShop.ts. */
+  const scope = useShopScope(branches);
+  const branch = scope.single;
 
   /* ── section 1 state: one day, one rate ────────────────────────────────── */
   const [day, setDay] = useState(() => addDays(today(), -1));
@@ -156,13 +160,13 @@ export default function NonCashPage() {
            looks like a card" is exactly how the FC DHA figure went wrong. */
         .eq("payment_method", "meezan_card")
         .eq("sale_date", day);
-      if (branch) q = q.eq("branch_id", Number(branch));
+      if (scope.ids) q = q.in("branch_id", scope.ids);
       return q.order("id", { ascending: true }).range(lo, hi);
     });
     if (error) setErrCard(error);
     setCardRows(rows);
     setLoadingCard(false);
-  }, [day, branch]);
+  }, [day, scope.key]);
   useEffect(() => { loadCard(); }, [loadCard]);
 
   const ratePct = num(rate);
@@ -228,9 +232,15 @@ export default function NonCashPage() {
     const { rows, error } = await fetchKeyset<UncLine>((afterId) => {
       let q = db.from("retail_sale_lines")
         .select("id,branch_id,sale_date,sale_time,receipt_no,receipt_txn,sales_amount")
-        .eq("payment_method", "unclassified")
+        /* NULL and the literal both mean nobody has said what this money was.
+           Only the literal was matched before, so a line that arrived with no
+           payment_method at all was stuck revenue this screen could not show.
+           Written to match the predicate of retail_sale_lines_unclassified_idx,
+           which is what keeps this an index-only scan instead of a 1.3-second
+           sequential scan of every line ever imported. */
+        .or("payment_method.is.null,payment_method.eq.unclassified")
         .gt("id", afterId);
-      if (branch) q = q.eq("branch_id", Number(branch));
+      if (scope.ids) q = q.in("branch_id", scope.ids);
       return q.order("id", { ascending: true }).limit(1000);
     });
     if (error) { setErrUnc(error); setLoadingUnc(false); return; }
@@ -255,7 +265,7 @@ export default function NonCashPage() {
     const groups = [...m.values()].sort((a, b) => b.date.localeCompare(a.date));
     setUnc(groups);
     setLoadingUnc(false);
-  }, [branch]);
+  }, [scope.key]);
   useEffect(() => { loadUnc(); }, [loadUnc]);
 
   /** The write, and the only one on this screen. Both the computer's per-row
@@ -359,7 +369,7 @@ export default function NonCashPage() {
                      sales_amount: r.sales, lines: r.lines })) as Row[];
     setMix(agg);
     setLoadingMix(false);
-  }, [preset, cf, ct, branch]);
+  }, [preset, cf, ct, scope.key]);
   useEffect(() => { loadMix(); }, [loadMix]);
 
   /* The rows arriving here are already one per (branch, method) — the database
@@ -416,7 +426,7 @@ export default function NonCashPage() {
     <Shell>
       <PageHeader title="Non-cash" subtitle="Card, JazzCash, online and udhaar — sales that never reached the till."
         onRefresh={refreshAll} loading={loadingCard || loadingUnc || loadingMix}>
-        <BranchPicker branches={branches} value={branch} onChange={setBranch} />
+        <ShopSelect branches={branches} scope={scope} className="max-md:hidden" />
       </PageHeader>
 
       <StatCards stats={stats} loading={loadingUnc || loadingMix} />

@@ -48,6 +48,7 @@ import {
   useEmployees, monthKey, monthBounds, daysInMonth, isHeadOffice, isHourly, attHours, isSunday,
   money, num, today, iso, type Row, type Employee,
 } from "@/components/retail/kit";
+import { useStaffScope } from "@/lib/retailShop";
 
 type Scope = "shops" | "ho";
 type Status = "present" | "half" | "absent";
@@ -73,7 +74,6 @@ export default function AttendanceScreen({ scope }: { scope: Scope }) {
   const [tab, setTab] = useState<"day" | "month">("day");
   const [date, setDate] = useState(today());
   const [month, setMonth] = useState(monthKey());
-  const [branch, setBranch] = useState("");
   const [day, setDay] = useState<Record<number, Rec>>({});
   const [grid, setGrid] = useState<Record<string, Rec>>({});
   const [loading, setLoading] = useState(true);
@@ -82,13 +82,17 @@ export default function AttendanceScreen({ scope }: { scope: Scope }) {
   const [tin, setTin] = useState(""); const [tout, setTout] = useState("");
   const [bulk, setBulk] = useState(false);
 
-  const pickable = useMemo(
+  const pool = useMemo(
     () => branches.filter((b) => (scope === "ho" ? isHeadOffice(b) : !isHeadOffice(b))),
     [branches, scope]
   );
+  /* THE SHOP, from the left menu — except in the Head Office copy of this
+     screen, which is not a shop and keeps its own picker. */
+  const { branch, setBranch, pickable, inPool } = useStaffScope(branches, pool, scope !== "ho");
   const people = useMemo(
-    () => employees.filter((e) => e.active !== false && (!branch || String(e.branch_id) === branch)),
-    [employees, branch]
+    () => employees.filter((e) => e.active !== false
+      && (branch ? String(e.branch_id) === branch : inPool(e.branch_id))),
+    [employees, branch, inPool]
   );
   const ids = useMemo(() => people.map((p) => p.id), [people]);
   const branchName = (id: unknown) => branches.find((b) => b.id === Number(id))?.name ?? "";

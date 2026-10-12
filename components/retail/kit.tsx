@@ -21,6 +21,7 @@ import { RefreshCw, X, ChevronRight, type LucideIcon } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import RangeBar from "@/components/RangeBar";
 import { PRESETS } from "@/lib/dateRange";
+import { shopList, type ShopScope } from "@/lib/retailShop";
 
 /* ── numbers & dates ─────────────────────────────────────────────────────── */
 
@@ -182,18 +183,140 @@ export const unitLabel = (unit: string, branches: Branch[]): string => {
 /* ── data hooks ──────────────────────────────────────────────────────────── */
 
 /** Branches, once per page. Every FS screen needs them to name a row. */
+/* ── THE REFERENCE CACHE — WHY SWITCHING SCREENS FELT SLOW ──────────────────
+ *
+ * `useBranches` fetched on every mount, and in the App Router every navigation
+ * is a fresh mount. Measured on the live database: retail_branches — NINE ROWS
+ * — had been read over 285 times. Every single screen began by asking for the
+ * shop list again and could not draw its branch picker, its chain groupings or
+ * its colours until that round trip came back. On a shop's connection that is
+ * a visible blank moment on every tap, on data that changes about once a month.
+ * The old single-file app loaded the shop list once at sign-in and never asked
+ * again, which is exactly why moving between its screens felt instant.
+ *
+ * So the answer is cached per page-load and shared by every screen: the first
+ * caller starts the request, everybody else waits on the SAME promise, and the
+ * ones that mount afterwards get the array synchronously with no flash of an
+ * empty picker at all.
+ *
+ * It is a module-level cache, not React Query or a context — no provider to
+ * thread through 23 screens, and it is thrown away on a real page load, which
+ * is when stale reference data would actually matter.
+ *
+ * `reloadBranches()` clears it. The Branches screen calls it after a save, so
+ * editing a shop still shows the change immediately. Nothing else needs to.
+ */
+let branchCache: Branch[] | null = null;
+let branchPromise: Promise<Branch[]> | null = null;
+const branchSubs = new Set<() => void>();
+
+function fetchBranches(): Promise<Branch[]> {
+  if (!isSupabaseConfigured || !supabase) return Promise.resolve([]);
+  /* Promise.resolve() around it on purpose: a PostgREST builder is a
+     PromiseLike — it has .then but no .finally — and the callers below use
+     .finally to clear the in-flight promise. */
+  return Promise.resolve(
+    supabase.from("retail_branches").select("id,name,code,chain,color,active,nimbus_name,business").order("name")
+  ).then(({ data }) => {
+    branchCache = (data as Branch[]) ?? [];
+    branchSubs.forEach((f) => f());
+    return branchCache;
+  });
+}
+
+/** Drop the cache and refetch. Call after adding or editing a shop. */
+export function reloadBranches() {
+  branchCache = null;
+  branchPromise = fetchBranches();
+  branchPromise.finally(() => { branchPromise = null; });
+}
+
 export function useBranches() {
-  const [branches, setBranches] = useState<Branch[]>([]);
+  /* Seeded from the cache, so a screen that mounts after the first one has
+     its branches on the very first render — no empty frame, no picker that
+     pops in a moment later. */
+  const [branches, setBranches] = useState<Branch[]>(() => branchCache ?? []);
+
   useEffect(() => {
-    if (!isSupabaseConfigured || !supabase) return;
-    supabase.from("retail_branches").select("id,name,code,chain,color,active").order("name")
-      .then(({ data }) => setBranches((data as Branch[]) ?? []));
+    let alive = true;
+    const sync = () => { if (alive) setBranches(branchCache ?? []); };
+    branchSubs.add(sync);
+    if (branchCache) sync();
+    else {
+      /* One request however many screens ask at once: the first caller makes
+         the promise, the rest await the same one. */
+      branchPromise = branchPromise ?? fetchBranches();
+      branchPromise.then(sync).finally(() => { branchPromise = null; });
+    }
+    return () => { alive = false; branchSubs.delete(sync); };
   }, []);
+
   const name = useCallback(
     (id: unknown) => branches.find((b) => b.id === Number(id))?.name ?? "—",
     [branches]
   );
   return { branches, branchName: name };
+}
+
+/* ── THE UNTAGGED-RECEIPT COUNT, FOR THE MENU BADGE ────────────────────────
+ *
+ * The old app showed the number of unclassified sale lines beside "Non-cash",
+ * and it was the single most useful thing in that menu: it is the only place
+ * the app tells you there is money sitting in a state nobody has accounted for.
+ * Without it the screen has to be opened on spec to find out.
+ *
+ * It is one query per page load, shared by the sidebar and the phone menu, and
+ * it is now nearly free: migration `retail_unclassified_partial_index` made the
+ * answer an index-only scan of a partial index that holds only the untagged
+ * rows — 0.145 ms, against 1,324 ms of sequential scan before it existed.
+ *
+ * `head: true` so no rows come back, only the count. `exact` because the number
+ * is shown to a person and a planner estimate would be a lie with a digit in it.
+ */
+let uncCache: number | null = null;
+let uncPromise: Promise<number> | null = null;
+const uncSubs = new Set<() => void>();
+
+function fetchUnclassified(): Promise<number> {
+  if (!isSupabaseConfigured || !supabase) return Promise.resolve(0);
+  return Promise.resolve(
+    supabase.from("retail_sale_lines")
+      .select("id", { count: "exact", head: true })
+      /* NULL and the literal both mean nobody has said what this was, and the
+         index predicate is written the same way so Postgres can use it. */
+      .or("payment_method.is.null,payment_method.eq.unclassified")
+  ).then(({ count, error }) => {
+    /* A permission error is not a zero — somebody who cannot read sale lines
+       should see no badge rather than a confident "0". */
+    uncCache = error ? null : count ?? 0;
+    uncSubs.forEach((f) => f());
+    return uncCache ?? 0;
+  });
+}
+
+/** Clear it after tagging receipts, so the badge drops as the backlog clears. */
+export function reloadUnclassified() {
+  uncCache = null;
+  uncPromise = fetchUnclassified();
+  uncPromise.finally(() => { uncPromise = null; });
+}
+
+/** The badge number, or null while unknown / not permitted. */
+export function useUnclassifiedCount(enabled = true): number | null {
+  const [n, setN] = useState<number | null>(() => uncCache);
+  useEffect(() => {
+    if (!enabled) return;
+    let alive = true;
+    const sync = () => { if (alive) setN(uncCache); };
+    uncSubs.add(sync);
+    if (uncCache !== null) sync();
+    else {
+      uncPromise = uncPromise ?? fetchUnclassified();
+      uncPromise.then(sync).finally(() => { uncPromise = null; });
+    }
+    return () => { alive = false; uncSubs.delete(sync); };
+  }, [enabled]);
+  return n;
 }
 
 /** Employees, optionally scoped to head office or to the shops.
@@ -202,17 +325,43 @@ export function useBranches() {
  *  pre-fills the deduction from them, and a screen that has to re-query for two
  *  columns it could have asked for the first time is a screen that will forget.
  */
-export function useEmployees(scope: "all" | "shops" | "ho" = "all") {
-  const { branches } = useBranches();
-  const [employees, setEmployees] = useState<Employee[]>([]);
-  const [tick, setTick] = useState(0);
-  useEffect(() => {
-    if (!isSupabaseConfigured || !supabase) return;
+/* Cached exactly like the branches above, and for the same reason: six screens
+ * read the staff list — Attendance, Monthly Summary, Ledger, Repayments,
+ * Employees, Salary — and five of them are the five entries of one submenu, so
+ * moving between them refetched 68 rows every time. `reloadEmployees()` after
+ * a save keeps the edit visible; nothing else needs it. */
+let empCache: Employee[] | null = null;
+let empPromise: Promise<Employee[]> | null = null;
+const empSubs = new Set<() => void>();
+
+function fetchEmployees(): Promise<Employee[]> {
+  if (!isSupabaseConfigured || !supabase) return Promise.resolve([]);
+  return Promise.resolve(
     supabase.from("retail_employees")
       .select("id,name,branch_id,designation,active,monthly_salary,pay_type,hourly_rate,phone,repay_freq,repay_amount")
       .order("name")
-      .then(({ data }) => setEmployees((data as Employee[]) ?? []));
-  }, [tick]);
+  ).then(({ data }) => {
+    empCache = (data as Employee[]) ?? [];
+    empSubs.forEach((f) => f());
+    return empCache;
+  });
+}
+
+export function useEmployees(scope: "all" | "shops" | "ho" = "all") {
+  const { branches } = useBranches();
+  const [employees, setEmployees] = useState<Employee[]>(() => empCache ?? []);
+
+  useEffect(() => {
+    let alive = true;
+    const sync = () => { if (alive) setEmployees(empCache ?? []); };
+    empSubs.add(sync);
+    if (empCache) sync();
+    else {
+      empPromise = empPromise ?? fetchEmployees();
+      empPromise.then(sync).finally(() => { empPromise = null; });
+    }
+    return () => { alive = false; empSubs.delete(sync); };
+  }, []);
 
   const scoped = useMemo(() => {
     if (scope === "all") return employees;
@@ -227,7 +376,16 @@ export function useEmployees(scope: "all" | "shops" | "ho" = "all") {
   const active = useMemo(() => scoped.filter((e) => e.active !== false), [scoped]);
 
   return { employees: active, allEmployees: scoped, everyEmployee: employees, branches,
-           reloadEmployees: () => setTick((t) => t + 1) };
+           reloadEmployees };
+}
+
+/** Drop the staff cache and refetch. Call after adding, editing or ending an
+ *  employee — every screen showing the list updates, not just the one that
+ *  made the change. */
+export function reloadEmployees() {
+  empCache = null;
+  empPromise = fetchEmployees();
+  empPromise.finally(() => { empPromise = null; });
 }
 
 /* ── paging ──────────────────────────────────────────────────────────────
@@ -626,6 +784,43 @@ export function BranchPicker({ branches, value, onChange, allLabel = "All branch
     <Select value={value} onChange={onChange}>
       <option value="">{allLabel}</option>
       {branches.map((b) => <option key={b.id} value={String(b.id)}>{b.name}</option>)}
+    </Select>
+  );
+}
+
+/** THE SHOP PICKER — the same list the left menu shows, in a dropdown.
+ *
+ *  It speaks shop keys, not branch ids, so it can say "Top Shop" and mean all
+ *  six of its branches. The old flat picker could not: it offered nine branches
+ *  and no way to ask the question the business is actually organised around.
+ *
+ *  Top Shop's own branches are still here, in a group underneath — that is the
+ *  one thing this picker can do that the menu cannot, and it is what somebody
+ *  reaches for when a single till does not balance.
+ *
+ *  It writes the SHARED scope, so choosing here is the same act as choosing in
+ *  the menu, and it is still chosen when you move to the next screen. */
+export function ShopSelect({ branches, scope, allLabel = "All stores", className = "" }: {
+  branches: Branch[]; scope: ShopScope; allLabel?: string; className?: string;
+}) {
+  const shops = shopList(branches);
+  const multi = shops.filter((s) => s.ids.length > 1);
+  return (
+    <Select className={className} value={scope.key ?? ""} onChange={(v) => scope.pick(v || null)}>
+      <option value="">{allLabel}</option>
+      {shops.map((s) => (
+        <option key={s.key} value={s.key}>
+          {s.label}{s.ids.length > 1 ? ` (${s.ids.length})` : ""}
+        </option>
+      ))}
+      {multi.map((s) => (
+        <optgroup key={s.key} label={`${s.label} — one branch`}>
+          {s.ids.map((id) => {
+            const b = branches.find((x) => x.id === id);
+            return <option key={id} value={"b" + id}>{b?.name ?? `#${id}`}</option>;
+          })}
+        </optgroup>
+      ))}
     </Select>
   );
 }

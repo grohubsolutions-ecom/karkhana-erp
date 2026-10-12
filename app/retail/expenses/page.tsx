@@ -49,6 +49,7 @@ import {
   CardList, RowCard, useIsPhone,
   useBranches, money, num, text, today, fetchAll, type Col,
 } from "@/components/retail/kit";
+import { useShopScope } from "@/lib/retailShop";
 
 type Exp = {
   id: number;
@@ -119,13 +120,31 @@ export default function ExpensesPage() {
   const { branches, branchName } = useBranches();
   const phone = useIsPhone();
 
+  /* THE SHOP comes from the menu and is shared with every other screen, so
+     arriving from "FC DHA ▸ Expenses" lands on FC DHA. */
+  const shop = useShopScope(branches);
+
   /* These two pieces of state ARE the three levels:
        branch === null                → level 1, all stores
        branch !== null && pm === null → level 2, payment methods for that store
        branch !== null && pm !== null → level 3, the transactions behind a tile
      `branch` is a branch id as a string, or the literal "none" for the rows
-     with branch_id IS NULL. */
-  const [branch, setBranch] = useState<string | null>(null);
+     with branch_id IS NULL.
+
+     It is derived from the shop, with ONE local addition: "none" — the
+     business-wide rows that belong to no branch at all. The shop model has no
+     word for that and should not grow one, so it lives here, and choosing any
+     real shop clears it. */
+  const [unassigned, setUnassigned] = useState(false);
+  /* Choosing a shop overrides the unassigned view rather than fighting it:
+     those rows belong to no branch, so they are not inside any shop. */
+  const branch: string | null = unassigned && !shop.key ? "none" : (shop.single || null);
+  const setBranch = useCallback((v: string | null) => {
+    setUnassigned(v === "none");
+    if (v === "none") return;
+    if (v === null) shop.back(); else shop.set(v);
+    /* eslint-disable-next-line react-hooks/exhaustive-deps */
+  }, [shop.key]);
   const [pm, setPm] = useState<string | null>(null);
 
   const [preset, setPreset] = useState("30d");
@@ -163,6 +182,10 @@ export default function ExpensesPage() {
     const { rows: got, error } = await fetchAll<Exp>((lo, hi) => {
       let q = db.from("retail_expenses")
         .select("id,branch_id,expense_date,category,description,amount,paid_via,txn_type,source");
+      /* Scoped to the chosen shop, so the stat cards above the table are that
+         shop's spend and not the whole business's. Top Shop is six branches,
+         hence .in() rather than .eq(). */
+      if (shop.ids) q = q.in("branch_id", shop.ids);
       if (from) q = q.gte("expense_date", from);
       if (to) q = q.lte("expense_date", to);
       return q.order("id", { ascending: true }).range(lo, hi);
@@ -170,14 +193,19 @@ export default function ExpensesPage() {
     if (error) setErr(error);
     setRows(got);
     setLoading(false);
-  }, [preset, cf, ct]);
+  }, [preset, cf, ct, shop.key]);
   useEffect(() => { load(); }, [load]);
 
   /* ── level 1: stores, grouped under chains ─────────────────────────────── */
 
+  /* Only the shop you are in: with Top Shop chosen this is its chain alone,
+     so the table cannot list Fashion Collection at zero underneath. */
+  const inScope = useCallback(
+    (b: { id: number }) => !shop.ids || shop.ids.includes(b.id),
+    [shop.ids]);
   const chains = useMemo(
-    () => [...new Set(branches.map((b) => String(b.chain ?? "")).filter(Boolean))],
-    [branches]
+    () => [...new Set(branches.filter(inScope).map((b) => String(b.chain ?? "")).filter(Boolean))],
+    [branches, inScope]
   );
   /* Chain headings only earn their row when there is more than one chain.
      A single-chain business does not need to be told it has one chain. */
@@ -197,7 +225,7 @@ export default function ExpensesPage() {
     const seen = new Set<string>();
     chains.forEach((ch) => {
       const stores = branches
-        .filter((b) => String(b.chain ?? "") === ch && byBranch.has(String(b.id)))
+        .filter((b) => inScope(b) && String(b.chain ?? "") === ch && byBranch.has(String(b.id)))
         .map((b) => ({ id: String(b.id), label: b.name, g: byBranch.get(String(b.id)) ?? ZERO }))
         /* Sorted by EXPENSE descending: the shop spending the most is the one
            worth looking at first, and alphabetical order buries it. */
@@ -232,7 +260,7 @@ export default function ExpensesPage() {
     const none = byBranch.get("none");
     if (none) out.push({ kind: "store", key: "b:none", label: "General / unassigned", g: none, id: "none", indent: false });
     return out;
-  }, [chains, branches, byBranch, multiChain, branchName]);
+  }, [chains, branches, byBranch, multiChain, branchName, inScope]);
 
   /* ── level 2 & 3: one branch ───────────────────────────────────────────── */
 
@@ -244,7 +272,7 @@ export default function ExpensesPage() {
   }, [rows, branch]);
 
   const branchLabel =
-    branch === null ? "All stores" : branch === "none" ? "General / unassigned" : branchName(branch);
+    branch === null ? shop.label : branch === "none" ? "General / unassigned" : branchName(branch);
 
   const payAgg = useMemo(() => {
     const m = new Map<string, { amt: number; n: number }>();
@@ -443,11 +471,13 @@ export default function ExpensesPage() {
           two controls that can disagree about which branch you are looking at. */}
       <div className="mt-4 flex flex-wrap items-center gap-2">
         {branch === null ? (
-          <span className={crumbChip}>All stores</span>
+          <span className={crumbChip}>{shop.label}</span>
         ) : (
           <>
             <button onClick={() => { setBranch(null); setPm(null); }} className={backBtn}>
-              <ChevronLeft size={14} /> All stores
+              {/* One step out, not all the way: from one Top Shop branch this
+                  goes back to Top Shop, which is where you came from. */}
+              <ChevronLeft size={14} /> {unassigned ? "All stores" : shop.backLabel}
             </button>
             {pm === null ? (
               <span className={crumbChip}>{branchLabel}</span>

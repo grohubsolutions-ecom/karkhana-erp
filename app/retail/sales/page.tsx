@@ -74,11 +74,12 @@ import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { rangeDates } from "@/lib/dateRange";
 import {
   RetailRange,
-  Shell, PageHeader, StatCards, DataTable, Tabs, Pill, BranchPicker,
+  Shell, PageHeader, StatCards, DataTable, Tabs, Pill, ShopSelect,
   PreviewNote, SourceNote, useBranches, money, num, text, sum, fetchAll, fetchKeyset,
   useIsPhone, RowCard, ActionBar,
   type Branch, type Row, type Col,
 } from "@/components/retail/kit";
+import { useShopScope } from "@/lib/retailShop";
 
 /* The seven strings the importer actually writes, and the CHECK constraint on
    retail_sale_lines. `credit` is udhaar, not a credit card — labelling it
@@ -163,9 +164,14 @@ export default function RetailSalesPage() {
      time", so this is reachable, not theoretical — and the note under the table
      is only honest if it knows. */
   const [truncated, setTruncated] = useState(false);
-  /* Level 1 is branch === "". Level 2 is a branch with no method chosen.
-     Level 3 is both. The dropdown writes the same state the drill-down does. */
-  const [branch, setBranch] = useState("");
+  /* WHICH SHOP. Not this screen's own state any more: the left menu, the
+     dropdown here and the drill-down all write one shared value, so arriving
+     from "FC DHA ▸ Sales" lands on FC DHA and moving on to Expenses stays
+     there. See lib/retailShop.ts for why there is only one of these.
+     Level 1 is no single branch. Level 2 is one branch, no method chosen.
+     Level 3 is both. */
+  const scope = useShopScope(branches);
+  const branch = scope.single;
   const [pm, setPm] = useState<string | null>(null);
   const [q, setQ] = useState("");
   const [view, setView] = useState<View>("stores");
@@ -178,7 +184,8 @@ export default function RetailSalesPage() {
   /* Changing branch always drops the method: the methods on screen belong to
      the shop you were in, and carrying "cash" across to another shop would show
      that shop's cash bills under the previous shop's heading. */
-  const goBranch = useCallback((v: string) => { setBranch(v); setPm(null); }, []);
+  const goBranch = useCallback((v: string) => { scope.set(v); setPm(null); },
+    /* eslint-disable-next-line react-hooks/exhaustive-deps */ []);
 
   /* Which grouped view is on screen. `items` is absent on purpose: the roll-up
      has no item dimension, so By Item always reads lines. */
@@ -194,14 +201,20 @@ export default function RetailSalesPage() {
   const srvPlan = useMemo(() => {
     const summable = view === "stores" ? !pm : groupDim !== null;
     if (!phone || q.trim() || !summable) return null;
+    /* retail_sales_rollup takes ONE branch. Top Shop is six, and asking for
+       all of them and then adding up would include Fashion Collection — the
+       wrong number, quietly. So a multi-branch shop reads lines instead, which
+       is what the computer does anyway and is exact. */
+    if (scope.ids && scope.ids.length > 1) return null;
     return { dim: groupDim, branch };
-  }, [phone, q, view, pm, groupDim, branch]);
+  }, [phone, q, view, pm, groupDim, branch, scope.ids]);
 
   const load = useCallback(async () => {
     if (!isSupabaseConfigured || !supabase) { setLoading(false); return; }
     setLoading(true); setErr("");
     const db = supabase;
     const [from, to] = rangeDates(preset, cf, ct);
+    const ids = scope.ids;
 
     if (srvPlan) {
       const br = srvPlan.branch ? Number(srvPlan.branch) : null;
@@ -260,7 +273,9 @@ export default function RetailSalesPage() {
         .gt("id", afterId);
       if (from) sq = sq.gte("sale_date", from);
       if (to) sq = sq.lte("sale_date", to);
-      if (branch) sq = sq.eq("branch_id", Number(branch));
+      /* .in() for every case including the single-branch one: one code path
+         means Top Shop cannot be the case somebody forgot to handle. */
+      if (ids) sq = sq.in("branch_id", ids);
       return sq.order("id", { ascending: true }).limit(1000);
     });
     if (error) setErr(error);
@@ -276,7 +291,9 @@ export default function RetailSalesPage() {
     setRows(got);
     setTruncated(cut);
     setLoading(false);
-  }, [preset, cf, ct, branch, srvPlan]);
+    /* scope.key, not scope.ids: the ids array is a new object every render and
+       would re-run this on every keystroke. The key is a string. */
+  }, [preset, cf, ct, scope.key, srvPlan]);
   useEffect(() => { load(); }, [load]);
 
   const filtered = useMemo(() => {
@@ -357,7 +374,13 @@ export default function RetailSalesPage() {
      screen and dropping it hides exactly that. */
   const storeRows: StoreRow[] = useMemo(() => {
     const agg = byBranch;
-    const live: Branch[] = branches.filter((b) => b.active !== false || agg[String(b.id)]);
+    /* Only the shop you are in. With Top Shop chosen this is its six branches —
+       listing the Fashion Collection shops at zero underneath would read as
+       "FC sold nothing today", which is a lie about a shop you are not looking
+       at. `ids` null means every shop, and then every branch belongs. */
+    const inScope = (b: Branch) => !scope.ids || scope.ids.includes(b.id);
+    const live: Branch[] = branches.filter(
+      (b) => inScope(b) && (b.active !== false || agg[String(b.id)]));
     const chains = [...new Set(live.map((b) => b.chain || "—"))];
     const multi = chains.length > 1;
     const out: StoreRow[] = [];
@@ -389,7 +412,7 @@ export default function RetailSalesPage() {
       recs: agg[id].recs, qty: agg[id].qty, amt: agg[id].amt,
     }));
     return out;
-  }, [byBranch, branches]);
+  }, [byBranch, branches, scope.ids]);
 
   const storeCols: Col<StoreRow>[] = [
     { head: "Store", cell: (r) =>
@@ -527,7 +550,9 @@ export default function RetailSalesPage() {
      unaffected either way — this is only how many rows get drawn. */
   const lineCap = phone ? 150 : 500;
 
-  const here = branch ? branchName(branch) : "All stores";
+  /* The shop's own name — "Top Shop", not "All stores" — so the heading above
+     the figures says which shop they belong to. */
+  const here = scope.label;
 
   return (
     <Shell>
@@ -537,7 +562,9 @@ export default function RetailSalesPage() {
       <RetailRange preset={preset} setPreset={setPreset} cf={cf} setCf={setCf} ct={ct} setCt={setCt}
         right={
           <>
-            <BranchPicker branches={branches} value={branch} onChange={goBranch} allLabel="All stores" />
+            {/* Hidden on a phone: the header already carries the shop pill, and
+                two controls for one value in 390px is one too many. */}
+            <ShopSelect branches={branches} scope={scope} allLabel="All stores" className="max-md:hidden" />
             <div className="flex items-center gap-2 rounded-full border border-line bg-surface px-3.5 py-2 dark:border-white/10 dark:bg-white/[0.05]">
               <Search size={15} className="text-hint dark:text-[#8a8175]" />
               {/* On a phone this box is the full width of the screen, so the

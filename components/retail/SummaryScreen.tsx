@@ -38,6 +38,7 @@ import {
   useIsPhone, useEmployees, monthKey, monthBounds, monthLabel, isHeadOffice,
   money, num, attHours, isHourly, type Row, type Col, type Employee,
 } from "@/components/retail/kit";
+import { useStaffScope } from "@/lib/retailShop";
 
 type Scope = "shops" | "ho";
 type Line = {
@@ -50,19 +51,22 @@ export default function SummaryScreen({ scope }: { scope: Scope }) {
   const phone = useIsPhone();
   const { employees, branches } = useEmployees(scope);
   const [month, setMonth] = useState(monthKey());
-  const [branch, setBranch] = useState("");
   const [att, setAtt] = useState<Row[]>([]);
   const [led, setLed] = useState<Row[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
 
-  const pickable = useMemo(
+  const pool = useMemo(
     () => branches.filter((b) => (scope === "ho" ? isHeadOffice(b) : !isHeadOffice(b))),
     [branches, scope]
   );
+  /* THE SHOP, from the left menu — except in the Head Office copy of this
+     screen, which is not a shop and keeps its own picker. */
+  const { branch, setBranch, pickable, inPool } = useStaffScope(branches, pool, scope !== "ho");
   const people = useMemo(
-    () => employees.filter((e) => e.active !== false && (!branch || String(e.branch_id) === branch)),
-    [employees, branch]
+    () => employees.filter((e) => e.active !== false
+      && (branch ? String(e.branch_id) === branch : inPool(e.branch_id))),
+    [employees, branch, inPool]
   );
   const ids = useMemo(() => people.map((p) => p.id), [people]);
 

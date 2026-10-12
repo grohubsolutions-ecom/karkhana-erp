@@ -82,6 +82,7 @@ import {
   RowCard, CardList, useIsPhone,
   type Row, type Col, type Employee,
 } from "@/components/retail/kit";
+import { useStaffScope } from "@/lib/retailShop";
 
 type Scope = "shops" | "ho";
 
@@ -482,7 +483,6 @@ export default function LedgerScreen({ scope }: { scope: Scope }) {
   const { employees, branches } = useEmployees(scope);
   const phone = useIsPhone();
   const [tab, setTab] = useState<Tab>("people");
-  const [branch, setBranch] = useState("");
   const [employeeId, setEmployeeId] = useState("");
   const [month, setMonth] = useState(monthKey());
   const [showAll, setShowAll] = useState(false);
@@ -499,10 +499,13 @@ export default function LedgerScreen({ scope }: { scope: Scope }) {
 
   /* Head office staff sit on the head office branch, shop staff on everything
      else. The picker only offers the branches this screen answers for. */
-  const pickable = useMemo(
+  const pool = useMemo(
     () => branches.filter((b) => (scope === "ho" ? isHeadOffice(b) : !isHeadOffice(b))),
     [branches, scope]
   );
+  /* THE SHOP, from the left menu — except in the Head Office copy of this
+     screen, which is not a shop and keeps its own picker. */
+  const { branch, setBranch, pickable, inPool } = useStaffScope(branches, pool, scope !== "ho");
   const branchName = useCallback(
     (id: unknown) => branches.find((b) => b.id === Number(id))?.name ?? "—",
     [branches]
@@ -519,8 +522,8 @@ export default function LedgerScreen({ scope }: { scope: Scope }) {
      and the filtering happens in memory, so switching branches is instant and
      cannot produce a half-loaded balance. */
   const people = useMemo(
-    () => employees.filter((e) => !branch || String(e.branch_id) === branch),
-    [employees, branch]
+    () => employees.filter((e) => (branch ? String(e.branch_id) === branch : inPool(e.branch_id))),
+    [employees, branch, inPool]
   );
   const peopleIds = useMemo(() => new Set(people.map((p) => p.id)), [people]);
 

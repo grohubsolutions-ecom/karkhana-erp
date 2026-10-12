@@ -48,6 +48,7 @@ import {
   money, num, text, today, monthKey, monthBounds, monthLabel,
   type Row, type Col, type Employee,
 } from "@/components/retail/kit";
+import { useStaffScope } from "@/lib/retailShop";
 
 /** The boxes on a phone card. 16px comes from the department's phone CSS — iOS
  *  zooms the whole page on anything smaller — so this is only the frame. */
@@ -76,7 +77,6 @@ const OPEN = 0.001;
 export default function RepaymentScreen({ scope }: { scope: Scope }) {
   const { employees, branches, reloadEmployees } = useEmployees(scope);
   const [month, setMonth] = useState(monthKey());
-  const [branch, setBranch] = useState("");
   const [ledger, setLedger] = useState<Row[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
@@ -91,10 +91,13 @@ export default function RepaymentScreen({ scope }: { scope: Scope }) {
 
   /* Head office staff sit on the head office branch, shop staff on everything
      else. The picker only offers the branches this screen is responsible for. */
-  const pickable = useMemo(
+  const pool = useMemo(
     () => branches.filter((b) => (scope === "ho" ? isHeadOffice(b) : !isHeadOffice(b))),
     [branches, scope]
   );
+  /* THE SHOP, from the left menu — except in the Head Office copy of this
+     screen, which is not a shop and keeps its own picker. */
+  const { branch, setBranch, pickable, inPool } = useStaffScope(branches, pool, scope !== "ho");
   const branchName = useCallback(
     (id: unknown) => branches.find((b) => b.id === Number(id))?.name ?? "—",
     [branches]
@@ -105,8 +108,8 @@ export default function RepaymentScreen({ scope }: { scope: Scope }) {
   );
 
   const people = useMemo(
-    () => employees.filter((e) => !branch || String(e.branch_id) === branch),
-    [employees, branch]
+    () => employees.filter((e) => (branch ? String(e.branch_id) === branch : inPool(e.branch_id))),
+    [employees, branch, inPool]
   );
   const ids = useMemo(() => people.map((p) => p.id), [people]);
 
