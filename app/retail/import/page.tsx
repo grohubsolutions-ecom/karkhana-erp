@@ -334,10 +334,21 @@ export default function ImportPage() {
 
         const lines: { id: number; branch_id: number; sale_date: string; sale_time: string | null }[] = [];
         setProg({ done: 0, total: 0, what: "Reading the sales already imported" });
-        for (let from = 0; ; from += 1000) {
+        /* THIS PAGER HAD NO `order by` AT ALL, AND IT IS DECIDING WHAT GETS
+           TAGGED. Without a total order, LIMIT/OFFSET gives Postgres no
+           obligation to return rows in the same sequence between two requests —
+           so a line could be read twice, or skipped and then never tagged as
+           card or JazzCash, leaving revenue sitting as "unclassified" with
+           nothing to show it was missed. Every sibling read in this department
+           carries that warning; this one was written without it.
+           A keyset cursor on `id` fixes the correctness and the speed at once:
+           it is a total order by construction, and it does not read and discard
+           the rows it skips (measured 8 ms a page against 307 ms by offset). */
+        let afterId = 0;
+        for (;;) {
           const { data, error } = await supabase.from("retail_sale_lines")
             .select("id,branch_id,sale_date,sale_time").gte("sale_date", minD).lte("sale_date", maxD)
-            .range(from, from + 999);
+            .gt("id", afterId).order("id", { ascending: true }).limit(1000);
           if (error) throw error;
           const got = (data as typeof lines) ?? [];
           lines.push(...got);
@@ -345,6 +356,7 @@ export default function ImportPage() {
              one would be a second round trip for a progress bar. */
           setProg({ done: lines.length, total: 0, what: "Reading the sales already imported" });
           if (got.length < 1000) break;
+          afterId = Number(got[got.length - 1].id);
         }
 
         const byMode: Record<string, number[]> = {};

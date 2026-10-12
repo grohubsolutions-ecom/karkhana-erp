@@ -115,37 +115,73 @@ async function checkUploadsCatchup(branches: Branch[]): Promise<MissDay[]> {
      combined file for all six branches, so it is one unit. Keying per branch
      turns one missing file into six missing rows, and "mark done" would have
      to be pressed six times. It is also the key the migrated rows carry. */
+  const end = shiftDay(today(), -1);
+  const start = shiftDay(end, -6);
+
+  /* THREE REQUESTS, NOT SEVEN, AND NONE OF THEM COUNTS 44,000 ROWS.
+     This ran two loops with an await inside each: one EXACT COUNT per unit to
+     decide a boolean — and for Top Shop that counts every line all six of its
+     branches have ever sold, about 44,000 of the 58,303 — then one more request
+     per unit for its earliest upload. Seven sequential round trips on the screen
+     the department opens on, roughly 560 ms before the card could appear.
+
+     All three questions are answerable in one request each, and none of them
+     depends on another, so they go together:
+       · which branches have EVER sold anything — one row per branch that has,
+         `head` with no count, so Postgres stops at the first matching row per
+         group instead of counting them all
+       · the upload log for the window
+       · the earliest log date per unit
+     The loops below then only arrange what is already in memory. */
+  const [soldRes, logRes, firstRes] = await Promise.all([
+    /* One row per branch that has ever sold, from the aggregate — not 5,000 raw
+       branch_ids over the wire to answer a yes/no per shop. Measured at ~70 ms
+       for the whole table: it is a hash aggregate with no distinct count, which
+       is the cheap shape (see migration 0128). */
+    supabase.rpc("retail_sales_agg", { p_from: null, p_to: null, p_branch: null, p_by: ["branch_id"] }),
+    supabase.from("retail_upload_log").select("unit,kind,log_date").gte("log_date", start).lte("log_date", end),
+    supabase.from("retail_upload_log").select("unit,log_date").order("log_date", { ascending: true }),
+  ]);
+
+  /* The branches that have sold at all. If the aggregate is unavailable — the
+     frontend can be deployed before the migration runs — this set comes back
+     empty, every unit is dropped and the reminder simply does not appear. That
+     is the right failure: a reminder that cannot verify what was sold must not
+     invent days to nag about. */
+  const sold = new Set<number>();
+  ((soldRes.data as Row[]) ?? []).forEach((r) => { if (num(r.lines) > 0) sold.add(Number(r.branch_id)); });
+
+  /* Keyed by unitForBranch, NOT by branch id: Top Shop exports as one
+     combined file for all six branches, so it is one unit. Keying per branch
+     turns one missing file into six missing rows, and "mark done" would have
+     to be pressed six times. It is also the key the migrated rows carry. */
   const seen = new Set<string>();
   const units: { unit: string; label: string }[] = [];
   for (const b of live) {
     const u = unitForBranch(b);
     if (!u || seen.has(u)) continue;
+    seen.add(u);
     /* A branch that has never sold anything is not behind on its uploads —
        it is not trading. For Top Shop the question is asked of the whole
        chain at once, because that is what one file covers. */
     const ids = u === "topshop" ? live.filter((x) => unitForBranch(x) === "topshop").map((x) => x.id) : [b.id];
-    const { count } = await supabase.from("retail_sale_lines")
-      .select("id", { count: "exact", head: true }).in("branch_id", ids);
-    seen.add(u);
-    if (count) units.push({ unit: u, label: unitLabel(u, branches) });
+    if (ids.some((id) => sold.has(Number(id)))) units.push({ unit: u, label: unitLabel(u, branches) });
   }
   if (!units.length) return [];
 
-  const end = shiftDay(today(), -1);
-  const start = shiftDay(end, -6);
-
-  const { data: logs } = await supabase.from("retail_upload_log")
-    .select("unit,kind,log_date").gte("log_date", start).lte("log_date", end);
   const done = new Set(
-    ((logs as Row[]) ?? []).map((l) => `${l.unit}|${l.log_date}|${l.kind}`)
+    ((logRes.data as Row[]) ?? []).map((l) => `${l.unit}|${l.log_date}|${l.kind}`)
   );
 
+  /* Earliest log date per unit, taken from one ascending list: the first time a
+     unit is seen is its earliest. A unit that has never been logged is only ever
+     asked about yesterday — the same rule as before. */
   const firstOf: Record<string, string> = {};
-  for (const u of units) {
-    const { data } = await supabase.from("retail_upload_log")
-      .select("log_date").eq("unit", u.unit).order("log_date", { ascending: true }).limit(1);
-    firstOf[u.unit] = ((data as Row[]) ?? [])[0] ? String((data as Row[])[0].log_date) : end;
-  }
+  ((firstRes.data as Row[]) ?? []).forEach((r) => {
+    const u = String(r.unit);
+    if (firstOf[u] === undefined) firstOf[u] = String(r.log_date);
+  });
+  units.forEach((u) => { if (firstOf[u.unit] === undefined) firstOf[u.unit] = end; });
 
   const days: MissDay[] = [];
   for (let i = 6; i >= 0; i--) {

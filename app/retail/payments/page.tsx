@@ -46,7 +46,7 @@ import {
   RetailRange,
   Shell, PageHeader, StatCards, DataTable, Pill, BranchPicker, PreviewNote, SourceNote,
   ActionBar, CardList, RowCard, useIsPhone,
-  useBranches, money, num, text, today, addDays, fetchAll, CARD_RATE_PCT, cardExpected,
+  useBranches, money, num, text, today, addDays, fetchAll, fetchKeyset, CARD_RATE_PCT, cardExpected,
   type Row, type Col,
 } from "@/components/retail/kit";
 
@@ -222,12 +222,16 @@ export default function NonCashPage() {
        and a tick left behind would be an invisible receipt in the bar's count
        that the operator can no longer see or untick. */
     setSel(new Set());
-    const { rows, error } = await fetchAll<UncLine>((lo, hi) => {
+    /* Keyset, because this read is deliberately unbounded (see the note above)
+       and an unbounded OFFSET pager is the one that degrades fastest: its cost
+       is the square of the backlog. By key it is flat, whatever the backlog. */
+    const { rows, error } = await fetchKeyset<UncLine>((afterId) => {
       let q = db.from("retail_sale_lines")
         .select("id,branch_id,sale_date,sale_time,receipt_no,receipt_txn,sales_amount")
-        .eq("payment_method", "unclassified");
+        .eq("payment_method", "unclassified")
+        .gt("id", afterId);
       if (branch) q = q.eq("branch_id", Number(branch));
-      return q.order("id", { ascending: true }).range(lo, hi);
+      return q.order("id", { ascending: true }).limit(1000);
     });
     if (error) { setErrUnc(error); setLoadingUnc(false); return; }
 

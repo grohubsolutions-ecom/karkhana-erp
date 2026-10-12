@@ -272,6 +272,42 @@ export async function bsOpening(
   return toNum(fallback);
 }
 
+/** THE SAME OPENING BALANCE, FOR EVERY ACCOUNT, IN ONE REQUEST.
+ *
+ *  `bsOpening` above answers for one account and the day book called it inside a
+ *  loop — so five accounts meant five sequential round trips stacked on top of
+ *  five more for the lines, roughly 800 ms before the first figure appeared, on
+ *  the tab the screen opens on.
+ *
+ *  Postgres has no `distinct on` through PostgREST, so this reads the balances
+ *  before `day` for all the accounts at once, newest first, and keeps the first
+ *  one it sees per account — which is that account's latest known balance. The
+ *  `limit` is generous rather than exact because the rows are tiny and one
+ *  request that over-reads beats N requests that do not.
+ *
+ *  Returns a map of account id → balance. An account with no prior balanced row
+ *  is simply absent, and the caller falls back to its opening_balance, exactly
+ *  as the single-account version does.
+ */
+export async function bsOpeningMany(
+  db: SupabaseClient, accountIds: number[], day: string
+): Promise<Record<number, number>> {
+  const out: Record<number, number> = {};
+  if (!accountIds.length) return out;
+  const { data } = await db.from("retail_bank_txns")
+    .select("account_id,balance").in("account_id", accountIds).lt("txn_date", day)
+    .not("balance", "is", null)
+    .order("txn_date", { ascending: false }).order("id", { ascending: false })
+    .limit(Math.max(1000, accountIds.length * 200));
+  ((data as { account_id: unknown; balance: unknown }[] | null) ?? []).forEach((r) => {
+    const id = Number(r.account_id);
+    /* First row wins: the list is newest-first, so the first balance seen for an
+       account is its latest one before `day`. */
+    if (out[id] === undefined && r.balance != null) out[id] = toNum(r.balance);
+  });
+  return out;
+}
+
 /** Walk the day adding credits and subtracting debits — but whenever the
  *  statement printed its own balance on a line, that figure wins. The bank is
  *  the authority on its own balance; our arithmetic is only there to fill the

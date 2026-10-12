@@ -50,7 +50,7 @@ import {
   useBranches, money, num, text, today, fetchAll, type Row, type Col,
 } from "@/components/retail/kit";
 import {
-  bsClean, bsDedupe, bsRuleHit, bsPattern, bsGroupPat, bsRun, bsOpening, bsSortDay,
+  bsClean, bsDedupe, bsRuleHit, bsPattern, bsGroupPat, bsRun, bsOpening, bsOpeningMany, bsSortDay,
   bsGroupParties, bsAllParties, bsGuessAcct, bsAcctLabel, sha256File, parseStatementCSV,
   addDays, PERSONAL, SHOP_MONEY,
   type BankAccount, type RefRule, type ParsedTxn,
@@ -190,13 +190,34 @@ export default function BankPage() {
     const db = supabase;
     setDayLoading(true);
     const wanted = accounts.filter((a) => a.active !== false && (!acct || Number(acct) === a.id));
+
+    /* ONE REQUEST FOR EVERY ACCOUNT, NOT TWO PER ACCOUNT.
+       This loop used to await inside itself twice over: the day's lines for one
+       account, then that account's opening balance, then round again. With five
+       accounts that is ten round trips in a strict chain — roughly 800 ms before
+       the first figure appears — on the tab this screen opens on. Neither read
+       needed to be per-account: the lines come back for all of them in one
+       `.in()`, and the openings in one grouped sum. The loop below now only
+       arranges rows that are already in memory. */
+    const ids = wanted.map((a) => a.id);
+    const [dayRes, openRes] = await Promise.all([
+      db.from("retail_bank_txns")
+        .select("id,account_id,txn_date,txn_time,direction,amount,balance,descr,ref_no,ref,branch_id,category,counterparty,suggest,needs_ref,auto,source")
+        .in("account_id", ids).eq("txn_date", day).order("id"),
+      bsOpeningMany(db, ids, day),
+    ]);
+    const dayRows = (dayRes.data as BankTxn[]) ?? [];
+    const openings = openRes;
+
     const out: DayPack[] = [];
     for (const a of wanted) {
-      const { data } = await db.from("retail_bank_txns")
-        .select("id,account_id,txn_date,txn_time,direction,amount,balance,descr,ref_no,ref,branch_id,category,counterparty,suggest,needs_ref,auto,source")
-        .eq("account_id", a.id).eq("txn_date", day).order("id");
-      const rows = bsSortDay((data as BankTxn[]) ?? []);
-      const opening = await bsOpening(db, a.id, day, a.opening_balance);
+      const rows = bsSortDay(dayRows.filter((r) => Number(r.account_id) === a.id));
+      /* The map holds the account's latest balance before `day` when there is
+         one; when there is not, the account's own opening_balance stands in —
+         the same fallback bsOpening applies for a single account. Adding the two
+         together would double-count the opening on every account that has ever
+         had a balanced line. */
+      const opening = openings[a.id] === undefined ? num(a.opening_balance) : num(openings[a.id]);
       const { lines, closing } = bsRun(rows, opening);
       out.push({
         acct: a, lines, opening, closing,

@@ -75,7 +75,7 @@ import { rangeDates } from "@/lib/dateRange";
 import {
   RetailRange,
   Shell, PageHeader, StatCards, DataTable, Tabs, Pill, BranchPicker,
-  PreviewNote, SourceNote, useBranches, money, num, text, sum, fetchAll,
+  PreviewNote, SourceNote, useBranches, money, num, text, sum, fetchAll, fetchKeyset,
   useIsPhone, RowCard, ActionBar,
   type Branch, type Row, type Col,
 } from "@/components/retail/kit";
@@ -236,26 +236,43 @@ export default function RetailSalesPage() {
          function has not been deployed to this database yet. */
     }
 
-    /* `sale_date` IS A TIE, AND A TIE CANNOT BE PAGED ON.
-       fetchAll pages with .range() — LIMIT/OFFSET, a separate request per page —
-       and a day of trading is thousands of lines all carrying the same
-       sale_date. Postgres makes no promise about the order of tied rows between
-       two requests, so a line can be returned on two pages (counted twice in
-       every total and in the receipt set) or on neither (lost from all of them),
-       and retail_sale_lines is being appended to by imports while this reads.
-       `id` is unique and is appended LAST, so newest-day-first is untouched. */
-    const { rows: got, error, truncated: cut } = await fetchAll<Row>((lo, hi) => {
+    /* KEYSET, ORDERED BY `id` ALONE — AND THE SECOND SORT KEY HAD TO GO.
+       The note that used to sit here was right about the danger and wrong about
+       the cure. `sale_date` IS a tie — a day of trading is thousands of lines
+       carrying the same date — and paging on a tie really can return a line
+       twice or lose it. But adding `id` as a tiebreak to an OFFSET pager does
+       not fix that cheaply: it makes every page re-sort the whole filtered range
+       AND still reads and discards every row it skips. Measured on this table at
+       58,303 lines: 307 ms for one page at offset 55,000 against 8 ms for the
+       same page by key, and the cost of the whole range is the sum of every
+       page — about 1.7 million row visits. This exact query shape was the
+       slowest statement in the project (7,404 ms worst, against an 8-second
+       timeout), and on a computer `srvPlan` is always null so the computer
+       ALWAYS took it.
+
+       A keyset cursor is itself a total order, so there is nothing left to
+       tiebreak and nothing to re-sort: `id` is unique, ever-increasing, and
+       appended last. Newest-day-first is restored below, in memory, where it is
+       free — the rows are already here by then. */
+    const { rows: got, error, truncated: cut } = await fetchKeyset<Row>((afterId) => {
       let sq = db.from("retail_sale_lines")
         .select("id,branch_id,sale_date,receipt_no,receipt_txn,item_code,item_name,department,salesperson,customer,quantity,net_sales,sales_amount,gross_margin,discount,payment_method")
-        .order("sale_date", { ascending: false, nullsFirst: false })
-        .order("id", { ascending: true });
+        .gt("id", afterId);
       if (from) sq = sq.gte("sale_date", from);
       if (to) sq = sq.lte("sale_date", to);
       if (branch) sq = sq.eq("branch_id", Number(branch));
-      return sq.range(lo, hi);
+      return sq.order("id", { ascending: true }).limit(1000);
     });
     if (error) setErr(error);
     setSrv(null);
+    /* The order the screen displays, applied once instead of per page. Same
+       comparison the query used to ask the database for: newest sale_date first,
+       then id ascending within a day. */
+    got.sort((a: Row, b: Row) => {
+      const da = String(a.sale_date ?? ""), dbb = String(b.sale_date ?? "");
+      if (da !== dbb) return da < dbb ? 1 : -1;
+      return Number(a.id) - Number(b.id);
+    });
     setRows(got);
     setTruncated(cut);
     setLoading(false);
