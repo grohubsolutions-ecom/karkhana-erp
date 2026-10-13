@@ -52,7 +52,7 @@ const rs = (v: unknown) =>
    from the old system. Guessing was worse than not knowing. */
 const blank = {
   name: "", phone: "", cnic: "", designation: "",
-  pay_amount: "", join_date: "", pay_from: "",
+  pay_amount: "", join_date: "", pay_from: "", pay_mode: "from",
 };
 
 /* WHY AN EDGE FUNCTION FAILURE USED TO SAY NOTHING.
@@ -219,6 +219,8 @@ export default function HubEmployeesPage() {
   }, [rows, q]);
 
   const payroll = shown.reduce((t, r) => t + (Number(r.pay_amount) || 0), 0);
+  // Month name for the salary-timing choice, e.g. "October".
+  const monthLabel = new Date().toLocaleDateString("en-US", { month: "long" });
 
   function startAdd() { setEditing(null); setForm({ ...blank }); setOpen(true); }
   function startEdit(e: Emp) {
@@ -227,7 +229,7 @@ export default function HubEmployeesPage() {
       name: e.name ?? "", phone: e.phone ?? "", cnic: e.cnic ?? "",
       designation: e.designations?.name ?? "",
       pay_amount: e.pay_amount == null ? "" : String(e.pay_amount),
-      pay_from: "",
+      pay_from: "", pay_mode: "from",
       join_date: e.join_date ?? "",
     });
     setOpen(true);
@@ -321,13 +323,21 @@ export default function HubEmployeesPage() {
       const newSal = Number(payload.pay_amount ?? 0);
       const oldSal = Number(editing.pay_amount ?? 0);
       if (newSal > 0 && newSal !== oldSal) {
-        const { error: hErr } = await supabase.from("online_att_salary_history").upsert({
-          emp_id: editing.id,
-          effective_from: form.pay_from || new Date().toISOString().slice(0, 10),
-          sal: newSal,
-          note: oldSal ? `changed from ${oldSal}` : "rate set",
-        }, { onConflict: "emp_id,effective_from" });
-        if (hErr) followUpErr = (followUpErr ? followUpErr + " and " : "") + `the salary history (${hErr.message})`;
+        /* The salary number itself is already saved (employees.pay_amount above
+           and online_att_employees.sal via the mirror). This records the RATE
+           HISTORY the payroll reads, the way the boss chose on the form:
+             month — the whole of this month values at the new rate;
+             from  — the new rate from the given date on, earlier days unchanged.
+           hub_set_salary realigns any overlapping rows so the choice is exact. */
+        const { data: sres, error: hErr } = await supabase.rpc("hub_set_salary", {
+          p_emp: editing.id,
+          p_sal: newSal,
+          p_mode: form.pay_mode === "month" ? "month" : "from",
+          p_from: form.pay_mode === "month" ? null : (form.pay_from || null),
+        });
+        const sr = sres as { ok?: boolean; error?: string } | null;
+        if (hErr) followUpErr = (followUpErr ? followUpErr + " and " : "") + `the salary history (${needsMigration(hErr.message) ?? hErr.message})`;
+        else if (sr && !sr.ok) followUpErr = (followUpErr ? followUpErr + " and " : "") + `the salary history (${sr.error})`;
       }
     }
 
@@ -573,14 +583,37 @@ export default function HubEmployeesPage() {
                  onChange={(e) => setForm({ ...form, phone: e.target.value })} placeholder="03xx…" /></Field>
           <Field label="CNIC"><input className={inputCls} value={form.cnic}
                  onChange={(e) => setForm({ ...form, cnic: e.target.value })} placeholder="optional" /></Field>
-          <Field label="Salary applies from">
-              <input type="date" className={inputCls} value={form.pay_from}
-                     onChange={(e) => setForm({ ...form, pay_from: e.target.value })} />
-              <p className="mt-1 text-[11.5px] text-hint dark:text-[#8a8175]">
-                Only needed when you change the salary. Days before this date keep the
-                old rate, so months already paid do not move. Blank means today.
+          {/* H296: a salary change now applies one of two ways, chosen here.
+              Shown only when editing — a new person's rate simply starts on
+              their join date. The number is typed above; this is the timing. */}
+          {editing && (
+            <div className="sm:col-span-2">
+              <div className="text-[12.5px] font-semibold text-ink dark:text-[#e7e2d8]">When the new salary applies</div>
+              <div className="mt-1.5 grid gap-2 sm:grid-cols-2">
+                <label className={`flex cursor-pointer items-start gap-2.5 rounded-xl2 border px-3 py-2.5 transition ${form.pay_mode === "month" ? "border-ink/30 bg-panel dark:border-white/30 dark:bg-white/[0.06]" : "border-line hover:bg-panel/60 dark:border-white/10 dark:hover:bg-white/[0.04]"}`}>
+                  <input type="radio" name="pay_mode" className="mt-0.5 accent-ink dark:accent-white" checked={form.pay_mode === "month"} onChange={() => setForm({ ...form, pay_mode: "month" })} />
+                  <span className="text-[13px]">
+                    <span className="font-semibold text-ink dark:text-[#f4f1ea]">This whole month ({monthLabel})</span>
+                    <span className="mt-0.5 block text-[11.5px] font-normal text-hint dark:text-[#8a8175]">Every day of {monthLabel} is recalculated at the new salary.</span>
+                  </span>
+                </label>
+                <label className={`flex cursor-pointer items-start gap-2.5 rounded-xl2 border px-3 py-2.5 transition ${form.pay_mode === "from" ? "border-ink/30 bg-panel dark:border-white/30 dark:bg-white/[0.06]" : "border-line hover:bg-panel/60 dark:border-white/10 dark:hover:bg-white/[0.04]"}`}>
+                  <input type="radio" name="pay_mode" className="mt-0.5 accent-ink dark:accent-white" checked={form.pay_mode === "from"} onChange={() => setForm({ ...form, pay_mode: "from" })} />
+                  <span className="text-[13px]">
+                    <span className="font-semibold text-ink dark:text-[#f4f1ea]">From a date</span>
+                    <span className="mt-0.5 block text-[11.5px] font-normal text-hint dark:text-[#8a8175]">Days before this date keep the old rate. Blank means today.</span>
+                  </span>
+                </label>
+              </div>
+              {form.pay_mode === "from" && (
+                <input type="date" className={`${inputCls} mt-2`} value={form.pay_from} max={todayPk()}
+                       onChange={(e) => setForm({ ...form, pay_from: e.target.value })} />
+              )}
+              <p className="mt-1.5 text-[11.5px] text-hint dark:text-[#8a8175]">
+                Only applies when you change the salary above. Earlier months never move.
               </p>
-            </Field>
+            </div>
+          )}
             {/* H289: this date decides the wage. Sundays and holidays before
                 it are not paid, so a man who starts on the 15th is not paid for
                 the two Sundays he was not here. Left empty, every Sunday of his
