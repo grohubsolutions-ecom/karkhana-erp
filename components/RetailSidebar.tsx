@@ -219,14 +219,32 @@ export default function RetailSidebar({ open, onClose }: { open?: boolean; onClo
                 </div>
               )}
 
-              {manage.length > 0 && <GroupLabel>Manage</GroupLabel>}
-              {manage.map((l) => (
-                <TopRow key={l.href} leaf={l} on={isActive(pathname, l.href)}
-                  onClick={() => { setShopKey(null); setOpenKey(null); onClose?.(); }} />
-              ))}
             </>
           )}
         </nav>
+
+        {/* ── MANAGE IS PINNED, NOT SCROLLED ──────────────────────────────
+            It used to sit at the end of the scrolling list. With a shop
+            expanded — seven screens plus the Employee group — the list is
+            taller than the panel, so MANAGE fell off the bottom and Import,
+            Cards, Bank, Salary and Branches could not be found at all without
+            knowing to scroll past nine rows first. These five are short, fixed
+            and used from anywhere, so they get their own place that nothing can
+            push away. The shops scroll; these do not.
+
+            `max-h-[45%]` with its own overflow is the short-window case: on a
+            600px laptop the five would otherwise squeeze the shop list down to
+            nothing, so they give way at the point where they would start
+            crowding it out. */}
+        {ready && manage.length > 0 && (
+          <div className="max-h-[45%] shrink-0 overflow-y-auto border-t border-line px-3 py-2 dark:border-white/[0.06]">
+            <GroupLabel>Manage</GroupLabel>
+            {manage.map((l) => (
+              <TopRow key={l.href} leaf={l} on={isActive(pathname, l.href)}
+                onClick={() => { setShopKey(null); setOpenKey(null); onClose?.(); }} />
+            ))}
+          </div>
+        )}
 
         <div className="space-y-1 border-t border-line p-3 dark:border-white/[0.06]">
           <div className="flex items-center justify-between px-2 py-1"><span className="text-[11px] text-hint dark:text-[#8a8175]">Theme</span><ThemeToggle /></div>
@@ -249,7 +267,7 @@ const IDLE   = "text-muted hover:bg-panel hover:text-ink dark:text-[#a89f93] dar
 
 function GroupLabel({ children }: { children: React.ReactNode }) {
   return (
-    <div className="px-3.5 pb-1 pt-4 text-[10.5px] font-bold uppercase tracking-[0.07em] text-hint dark:text-[#8a8175]">
+    <div className="px-3.5 pb-1 pt-2 text-[10.5px] font-bold uppercase tracking-[0.07em] text-hint dark:text-[#8a8175]">
       {children}
     </div>
   );

@@ -30,7 +30,9 @@
  * WHAT IS DELIBERATELY NOT COPIED
  *   · Day Close is not in the old app. It sits under each shop, where the rest
  *     of that shop's day already lives.
- *   · Import is not a shop screen and is under MANAGE — see the note there.
+ *   · Import appears under each shop AND under MANAGE. One Nimbus file can
+ *     carry six shops, so it belongs in MANAGE; but it is also what you reach
+ *     for standing in a shop with a file, so it is there too.
  *   · Repayments exists in this build and had no menu entry in the old one. It
  *     is under Employee with the rest.
  *
@@ -61,6 +63,16 @@ export type NavItem = NavLeaf & { children?: NavLeaf[] };
    cash, does the till balance, what did the shop earn. */
 export const SHOP_SCREENS: NavLeaf[] = [
   { label: "Sales",       href: "/retail/sales",       Icon: Receipt,        colour: "#0891b2" },
+  /* IMPORT IS HERE AND ALSO UNDER MANAGE, ON PURPOSE.
+     It was taken out of this list once, on the reasoning that one Nimbus file
+     can carry six shops so the screen is not "about" any one of them. True, and
+     beside the point: this is the list somebody is looking at when they have a
+     file to upload, and the day's work IS sales, then expenses, then non-cash,
+     then the file that ties them together. Putting it only at the bottom of
+     MANAGE meant that with a shop expanded it scrolled off the end of the menu
+     and could not be found at all. Two entries pointing at one screen is not a
+     duplicate; it is the screen being where the hand already is. */
+  { label: "Import",      href: "/retail/import",      Icon: Upload,         colour: "#64748b" },
   { label: "Expenses",    href: "/retail/expenses",    Icon: NotebookPen,    colour: "#d97706" },
   { label: "Non-cash",    href: "/retail/payments",    Icon: ArrowLeftRight, colour: "#e11d48" },
   { label: "Cash Book",   href: "/retail/cashbook",    Icon: BookText,       colour: "#059669" },

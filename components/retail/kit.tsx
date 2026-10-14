@@ -17,7 +17,8 @@
  *   database. This file knows about layout and loading states.
  */
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
-import { RefreshCw, X, ChevronRight, type LucideIcon } from "lucide-react";
+import Link from "next/link";
+import { RefreshCw, X, ChevronRight, Upload, type LucideIcon } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import RangeBar from "@/components/RangeBar";
 import { PRESETS } from "@/lib/dateRange";
@@ -541,6 +542,26 @@ export function PageHeader({ title, subtitle, onRefresh, loading, children }: {
         )}
       </div>
     </div>
+  );
+}
+
+/** IMPORT, FROM WHEREVER YOU ARE.
+ *
+ *  Sales, Non-cash and Expenses are the three screens somebody is looking at
+ *  when they realise a file still has to go in — the figures are short, or the
+ *  day is blank, and the next move is always the same. Making them find Import
+ *  in the menu first is three taps and a scroll to answer a question the screen
+ *  itself just raised.
+ *
+ *  It is a link, not a modal: the Import screen has the file picker, the
+ *  preview and the checks, and none of that belongs duplicated in three places.
+ */
+export function ImportButton() {
+  return (
+    <Link href="/retail/import"
+      className="flex items-center justify-center gap-2 rounded-full border border-line bg-surface px-4 py-2 text-[13px] font-semibold text-ink transition hover:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:hover:bg-white/[0.12]">
+      <Upload size={14} /> Import
+    </Link>
   );
 }
 

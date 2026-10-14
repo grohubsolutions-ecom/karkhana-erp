@@ -36,7 +36,7 @@
  * and the menu disagree about what a shop is.
  */
 "use client";
-import { useState, useSyncExternalStore } from "react";
+import { useMemo, useState, useSyncExternalStore } from "react";
 import type { Branch } from "@/components/retail/kit";
 
 export type Shop = {
@@ -106,12 +106,16 @@ export function useScopedBranchId(branches: Branch[], pool?: Branch[]): {
 } {
   const shop = useShopScope(branches);
   const all = pool ?? branches;
-  const list = shop.ids ? all.filter((b) => shop.ids!.includes(b.id)) : all;
-  return {
-    id: shop.single || (list[0] ? String(list[0].id) : ""),
-    list, shop,
-    set: shop.set,
-  };
+  /* Memoised for the same reason as useShopScope above: `list` in a dependency
+     array must not be a new array on every render. */
+  return useMemo(() => {
+    const list = shop.ids ? all.filter((b) => shop.ids!.includes(b.id)) : all;
+    return {
+      id: shop.single || (list[0] ? String(list[0].id) : ""),
+      list, shop,
+      set: shop.set,
+    };
+  }, [shop, all]);
 }
 
 /** THE STAFF SCREENS' BRANCH FILTER — Attendance, Monthly Summary, Ledger,
@@ -136,18 +140,24 @@ export function useStaffScope(branches: Branch[], pool: Branch[], follow: boolea
   const shop = useShopScope(branches);
   const [local, setLocal] = useState("");
 
-  const pickable = follow && shop.ids
-    /* Top Shop narrows the list to its own six. */
-    ? pool.filter((b) => shop.ids!.includes(b.id))
-    : pool;
-  const allowed = new Set(pickable.map((b) => b.id));
-
-  return {
-    branch: follow ? shop.single : local,
-    setBranch: follow ? shop.set : setLocal,
-    pickable,
-    inPool: (id: unknown) => allowed.has(Number(id)),
-  };
+  /* MEMOISED — see the note on useShopScope. `inPool` goes into the dependency
+     array of the `people` memo on all four of these screens, and `people` feeds
+     the employee-id list that the loader keys on. A new function here meant a
+     new id list every render, a new loader every render, and an effect that
+     fired for ever. */
+  return useMemo(() => {
+    const pickable = follow && shop.ids
+      /* Top Shop narrows the list to its own six. */
+      ? pool.filter((b) => shop.ids!.includes(b.id))
+      : pool;
+    const allowed = new Set(pickable.map((b) => b.id));
+    return {
+      branch: follow ? shop.single : local,
+      setBranch: follow ? shop.set : setLocal,
+      pickable,
+      inPool: (id: unknown) => allowed.has(Number(id)),
+    };
+  }, [shop, pool, follow, local]);
 }
 
 /** The branch ids a screen should show. No shop chosen means every shop — the
@@ -276,35 +286,57 @@ export type ShopScope = {
   backLabel: string;
 };
 
+/* ──────────────────────────────────────────────────────────────────────────
+   THIS RESULT IS MEMOISED, AND THAT IS NOT AN OPTIMISATION.
+
+   It used to build a fresh object on every render: a new `ids` array, a new
+   `set`, a new `back`. Anything downstream that listed one of those in a
+   dependency array therefore re-ran on EVERY render — and on the four staff
+   screens that closed a loop:
+
+       inPool is new  ->  `people` useMemo recomputes  ->  `ids` useMemo gets a
+       new array  ->  the `load` useCallback is new  ->  useEffect([load]) fires
+       ->  setLoading / setDay  ->  render  ->  inPool is new …
+
+   The screen never settled. It sat on its skeleton with every tile reading "—",
+   flickering, and hammering the database with the same query for as long as it
+   was open. Attendance, Monthly Summary, Ledger and Repayments all did it.
+
+   So the object is built once per (branches, key) and handed back by reference.
+   A dependency array containing `scope`, `scope.ids` or `inPool` is then stable
+   by construction, and the loop cannot come back by somebody adding one.
+   ────────────────────────────────────────────────────────────────────────── */
 export function useShopScope(branches: Branch[], allLabel = "All stores"): ShopScope {
   const key = useShopKey();
-  const shop = findShop(branches, key);
+  return useMemo(() => {
+    const shop = findShop(branches, key);
 
-  /* A 'b<id>' key that is not itself a menu shop is a Top Shop branch picked
-     from a screen. It is still a perfectly good scope — one branch. */
-  let ids: number[] | null = null;
-  let label = allLabel;
-  if (shop) { ids = shop.ids; label = shop.label; }
-  else if (key && key.startsWith("b")) {
-    const id = Number(key.slice(1));
-    const b = branches.find((x) => x.id === id);
-    if (b) { ids = [id]; label = b.name ?? "—"; }
-  }
+    /* A 'b<id>' key that is not itself a menu shop is a Top Shop branch picked
+       from a screen. It is still a perfectly good scope — one branch. */
+    let ids: number[] | null = null;
+    let label = allLabel;
+    if (shop) { ids = shop.ids; label = shop.label; }
+    else if (key && key.startsWith("b")) {
+      const id = Number(key.slice(1));
+      const b = branches.find((x) => x.id === id);
+      if (b) { ids = [id]; label = b.name ?? "—"; }
+    }
 
-  /* One step out: a Top Shop branch falls back to Top Shop, a shop falls back
-     to every shop. Worked out once here so `back()` and `backLabel` cannot
-     disagree about where the button goes. */
-  const owner = key ? shopList(branches).find((s) => shopCovers(s, key)) : undefined;
-  const up = owner && owner.key !== key ? owner : null;
+    /* One step out: a Top Shop branch falls back to Top Shop, a shop falls back
+       to every shop. Worked out once here so `back()` and `backLabel` cannot
+       disagree about where the button goes. */
+    const owner = key ? shopList(branches).find((s) => shopCovers(s, key)) : undefined;
+    const up = owner && owner.key !== key ? owner : null;
 
-  return {
-    key,
-    ids,
-    single: ids && ids.length === 1 ? String(ids[0]) : "",
-    label,
-    pick: setShopKey,
-    set: (v: string) => setShopKey(v ? "b" + v : null),
-    back: () => { if (key) setShopKey(up ? up.key : null); },
-    backLabel: up ? up.label : allLabel,
-  };
+    return {
+      key,
+      ids,
+      single: ids && ids.length === 1 ? String(ids[0]) : "",
+      label,
+      pick: setShopKey,
+      set: (v: string) => setShopKey(v ? "b" + v : null),
+      back: () => { if (key) setShopKey(up ? up.key : null); },
+      backLabel: up ? up.label : allLabel,
+    };
+  }, [branches, key, allLabel]);
 }

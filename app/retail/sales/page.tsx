@@ -83,7 +83,7 @@ import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { rangeDates } from "@/lib/dateRange";
 import {
   RetailRange,
-  Shell, PageHeader, StatCards, DataTable, Tabs, Pill, ShopSelect,
+  Shell, PageHeader, StatCards, DataTable, Tabs, Pill, ShopSelect, ImportButton,
   PreviewNote, SourceNote, useBranches, money, num, text, sum, fetchAll, fetchKeyset,
   useIsPhone, RowCard, ActionBar,
   type Branch, type Row, type Col,
@@ -598,7 +598,11 @@ export default function RetailSalesPage() {
   return (
     <Shell>
       <PageHeader title="Sales" subtitle="Every shop, then every payment method, then every bill."
-        onRefresh={load} loading={loading} />
+        onRefresh={load} loading={loading}>
+        {/* The day's figures are short? The next move is always the same file.
+            See ImportButton in the kit. */}
+        <ImportButton />
+      </PageHeader>
 
       <RetailRange preset={preset} setPreset={setPreset} cf={cf} setCf={setCf} ct={ct} setCt={setCt}
         right={

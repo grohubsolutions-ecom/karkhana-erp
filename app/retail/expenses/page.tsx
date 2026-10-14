@@ -45,7 +45,7 @@ import Modal, { Field, inputCls, btnPrimary, btnGhost } from "@/components/Modal
 import { rangeDates } from "@/lib/dateRange";
 import {
   RetailRange,
-  Shell, PageHeader, StatCards, DataTable, Pill, PreviewNote, SourceNote,
+  Shell, PageHeader, StatCards, DataTable, Pill, ImportButton, PreviewNote, SourceNote,
   CardList, RowCard, useIsPhone,
   useBranches, money, num, text, today, fetchAll, type Col,
 } from "@/components/retail/kit";
@@ -461,6 +461,7 @@ export default function ExpensesPage() {
         subtitle="Shop outgoings and the money that comes in without being a sale."
         onRefresh={load} loading={loading}
       >
+        <ImportButton />
         <button onClick={openAdd} className={btnPrimary}><Plus size={15} /> New entry</button>
       </PageHeader>
 

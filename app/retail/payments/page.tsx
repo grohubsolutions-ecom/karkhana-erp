@@ -44,7 +44,7 @@ import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { rangeDates } from "@/lib/dateRange";
 import {
   RetailRange,
-  Shell, PageHeader, StatCards, DataTable, Pill, ShopSelect, PreviewNote, SourceNote,
+  Shell, PageHeader, StatCards, DataTable, Pill, ShopSelect, ImportButton, PreviewNote, SourceNote,
   ActionBar, CardList, RowCard, useIsPhone,
   useBranches, money, num, text, today, addDays, fetchAll, fetchKeyset, CARD_RATE_PCT, cardExpected,
   type Row, type Col,
@@ -427,6 +427,7 @@ export default function NonCashPage() {
       <PageHeader title="Non-cash" subtitle="Card, JazzCash, online and udhaar — sales that never reached the till."
         onRefresh={refreshAll} loading={loadingCard || loadingUnc || loadingMix}>
         <ShopSelect branches={branches} scope={scope} className="max-md:hidden" />
+        <ImportButton />
       </PageHeader>
 
       <StatCards stats={stats} loading={loadingUnc || loadingMix} />
