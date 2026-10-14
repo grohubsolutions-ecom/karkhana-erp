@@ -37,19 +37,28 @@
  *   not be read in full then every total on the page is a lower bound, and the
  *   screen says exactly that instead of printing "all N are in every total".
  *
- * WHY A PHONE ASKS THE DATABASE TO ADD UP INSTEAD  (phone work, Oct 2026)
+ * WHY THE DATABASE ADDS UP INSTEAD  (Oct 2026, widened to every device)
  *   Levels 1 and 2, and the By Department / By Salesperson views, are pure
- *   sums — nothing on them needs an individual line. Over "all time" that is
- *   upwards of 150,000 rows paged into the browser over mobile data to produce
- *   nine figures. So on a phone those states call `retail_sales_rollup`, which
- *   returns one row per branch (or per method / department / salesperson) and
- *   counts receipts on the same `branch|receipt_txn/receipt_no/id` key this
- *   file builds by hand.
+ *   sums — nothing on them needs an individual line. A 30-day range is 13,360
+ *   lines, which is FOURTEEN sequential requests from Lahore to produce nine
+ *   figures; "all time" is upwards of 150,000 rows. So those states call
+ *   `retail_sales_agg_m`, which returns one row per branch (or per method /
+ *   department / salesperson) and counts receipts on the same
+ *   `branch|receipt_txn/receipt_no/id` key this file builds by hand.
+ *
+ *   This began as a phone-only concession, on the reasoning that a computer
+ *   could afford the rows. It cannot: the first of those fourteen requests
+ *   measured 1,076 ms because it walks the primary key from id 1 and discards
+ *   44,943 rows to reach the range. A laptop is not a reason to send it 13,000
+ *   rows; it is just a bigger screen. Every device uses the roll-up now.
  *
  *   Four rules keep that from quietly becoming a different screen:
- *     · THE COMPUTER NEVER USES IT. A computer reads the lines exactly as it
- *       did, because the roll-up has no `discount` and the diagnostics row
- *       would lose a figure. Nothing above 767.98px changed.
+ *     · NO FIGURE IS SILENTLY DROPPED. The diagnostics row has a `discount`
+ *       total the aggregate has no column for, so it comes from
+ *       `retail_sales_discount` asked for in the same batch. That tile would
+ *       otherwise have read Rs 0 — a plausible wrong number beside four right
+ *       ones, which is the exact failure this department keeps being audited
+ *       for.
  *     · ANYTHING THAT NEEDS A LINE STILL READS LINES — level 3 (bills), the
  *       Lines view, By Item (there is deliberately no item dimension), and the
  *       moment anybody types in the search box, because no roll-up can search
@@ -155,6 +164,9 @@ export default function RetailSalesPage() {
   const { branches } = useBranches();
   const [rows, setRows] = useState<Row[]>([]);
   const [srv, setSrv] = useState<Srv | null>(null);
+  /* Discounts are the one tile the aggregate has no column for — see migration
+     0132. Asked for alongside it, so it costs no extra wall-clock. */
+  const [srvDiscount, setSrvDiscount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
   /* TRUE WHEN THE LINE READ HIT fetchAll's 200,000-ROW CEILING.
@@ -193,21 +205,31 @@ export default function RetailSalesPage() {
     view === "departments" ? "department" : view === "salespeople" ? "salesperson" : null;
 
   /* THE ONE PLACE THAT DECIDES WHETHER THIS SCREEN READS LINES.
-     A phone, no search text, and a state that is a pure sum. Everything else —
-     every computer, level 3, the Lines and By Item views, and any search —
-     reads lines as it always did. `null` on a computer is a stable value, so
-     the loader's dependencies are unchanged there and switching view still
-     does not refetch. */
+   *
+   * It used to say `if (!phone) return null` — the roll-up was a phone
+   * concession and every computer read the whole range. That was backwards.
+   * Measured on the live database, a 30-day range is 13,360 sale lines, which
+   * is FOURTEEN sequential requests from Lahore, the first of them 1,076 ms
+   * because it walks the primary key from id 1 and discards 44,943 rows to
+   * reach the range. The same question answered server-side is ONE call of
+   * ~300 ms returning eight rows. A laptop is not a reason to send it 13,000
+   * rows; it is just a bigger screen.
+   *
+   * So the roll-up now serves every device for every state that is a pure sum.
+   * What still reads lines, because it genuinely needs them: the Lines view,
+   * By Item, any search, and level 3 (one shop, one payment method) — the
+   * places that show individual bills rather than totals.
+   *
+   * Top Shop is no longer an exception either: retail_sales_agg_m takes an
+   * ARRAY of branch ids (migration 0131), so six branches are one call. Before
+   * that it had to fall back to reading lines, because the single-branch
+   * roll-up could not say "these six and not the other three" and totalling
+   * all nine would have quietly included Fashion Collection. */
   const srvPlan = useMemo(() => {
     const summable = view === "stores" ? !pm : groupDim !== null;
-    if (!phone || q.trim() || !summable) return null;
-    /* retail_sales_rollup takes ONE branch. Top Shop is six, and asking for
-       all of them and then adding up would include Fashion Collection — the
-       wrong number, quietly. So a multi-branch shop reads lines instead, which
-       is what the computer does anyway and is exact. */
-    if (scope.ids && scope.ids.length > 1) return null;
+    if (q.trim() || !summable) return null;
     return { dim: groupDim, branch };
-  }, [phone, q, view, pm, groupDim, branch, scope.ids]);
+  }, [q, view, pm, groupDim, branch]);
 
   const load = useCallback(async () => {
     if (!isSupabaseConfigured || !supabase) { setLoading(false); return; }
@@ -217,14 +239,21 @@ export default function RetailSalesPage() {
     const ids = scope.ids;
 
     if (srvPlan) {
-      const br = srvPlan.branch ? Number(srvPlan.branch) : null;
-      const ask = (by: string[]) => db.rpc("retail_sales_rollup", { p_from: from, p_to: to, p_branch: br, p_by: by });
+      /* The whole shop, not one branch of it. null means every shop. */
+      const ask = (by: string[]) =>
+        db.rpc("retail_sales_agg_m", { p_from: from, p_to: to, p_branches: ids, p_by: by });
       /* Per-branch always: it carries the headline figures AND the store's own
          bill count, which must not be totalled off the method tiles. */
-      const jobs = [ask(["branch_id"])];
-      if (srvPlan.dim) jobs.push(ask([srvPlan.dim]));
+      /* 'receipts' is a flag, not a dimension: the distinct-count it turns on
+         is the expensive part of this function, so it is asked for only where
+         a bill count is actually shown. */
+      const jobs = [ask(["branch_id", "receipts"])];
+      if (srvPlan.dim) jobs.push(ask([srvPlan.dim, "receipts"]));
       else if (srvPlan.branch) jobs.push(ask(["branch_id", "payment_method"]));
-      const res = await Promise.all(jobs);
+      const [res, disc] = await Promise.all([
+        Promise.all(jobs),
+        db.rpc("retail_sales_discount", { p_from: from, p_to: to, p_branches: ids }),
+      ]);
       const bad = res.find((g) => g.error);
       if (!bad) {
         const base = (res[0].data as RollRow[]) ?? [];
@@ -236,6 +265,8 @@ export default function RetailSalesPage() {
           dim: srvPlan.dim,
         });
         setRows([]);
+        setSrvDiscount(((disc.data as { discount: unknown }[]) ?? [])
+          .reduce((t, r) => t + num(r.discount), 0));
         /* The database did the adding up, so no ceiling was involved and there is
            nothing to warn about. Cleared explicitly — a stale `true` from a
            previous range would put a lower-bound warning under figures that are
@@ -356,17 +387,27 @@ export default function RetailSalesPage() {
     { label: "Receipts", value: totals.recs.toLocaleString(), Icon: ScrollText, bg: "bg-periwinkle-soft" },
     { label: "Avg receipt", value: money(totals.recs ? totals.sales / totals.recs : 0), Icon: Layers, bg: "bg-lavender-soft" },
   ];
-  /* The diagnostics row. COMPUTER ONLY, for two reasons: eight tiles at two per
-     row push the actual list a screen and a half down a 390px phone, and the
-     database roll-up a phone reads has no discount total. The four figures that
-     answer "how did we do" are above; these four answer "is the import sane",
-     which is a desk question. */
-  const secondary = [
-    { label: "Items sold", value: Math.round(sum(filtered, "quantity")).toLocaleString(), Icon: Layers, bg: "bg-amber-soft" },
-    { label: "Discounts", value: money(sum(filtered, "discount")), Icon: Tag, bg: "bg-pink-soft" },
-    { label: "Lines read", value: filtered.length.toLocaleString(), Icon: Rows3, bg: "bg-panel" },
-    { label: "Shops selling", value: new Set(filtered.map((r) => String(r.branch_id))).size.toLocaleString(), Icon: Store, bg: "bg-panel" },
-  ];
+  /* The diagnostics row. COMPUTER ONLY: eight tiles at two per row push the
+     actual list a screen and a half down a 390px phone. The four figures above
+     answer "how did we do"; these four answer "is the import sane", which is a
+     desk question.
+     Each one reads whichever source actually loaded — the roll-up or the lines.
+     When this screen stopped reading raw lines on a computer these would have
+     silently gone to zero, four plausible wrong numbers under four right ones. */
+  const secondary = (() => {
+    const rs = srv?.branches ?? null;
+    const items = rs ? rs.reduce((t, r) => t + num(r.qty), 0) : sum(filtered, "quantity");
+    const lineN = rs ? rs.reduce((t, r) => t + num(r.lines), 0) : filtered.length;
+    const shops = rs
+      ? rs.filter((r) => num(r.sales) !== 0 || num(r.lines) !== 0).length
+      : new Set(filtered.map((r) => String(r.branch_id))).size;
+    return [
+      { label: "Items sold", value: Math.round(items).toLocaleString(), Icon: Layers, bg: "bg-amber-soft" },
+      { label: "Discounts", value: money(rs ? srvDiscount : sum(filtered, "discount")), Icon: Tag, bg: "bg-pink-soft" },
+      { label: "Sale lines", value: Math.round(lineN).toLocaleString(), Icon: Rows3, bg: "bg-panel" },
+      { label: "Shops selling", value: shops.toLocaleString(), Icon: Store, bg: "bg-panel" },
+    ];
+  })();
 
   /* ── LEVEL 1 · stores ───────────────────────────────────────────────────
      Every trading branch is listed, not only the ones with sales, because a

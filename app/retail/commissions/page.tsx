@@ -60,6 +60,8 @@ import {
   useIsPhone, RowCard, useBranches,
   type CommCfg, type Row, type Col,
 } from "@/components/retail/kit";
+import { useStaleRates, reloadStale, staleSeen, markStaleSeen } from "@/lib/retailStale";
+import { useShopScope } from "@/lib/retailShop";
 
 /* ── types ───────────────────────────────────────────────────────────────── */
 
@@ -75,6 +77,8 @@ type Branch = { id: number; name: string; code?: string | null; chain?: string |
 type Master = { item_code: string; item_name?: string | null; retail_price?: number | null; commission?: number | null; percentage?: number | null };
 type FcRate = { item_code: string; commission: number | null };
 type Stale = { item_code: string; commission: number | null; last_sold: string | null };
+/** One shop-day, as retail_commission_calc returns it. */
+type CalcRow = { branch_id: number; sale_date: string; per_piece: number | null; bonus: number | null };
 
 /** One shop-day. `pp` is per-piece money, `bonus` is slab money; the payout is
  *  Math.round(pp + bonus) and nothing else. */
@@ -154,7 +158,13 @@ export default function CommissionsPage() {
   const [from, setFrom] = useState(t0.slice(0, 8) + "01"); // month-to-date, like the original
   const [to, setTo] = useState(t0);
   const [chainFilter, setChainFilter] = useState("");
-  const [lines, setLines] = useState<Row[]>([]);
+
+  /* The shop from the left menu. `ids` is null for "every shop", which is what
+     the RPC wants too, so it passes straight through. A stable string key for
+     the dependency array — the array itself is a new object every render. */
+  const shop = useShopScope(branches);
+  const scopeIds = shop.ids;
+  const [cells, setCells] = useState<CalcRow[]>([]);
   /* Reads storage in the initialiser, inside a try, so a private window or
      blocked site data just starts on the first shop. Only ever rendered under
      `phone`, which is false on the server, so there is nothing to mismatch. */
@@ -178,7 +188,6 @@ export default function CommissionsPage() {
   const [savedCfg, setSavedCfg] = useState("");
 
   /* stale DHA rates */
-  const [stale, setStale] = useState<Stale[] | null>(null);
   const [staleOpen, setStaleOpen] = useState(false);
   const [staleSel, setStaleSel] = useState<string[]>([]);
   const [staleBusy, setStaleBusy] = useState(false);
@@ -244,37 +253,38 @@ export default function CommissionsPage() {
   const qTo = days.length ? days[days.length - 1] : dTo;
   const hasDays = days.length > 0;
 
-  const loadLines = useCallback(async () => {
+  /* ── THE CALCULATION NOW HAPPENS WHERE THE DATA IS ───────────────────────
+   *
+   * This screen used to page every sale line in the range down to the browser
+   * and add them up here. Measured on the live database, a 30-day range is
+   * 13,360 lines — FOURTEEN sequential requests from Lahore, and this query was
+   * the single heaviest statement in the whole project at 4,639 ms mean. The
+   * same answer from `retail_commission_calc` is ONE call of 70 ms returning
+   * 184 rows.
+   *
+   * The function is a line-for-line translation of the arithmetic that used to
+   * live below, and it was checked against it over all 58,303 lines before this
+   * screen was changed to use it: 783 shop-days each side, 0 differing, and the
+   * same Rs 335,137 total. Migration 0131 carries that proof in its comments.
+   *
+   * The rate sheets are still loaded (loadRef) because the DRILL-DOWN computes
+   * per receipt in the browser, and because the Rates and FC DHA tabs list
+   * them. Only the grid moved. */
+  const loadCells = useCallback(async () => {
     if (!isSupabaseConfigured || !supabase) { setLoading(false); return; }
-    if (!hasDays) { setLines([]); setLoading(false); return; }
+    if (!hasDays) { setCells([]); setLoading(false); return; }
     setLoading(true); setErr("");
-    const db = supabase;
-    /* ORDERED BY id, AND THAT IS NOT COSMETIC — IT IS THE PAYOUT.
-       fetchAll pages with .range(), which is LIMIT/OFFSET: each page is a
-       separate request. Postgres guarantees nothing about the order of rows
-       between two such requests unless the query names a total order, so with no
-       ORDER BY at all a row could arrive on page 3 and again on page 4, or fall
-       between the two and never arrive — and retail_sale_lines is appended to by
-       imports while somebody is reading it, which is exactly when offsets shift.
-       These lines ARE staff commission: a repeated line overpays somebody, a
-       skipped line underpays them, and both look like a plausible number on a
-       payout sheet. `id` is unique, so ordering on it makes the sequence of
-       pages one stable list. */
-    /* KEYSET, NOT OFFSET. This exact query was the slowest statement in the
-       whole project: measured 7,563 ms worst / 4,639 ms mean against an 8-second
-       statement timeout, because OFFSET reads and discards every row it skips and
-       page 55 of 59 discarded 56,000 of them. Asking for "the next 1,000 after
-       id N" costs 8 ms a page instead of 307, and stays flat as the table grows.
-       `id` is selected because it IS the cursor. */
-    const { rows, error } = await fetchKeyset<Row>((afterId) => db.from("retail_sale_lines")
-      .select("id,branch_id,sale_date,item_code,quantity,sales_amount,receipt_txn")
-      .gte("sale_date", from).lte("sale_date", qTo)
-      .gt("id", afterId).order("id", { ascending: true }).limit(1000));
-    if (error) setErr(error);
-    setLines(rows);
+    const { data, error } = await supabase.rpc("retail_commission_calc", {
+      p_from: from, p_to: qTo,
+      /* null means every shop. A chosen shop is its branch ids — Top Shop is
+         six of them, which is why this takes an array. */
+      p_branches: scopeIds,
+    });
+    if (error) setErr(error.message);
+    setCells((data as CalcRow[]) ?? []);
     setLoading(false);
-  }, [from, qTo, hasDays]);
-  useEffect(() => { loadLines(); }, [loadLines]);
+  }, [from, qTo, hasDays, shop.key]);
+  useEffect(() => { loadCells(); }, [loadCells]);
 
   /* ── the calculation, ported line for line ─────────────────────────────── */
 
@@ -289,49 +299,16 @@ export default function CommissionsPage() {
     return m;
   }, [fc]);
 
+  /* Keyed exactly as before — "<branch>|<date>" — so everything downstream of
+     here (the grid, the tiles, the share card) is untouched. */
   const cell = useMemo(() => {
     const out: Record<string, Cell> = {};
-    const recTot: Record<string, number> = {};
-    const dayTot: Record<string, number> = {};
-
-    lines.forEach((l) => {
-      const k = `${Number(l.branch_id)}|${String(l.sale_date)}`;
-      const c = (out[k] ??= { pp: 0, bonus: 0 });
-
-      /* RULE 2 — FC DHA: flat rate sheet, then RETURN. Not a shortcut. The
-         return is what keeps DHA out of recTot/dayTot below, which is what
-         keeps DHA out of the bonus; and the missing `else` fallback is what
-         makes an unlisted DHA barcode earn 0 rather than a Top Shop rate. */
-      if (dhaId != null && Number(l.branch_id) === dhaId) {
-        const r = fcMap.get(String(l.item_code));
-        if (r != null) c.pp += r * num(l.quantity);
-        return;
-      }
-
-      /* RULE 1 — retail_price × percentage, never the `commission` column. */
-      const m = masterMap.get(String(l.item_code));
-      if (m) c.pp += num(m.retail_price) * (num(m.percentage) / 100) * num(l.quantity);
-
-      /* The bonus is slabbed on SALES, so every line of a commissionable shop
-         counts toward it — including lines whose item is not on the master.
-         A blank receipt_txn collapses the day into one "receipt", exactly as
-         the original does: with no receipt to slab on, the day IS the receipt. */
-      const rk = `${k}|${text(l.receipt_txn, "")}`;
-      recTot[rk] = (recTot[rk] ?? 0) + num(l.sales_amount);
-      dayTot[k] = (dayTot[k] ?? 0) + num(l.sales_amount);
+    cells.forEach((r) => {
+      out[`${Number(r.branch_id)}|${String(r.sale_date)}`] =
+        { pp: num(r.per_piece), bonus: num(r.bonus) };
     });
-
-    /* RULE 3 — commBonus takes RUPEES. 'day' assigns once; 'receipt' sums. */
-    if (cfg.bonus_basis === "day") {
-      Object.keys(dayTot).forEach((k) => { if (out[k]) out[k].bonus = commBonus(dayTot[k], cfg); });
-    } else {
-      Object.keys(recTot).forEach((rk) => {
-        const k = rk.split("|").slice(0, 2).join("|");
-        if (out[k]) out[k].bonus += commBonus(recTot[rk], cfg);
-      });
-    }
     return out;
-  }, [lines, masterMap, fcMap, dhaId, cfg]);
+  }, [cells]);
 
   /* ── grid shape ────────────────────────────────────────────────────────── */
 
@@ -341,8 +318,12 @@ export default function CommissionsPage() {
   const shownBranches = useMemo(() => {
     const traded = new Set<string>();
     Object.keys(cell).forEach((k) => traded.add(k.split("|")[0]));
-    return branches.filter((b) => b.active !== false || traded.has(String(b.id)));
-  }, [branches, cell]);
+    /* Only the shop on the left menu. Without this, choosing FC DHA would still
+       print the six Top Shop columns at zero beside it, which reads as "Top Shop
+       earned no commission" about shops you are not looking at. */
+    const inScope = (b: { id: number }) => !scopeIds || scopeIds.includes(b.id);
+    return branches.filter((b) => inScope(b) && (b.active !== false || traded.has(String(b.id))));
+  }, [branches, cell, scopeIds]);
 
   const chains = useMemo(() => {
     const set = new Set(shownBranches.map((b) => String(b.chain ?? "").trim() || "Other"));
@@ -454,6 +435,19 @@ export default function CommissionsPage() {
         .map((r) => ({ ...r, comm: Math.round(r.pp + (!isDHA && cfg.bonus_basis === "receipt" ? commBonus(r.total, cfg) : 0)) }))
         .filter((r) => r.comm !== 0)
         .sort((a, b) => b.short - a.short);
+
+      /* ON 'day' BASIS THE BONUS BELONGS TO NO RECEIPT, so the old app simply
+         left it out and the drill-down silently failed to add up to the cell it
+         was opened from — rows totalling less than the figure somebody tapped,
+         with nothing saying why. It gets its own row instead, which is what it
+         is: one bonus, earned by the day rather than by any one bill. */
+      if (!isDHA && cfg.bonus_basis === "day") {
+        const dayTotal = rows.reduce((t, l) => t + num(l.sales_amount), 0);
+        const dayBonus = Math.round(commBonus(dayTotal, cfg));
+        if (dayBonus !== 0) {
+          out.push({ no: "Day bonus", short: -1, pp: 0, total: dayTotal, codes: [], comm: dayBonus });
+        }
+      }
       setDrillRows(out);
     })();
     return () => { live = false; };
@@ -461,15 +455,23 @@ export default function CommissionsPage() {
 
   /* ── stale FC DHA rates ────────────────────────────────────────────────── */
 
-  const loadStale = useCallback(async () => {
-    if (!isSupabaseConfigured || !supabase || dhaId == null) { setStale(null); return; }
-    /* The RPC takes the branch id as a PARAMETER precisely so nobody has to
-       hardcode 11 again — it is handed the branch resolved above. */
-    const { data, error } = await supabase.rpc("retail_fc_dha_stale_comm", { p_branch_id: dhaId, p_months: 3 });
-    if (error) { setStale(null); return; }
-    setStale((data as Stale[]) ?? []);
-  }, [dhaId]);
-  useEffect(() => { loadStale(); }, [loadStale]);
+  /* Shared with the Dashboard banner through lib/retailStale.ts, so the two
+     cannot show different counts, the question is asked once per page load, and
+     the three-months-of-history guard lives in one place. */
+  const { stale } = useStaleRates(branches);
+
+  /* OPEN IT BY ITSELF, ONCE. The old app did this and it is the only reason the
+     cleanup ever happened — but once per session, not once per navigation: a
+     dialog that reappears every time you touch this tab is a dialog people
+     learn to dismiss without reading. Arriving from the dashboard banner
+     (?stale=1) always opens it, because that is what was pressed. */
+  useEffect(() => {
+    if (!stale?.length) return;
+    const asked = typeof window !== "undefined"
+      && new URLSearchParams(window.location.search).get("stale") === "1";
+    if (asked) { setStaleOpen(true); markStaleSeen(); return; }
+    if (!staleSeen()) { setStaleOpen(true); markStaleSeen(); }
+  }, [stale]);
 
   async function deleteCodes(codes: string[]) {
     if (!supabase || !codes.length) return;
@@ -481,7 +483,7 @@ export default function CommissionsPage() {
       if (error) { setErr(error.message); setStaleBusy(false); return; }
     }
     const gone = new Set(codes);
-    setStale((s) => (s ?? []).filter((r) => !gone.has(String(r.item_code))));
+    reloadStale(dhaId);
     setFc((s) => s.filter((r) => !gone.has(String(r.item_code))));
     setStaleSel([]);
     setStaleBusy(false);
@@ -643,7 +645,7 @@ export default function CommissionsPage() {
       <PageHeader
         title="Commissions"
         subtitle="Per-piece from the rate sheet plus the slab bonus, minus returns — per shop, per day."
-        onRefresh={() => { loadRef(); loadLines(); loadStale(); }}
+        onRefresh={() => { loadRef(); loadCells(); reloadStale(dhaId); }}
         loading={loading || refLoading}
       >
         {tab === "rates" && (
@@ -824,7 +826,8 @@ export default function CommissionsPage() {
               : <>No FC DHA branch was found in <code>retail_branches</code>, so every shop is on the master rate.</>}{" "}
             The bonus slabs <strong>rupees</strong> — {money(cfg.bonus_per_slab)} per {money(cfg.bonus_slab)} of sales,
             {cfg.bonus_basis === "day" ? " on the day's total" : " on each receipt"} — never a receipt count.
-            Each cell is <code>Math.round(per-piece + bonus)</code>. Sale lines are paged, so no figure here is a lower bound.
+            Each cell is <code>Math.round(per-piece + bonus)</code>, added up by the database
+            (<code>retail_commission_calc</code>) rather than in this browser, so no figure here is a lower bound.
           </SourceNote>
         </>
       )}

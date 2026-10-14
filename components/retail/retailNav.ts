@@ -28,9 +28,9 @@
  * think "FC DHA, cash book", not "cash book, which shop again".
  *
  * WHAT IS DELIBERATELY NOT COPIED
- *   · Day Close and Import are not in the old app at all. Import was reachable
- *     only from inside Sales there, which is why nobody could find it; both sit
- *     under each shop here, where the rest of that shop's day already lives.
+ *   · Day Close is not in the old app. It sits under each shop, where the rest
+ *     of that shop's day already lives.
+ *   · Import is not a shop screen and is under MANAGE — see the note there.
  *   · Repayments exists in this build and had no menu entry in the old one. It
  *     is under Employee with the rest.
  *
@@ -61,7 +61,6 @@ export type NavItem = NavLeaf & { children?: NavLeaf[] };
    cash, does the till balance, what did the shop earn. */
 export const SHOP_SCREENS: NavLeaf[] = [
   { label: "Sales",       href: "/retail/sales",       Icon: Receipt,        colour: "#0891b2" },
-  { label: "Import",      href: "/retail/import",      Icon: Upload,         colour: "#64748b" },
   { label: "Expenses",    href: "/retail/expenses",    Icon: NotebookPen,    colour: "#d97706" },
   { label: "Non-cash",    href: "/retail/payments",    Icon: ArrowLeftRight, colour: "#e11d48" },
   { label: "Cash Book",   href: "/retail/cashbook",    Icon: BookText,       colour: "#059669" },
@@ -96,6 +95,14 @@ export const HO_STAFF: NavLeaf[] = [
 /** The cross-shop screens. These are not about one shop, which is why they sit
  *  in their own group at the bottom rather than repeating under all nine. */
 export const MANAGE: NavLeaf[] = [
+  /* IMPORT IS NOT A SHOP SCREEN. It was under every shop in the first version
+     of this menu, which was wrong in a way that mattered: the Nimbus files name
+     their own store and the importer matches each row to a branch by
+     `nimbus_name`, so one upload can file sales to six shops at once. Putting it
+     under "FC DHA" told people it imports FC DHA — it does not, and a screen
+     that lies about its scope is how somebody ends up uploading the same file
+     nine times. The old Grohub menu had it outside the shops for this reason. */
+  { label: "Import",              short: "Import", href: "/retail/import",  Icon: Upload,     colour: "#64748b" },
   { label: "Card Reconciliation", short: "Cards", href: "/retail/cards",    Icon: CreditCard, colour: "#0ea5e9" },
   { label: "Bank Statements",     short: "Bank",  href: "/retail/bank",     Icon: Landmark,   colour: "#16a34a" },
   { label: "Salary",              href: "/retail/salaries", Icon: Wallet,   colour: "#0891b2" },

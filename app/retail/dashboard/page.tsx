@@ -20,9 +20,10 @@
  *   a visible list.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import {
   Wallet, TrendingUp, Receipt, Coins, ScrollText, Package, Store, Layers,
-  AlertTriangle, CalendarClock, CheckCircle2, Share2,
+  AlertTriangle, CalendarClock, CheckCircle2, Share2, Tag,
 } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { rangeDates } from "@/lib/dateRange";
@@ -33,6 +34,7 @@ import {
   useBranches, money, num, text, today, fetchAll, unitForBranch, unitLabel, useIsPhone,
   type Branch, type Row, type Col,
 } from "@/components/retail/kit";
+import { useStaleRates } from "@/lib/retailStale";
 
 /* ── payment methods, keyed the way the data is actually written ─────────────
  * These seven strings are the CHECK constraint on retail_sale_lines
@@ -411,6 +413,12 @@ export default function RetailDashboard() {
   }, [preset, cf, ct, branch]);
   useEffect(() => { load(); }, [load]);
 
+  /* RATES THAT HAVE STOPPED EARNING. The rate sheet fills with barcodes for
+     articles nobody sells any more and nothing makes that visible, so the
+     dashboard asks the question on your behalf — exactly as the old app did.
+     Guarded so it stays quiet until DHA has three months of history. */
+  const { stale } = useStaleRates(branches);
+
   const refreshReminder = useCallback(() => {
     if (!isSupabaseConfigured || !supabase || !branches.length) return;
     checkUploadsCatchup(branches).then(setMissing).catch(() => setMissing([]));
@@ -553,6 +561,26 @@ export default function RetailDashboard() {
 
       <StatCards stats={headline} loading={loading} />
       <StatCards stats={secondary} loading={loading} />
+
+      {/* ── rates that have stopped earning ────────────────────────────────
+          The cleanup lives on the Commissions screen. This is the part that
+          makes anybody go there: a cleanup nobody is told about is a cleanup
+          that never happens, which is how the sheet got into this state. */}
+      {!!stale?.length && (
+        <Link href="/retail/commissions?stale=1"
+          className="mt-5 flex flex-wrap items-start gap-2.5 rounded-card border border-amber/40 bg-amber-soft px-5 py-4 transition hover:brightness-[0.98] dark:border-white/[0.06] dark:bg-white/[0.04]">
+          <Tag size={18} className="mt-0.5 shrink-0 text-amber-strong dark:text-amber" />
+          <div className="min-w-0 flex-1">
+            <div className="text-[13.5px] font-bold text-ink dark:text-[#f4f1ea]">
+              {stale.length.toLocaleString()} FC DHA barcode{stale.length === 1 ? " has" : "s have"} earned nothing in 3 months
+            </div>
+            <p className="mt-1 text-[12.5px] leading-relaxed text-ink/80 dark:text-[#d6cfc4]">
+              They are still on the commission rate sheet. Open <b>Commissions</b> to review them and
+              delete the ones you no longer need — one, the ones you tick, or all of them.
+            </p>
+          </div>
+        </Link>
+      )}
 
       {/* ── uploads still owed ─────────────────────────────────────────────
           A shop-day never imported is revenue that never entered the system.
