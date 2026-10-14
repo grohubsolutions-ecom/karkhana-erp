@@ -636,7 +636,7 @@ export default function MyWork() {
                       ) : null}
                     </div>
                     {/* H288/H291: what Awais ticked — campaign setup and posted. */}
-                    {s.stage === "social" && p && <PostsLine posts={p.posts} setup={p.setup} />}
+                    {s.stage === "social" && p && <PostsLine posts={p.posts} />}
                     {s.status === "open" && s.sent_back_by && s.sent_back_note && (
                       <p className="mt-1 text-[11.5px] text-red-800 [overflow-wrap:anywhere] dark:text-salmon">“{s.sent_back_note}”</p>
                     )}
@@ -669,18 +669,14 @@ export default function MyWork() {
             </div>
           )}
 
-          {/* H288/H291: Awais's two tick blocks — Campaign setup, then Posted on.
-              Each has a Mark all. Posting is compulsory before he can submit. */}
-          {isSocial && p && (<>
-            <SocialTicks kind="setup" title="Campaign Setup"
-              hint="Tick each account once the campaign is set up on it." posts={p.setup} busy={busy}
-              taskId={t.task_id} locked={p.status === "completed"}
-              onToggle={(pl, on) => tick(t, pl, on, "setup")} onAll={(on) => tickAll(t, "setup", on)} />
+          {/* H291/H295: the social person only ticks "Posted on" now — compulsory
+              before Submit. Campaign Setup moved to Qaswar's Live card (H295). */}
+          {isSocial && p && (
             <SocialTicks kind="posted" title="Posted On"
               hint="Tick each one when the post is up — Qaswar sees these. All three are needed before you submit."
               posts={p.posts} busy={busy} taskId={t.task_id} locked={p.status === "completed"}
               onToggle={(pl, on) => tick(t, pl, on, "posted")} onAll={(on) => tickAll(t, "posted", on)} />
-          </>)}
+          )}
 
           {t.waiting_for ? (
             /* THE CHECK IS VISIBLE, NOT YET ACTIONABLE.
@@ -691,6 +687,14 @@ export default function MyWork() {
               notification the moment it is ready to check, and your time starts then.
             </p>
           ) : isAds ? (<>
+          {/* H295: Campaign Setup — Qaswar sets the campaign up on each account.
+              Moved here from the social person's card; same ticks, same history. */}
+          {p && (
+            <SocialTicks kind="setup" title="Campaign Setup"
+              hint="Tick each account once the campaign is set up on it, before going live."
+              posts={p.setup} busy={busy} taskId={t.task_id} locked={p.status === "completed"}
+              onToggle={(pl, on) => tick(t, pl, on, "setup")} onAll={(on) => tickAll(t, "setup", on)} />
+          )}
           {/* LIVE (H286). The final comment is optional. The button opens only
               when the four steps above are all done, and asks once more before
               it closes the article for everyone. */}

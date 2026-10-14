@@ -531,8 +531,10 @@ export default function ArticleDetail() {
               {s.submit_note && (
                 <p className="mt-1.5 text-[12.5px] text-ink dark:text-[#e7e2d8]">&ldquo;{s.submit_note}&rdquo;</p>
               )}
-              {/* H288 posted + H291 campaign setup: what Awais ticked, per account. */}
-              {s.stage === "social" && (posts || setup) && ([["Campaign setup", setup] as const, ["Posted on", posts] as const]).map(([label, map]) => map && (
+              {/* H288 posted (social row) + H295 campaign setup (ads row — Qaswar),
+                  per account: who ticked each and when. */}
+              {((s.stage === "social" && posts) || (s.stage === "ads" && setup))
+                && (s.stage === "social" ? [["Posted on", posts] as const] : [["Campaign setup", setup] as const]).map(([label, map]) => map && (
                 <div key={label} className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[11.5px]">
                   <span className="font-semibold text-muted dark:text-[#a89f93]">{label}</span>
                   {PLATFORMS.map(([key, name]) => {

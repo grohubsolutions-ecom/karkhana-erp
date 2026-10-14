@@ -165,6 +165,17 @@ export function receiptTxn(receipt: string): string {
  */
 const MOP_CELL = /^(cash|credit|other payment|online)/i;
 
+/** Does this cell hold the payment mode?
+ *
+ *  Exported because the sales parser reads its MONEY COLUMNS BY OFFSET from
+ *  this cell — `nA(12)` is twelve columns to its left — so a grid with one
+ *  column too many or too few does not fail, it silently reads retail price
+ *  where quantity should be. For CSV and Excel the grid is the file and that
+ *  cannot happen. For a PDF, where the columns are inferred from the page
+ *  layout, it can, and the import screen uses this to refuse the file rather
+ *  than import shifted figures. */
+export const looksLikeMopCell = (v: unknown) => MOP_CELL.test(String(v ?? "").trim());
+
 export function parseSalesRows(rows: string[][], forceBranchId: number | null,
   resolveBranch: (ns: string) => number | null): { parsed: SaleRow[]; unknownStores: Set<string> } {
   const hdr = rows[0].map((h) => h.trim());

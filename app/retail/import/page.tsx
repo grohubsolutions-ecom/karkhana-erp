@@ -28,8 +28,9 @@ import {
   Shell, PageHeader, DataTable, Pill, Select, PreviewNote, SourceNote,
   money, unitForBranch, useIsPhone, useBranches, type Col,
 } from "@/components/retail/kit";
+import { readGrid, findHeaderRow, dropRepeatedHeaders } from "@/lib/readGrid";
 import {
-  parseCsvRows, detectKind, KIND_LABEL, normStore, withLineHashes,
+  detectKind, KIND_LABEL, normStore, withLineHashes, looksLikeMopCell,
   parseSalesRows, parseExpenseRows, parsePaymentRows, parseCommRows,
   type NimbusKind, type SaleRow, type ExpenseRow, type PaymentRow, type CommRow,
 } from "@/lib/nimbus";
@@ -65,6 +66,12 @@ export default function ImportPage() {
   const [pickBranch, setPickBranch] = useState("");
   const [fatal, setFatal] = useState("");
   const [warn, setWarn] = useState<string[]>([]);
+  /* Whether the grid was READ from the file or INFERRED from a page layout.
+     Its own state, not an entry in `warn`: that array is rebuilt from scratch
+     by the parse-warning effect below every time the parsed rows change, which
+     silently swallowed this notice the moment the file finished parsing — the
+     one moment it most needs to be on screen. */
+  const [inferred, setInferred] = useState(false);
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState<string | null>(null);
 
@@ -123,17 +130,70 @@ export default function ImportPage() {
 
   async function onFile(f: File) {
     setFatal(""); setWarn([]); setDone(null); setRows([]); setNeedBranch(false); setPickBranch("");
+    setInferred(false);
     setFileName(f.name);
-    const parsed = parseCsvRows(await f.text()).filter((r) => r.length > 1);
-    if (!parsed.length) { setFatal("Could not read any rows from that file."); return; }
 
-    const hdr = parsed[0].map((h) => h.trim());
+    /* CSV, Excel or PDF — see lib/readGrid.ts. Everything below this line is
+       unchanged: the parsers have always worked on a grid of strings and do not
+       care which of the three it came out of. */
+    let grid;
+    try {
+      /* The predicate is what lets a PDF keep its empty columns: its headings
+         ARE its columns. See lib/readGrid.ts. */
+      grid = await readGrid(f, (cells) => detectKind(cells.map((c) => c.trim())) !== "unknown");
+    } catch (e) {
+      setFatal(`Could not open that file: ${e instanceof Error ? e.message : String(e)}`);
+      return;
+    }
+    const all = grid.rows.filter((r) => r.some((c) => c !== ""));
+    if (!all.length) { setFatal("Could not read any rows from that file."); return; }
+
+    /* WHERE THE TABLE STARTS. A Nimbus CSV begins with its header row; an Excel
+       export usually has a title above it and a PDF always has a report
+       heading. Rather than guess which row looks like headers, ask detectKind:
+       the first row it recognises IS the header row. */
+    const hi = findHeaderRow(all, (h) => detectKind(h) !== "unknown");
+    if (hi < 0) {
+      setFatal(grid.format === "pdf"
+        ? "No Nimbus column headings were found in that PDF. The table may not have come through — try the CSV or Excel export of the same report."
+        : "This does not look like a Nimbus export — no Store, Account, Payment Mode or Item Code column was found.");
+      setKind("unknown");
+      return;
+    }
+
+    /* Everything above the header row is the report's own title block. A
+       multi-page PDF reprints its headings, and those would arrive as a sale
+       with the item code "Item Code" if they were left in. */
+    const hdr = all[hi].map((h) => h.trim());
+    const parsed = dropRepeatedHeaders(all.slice(hi), hdr).filter((r) => r.length > 1);
     const k = detectKind(hdr);
     setKind(k);
 
-    if (k === "unknown") {
-      setFatal("This does not look like a Nimbus export — no Store, Account, Payment Mode or Item Code column was found.");
-      return;
+    /* A PDF has no table in it — only text at coordinates — so the rows and
+       columns below were worked out from where the words sit on the page. For a
+       machine-generated report that is reliable, and it is still inference, so
+       it is said out loud rather than hidden. The summary underneath shows the
+       line count and the totals; those are what to check it against. */
+    setInferred(!grid.exact);
+
+    /* THE PDF COLUMN GUARD, for sales files only.
+       parseSalesRows finds the payment-mode cell and then reads the money
+       columns by OFFSET from it — retail price is twelve to its left. For CSV
+       and Excel the grid IS the file, so the offsets are whatever the report
+       says. For a PDF the columns were inferred, and one column too many or too
+       few would not fail: it would read quantity where the discount should be
+       and import a plausible wrong number for every line.
+
+       Every sale row carries a payment mode, so a row without one means the
+       split is wrong. Refused outright — there is a CSV of the same report. */
+    if (!grid.exact && (k === "sales_multi" || k === "sales_single")) {
+      const data = parsed.slice(1).filter((r) => r.join("").trim());
+      const bad = data.filter((r) => !r.some(looksLikeMopCell)).length;
+      if (bad) {
+        setFatal(`The columns in this PDF could not be read reliably — ${bad.toLocaleString()} of ${data.length.toLocaleString()} rows have no payment mode where one is expected. A sales file's figures are read by column position, so importing this could file the wrong amount against every line. Use the CSV or Excel export of the same report.`);
+        setRows([]);
+        return;
+      }
     }
 
     /* The bill-wise guard. A bill-wise sale report has one row per receipt and
@@ -426,7 +486,7 @@ export default function ImportPage() {
   /* Clear takes the FILE away, not the log. Somebody clearing to drop the next
      file still needs to see which ones have already landed. */
   function reset() {
-    setRows([]); setFileName(""); setFatal(""); setWarn([]); setDone(null); setNeedBranch(false); setPickBranch("");
+    setRows([]); setFileName(""); setFatal(""); setWarn([]); setDone(null); setNeedBranch(false); setPickBranch(""); setInferred(false);
     setProg(null);
     if (fileRef.current) fileRef.current.value = "";
   }
@@ -497,9 +557,33 @@ export default function ImportPage() {
      was, so the computer site is untouched. */
   const Zone = phone ? "button" : "div";
 
+  /* THE ZONE SAID "DROP A NIMBUS EXPORT HERE" AND NOTHING HANDLED A DROP.
+     Dragging a file onto it did what dragging a file onto any page does: the
+     browser navigated away from the app and opened the file. An instruction the
+     screen does not honour is worse than no instruction, so it is honoured now.
+     `dragDepth` rather than a boolean: dragover/dragleave fire for every child
+     element the pointer crosses, so a single flag flickers off the moment the
+     cursor passes over the icon inside the zone. */
+  const [dragDepth, setDragDepth] = useState(0);
+  const dragProps = phone ? {} : {
+    onDragEnter: (e: React.DragEvent) => { e.preventDefault(); setDragDepth((d) => d + 1); },
+    onDragOver:  (e: React.DragEvent) => { e.preventDefault(); },
+    onDragLeave: (e: React.DragEvent) => { e.preventDefault(); setDragDepth((d) => Math.max(0, d - 1)); },
+    onDrop: (e: React.DragEvent) => {
+      e.preventDefault();
+      setDragDepth(0);
+      const f = e.dataTransfer?.files?.[0];
+      /* One file at a time on purpose. A day's import is sales, then the
+         account transactions, then the non-cash payments that tag the sales
+         just loaded — the ORDER matters, and a handful dropped together would
+         be imported in whatever order the browser hands them over. */
+      if (f) onFile(f);
+    },
+  };
+
   return (
     <Shell>
-      <PageHeader title="Import" subtitle="Drop any NimbusRMS export — the file says what it is.">
+      <PageHeader title="Import" subtitle="Drop any NimbusRMS export — CSV, Excel or PDF. The file says what it is.">
         {rows.length > 0 && <button onClick={reset} className={btnGhost}><X size={15} /> Clear</button>}
       </PageHeader>
 
@@ -507,17 +591,30 @@ export default function ImportPage() {
           would bubble back up to the zone's own handler and re-open the picker
           for ever — it is hidden either way, so where it lives changes nothing
           on screen. */}
-      <input ref={fileRef} type="file" accept=".csv,text/csv" className="hidden"
+      <input ref={fileRef} type="file"
+        accept=".csv,.xlsx,.xls,.pdf,text/csv,application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
+        className="hidden"
         onChange={(e) => { const f = e.target.files?.[0]; if (f) onFile(f); }} />
 
       <Zone
         {...(phone ? { type: "button" as const, onClick: () => fileRef.current?.click() } : {})}
-        className="mt-5 w-full rounded-card border border-dashed border-line bg-surface p-6 text-center dark:border-white/[0.12] dark:bg-[#201c17]">
+        {...dragProps}
+        className={`mt-5 w-full rounded-card border border-dashed p-6 text-center transition ${
+          dragDepth > 0
+            ? "border-ink bg-salmon-soft dark:border-white/40 dark:bg-white/[0.08]"
+            : "border-line bg-surface dark:border-white/[0.12] dark:bg-[#201c17]"}`}>
         <span className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-panel text-ink dark:bg-white/[0.08] dark:text-white"><Upload size={22} /></span>
         <p className="mt-3 text-[14px] font-semibold text-ink dark:text-[#f4f1ea]">
-          {phone ? "Tap to choose a Nimbus CSV" : "Drop a Nimbus CSV here"}
+          {phone ? "Tap to choose a Nimbus export" : dragDepth > 0 ? "Let go to read it" : "Drop a Nimbus export here"}
         </p>
-        <p className="mt-1 text-[12.5px] text-muted dark:text-[#a89f93]">Sales, account transactions, non-cash payments or the commission master.</p>
+        <p className="mt-1 text-[12.5px] text-muted dark:text-[#a89f93]">
+          Sales, account transactions, non-cash payments or the commission master.
+        </p>
+        {/* The formats, said plainly. People were converting Excel files by hand
+            because nothing on this screen said they did not have to. */}
+        <p className="mt-1 text-[12px] text-hint dark:text-[#8a8175]">
+          CSV, Excel (.xlsx / .xls) or PDF — the file says which report it is.
+        </p>
         {phone
           /* A <button> inside a <button> is not valid HTML — the parser lifts it
              out of the card and the layout comes apart. The whole card is the
@@ -551,6 +648,22 @@ export default function ImportPage() {
             <option value="">Pick a branch…</option>
             {fcBranches.map((b) => <option key={b.id} value={String(b.id)}>{b.name}</option>)}
           </Select>
+        </div>
+      )}
+
+      {/* A PDF HAS NO TABLE IN IT — only text at coordinates — so the rows and
+          columns were worked out from where the words sit on the page. For a
+          machine-generated report that is reliable, and it is still inference,
+          so it is said out loud rather than hidden. The summary underneath is
+          what to check it against. */}
+      {inferred && rows.length > 0 && (
+        <div className="mt-4 flex gap-3 rounded-card border border-line bg-periwinkle-soft p-4 dark:border-white/[0.06] dark:bg-white/[0.04]">
+          <Info size={18} className="mt-0.5 flex-none text-ink dark:text-white" />
+          <p className="text-[12.5px] font-medium leading-relaxed text-ink dark:text-[#e7e2d8]">
+            This is a <strong>PDF</strong>, so the columns were worked out from the layout of the page
+            rather than read from the file. Check the line count and the total below against the report
+            before importing — the CSV or Excel export of the same report is exact and needs no checking.
+          </p>
         </div>
       )}
 
