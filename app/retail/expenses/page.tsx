@@ -49,6 +49,7 @@ import {
   CardList, RowCard, useIsPhone,
   useBranches, money, num, text, today, fetchAll, type Col,
 } from "@/components/retail/kit";
+import { ImportPanel } from "@/components/retail/ImportPanel";
 import { useShopScope } from "@/lib/retailShop";
 
 type Exp = {
@@ -136,6 +137,9 @@ export default function ExpensesPage() {
      word for that and should not grow one, so it lives here, and choosing any
      real shop clears it. */
   const [unassigned, setUnassigned] = useState(false);
+  /* THE UPLOADER, OPENED FROM THIS SCREEN. No separate Import page: a file goes
+     in while you are looking at the figures it changes. */
+  const [importOpen, setImportOpen] = useState(false);
   /* Choosing a shop overrides the unassigned view rather than fighting it:
      those rows belong to no branch, so they are not inside any shop. */
   const branch: string | null = unassigned && !shop.key ? "none" : (shop.single || null);
@@ -461,9 +465,14 @@ export default function ExpensesPage() {
         subtitle="Shop outgoings and the money that comes in without being a sale."
         onRefresh={load} loading={loading}
       >
-        <ImportButton />
+        <ImportButton onClick={() => setImportOpen(true)} />
         <button onClick={openAdd} className={btnPrimary}><Plus size={15} /> New entry</button>
       </PageHeader>
+
+      <Modal open={importOpen} onClose={() => setImportOpen(false)} wide
+        title="Import" subtitle="Drop any NimbusRMS export — CSV, Excel or PDF. The file says what it is.">
+        <ImportPanel onDone={() => load()} />
+      </Modal>
 
       <RetailRange preset={preset} setPreset={setPreset} cf={cf} setCf={setCf} ct={ct} setCt={setCt} />
 

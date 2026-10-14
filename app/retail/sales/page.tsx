@@ -88,6 +88,8 @@ import {
   useIsPhone, RowCard, ActionBar,
   type Branch, type Row, type Col,
 } from "@/components/retail/kit";
+import { ImportPanel } from "@/components/retail/ImportPanel";
+import Modal from "@/components/Modal";
 import { useShopScope } from "@/lib/retailShop";
 
 /* The seven strings the importer actually writes, and the CHECK constraint on
@@ -186,6 +188,9 @@ export default function RetailSalesPage() {
   const branch = scope.single;
   const [pm, setPm] = useState<string | null>(null);
   const [q, setQ] = useState("");
+  /* THE UPLOADER, OPENED FROM THIS SCREEN. No separate Import page: a file goes
+     in while you are looking at the figures it changes. */
+  const [importOpen, setImportOpen] = useState(false);
   const [view, setView] = useState<View>("stores");
   const [preset, setPreset] = useState("30d");
   const [cf, setCf] = useState(""); const [ct, setCt] = useState("");
@@ -601,8 +606,15 @@ export default function RetailSalesPage() {
         onRefresh={load} loading={loading}>
         {/* The day's figures are short? The next move is always the same file.
             See ImportButton in the kit. */}
-        <ImportButton />
+        <ImportButton onClick={() => setImportOpen(true)} />
       </PageHeader>
+
+      {/* Wide, because the preview table underneath the drop zone is the whole
+          point of it — a file is checked before it is written, not after. */}
+      <Modal open={importOpen} onClose={() => setImportOpen(false)} wide
+        title="Import" subtitle="Drop any NimbusRMS export — CSV, Excel or PDF. The file says what it is.">
+        <ImportPanel onDone={() => load()} />
+      </Modal>
 
       <RetailRange preset={preset} setPreset={setPreset} cf={cf} setCf={setCf} ct={ct} setCt={setCt}
         right={

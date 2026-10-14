@@ -49,6 +49,8 @@ import {
   useBranches, money, num, text, today, addDays, fetchAll, fetchKeyset, CARD_RATE_PCT, cardExpected,
   type Row, type Col,
 } from "@/components/retail/kit";
+import { ImportPanel } from "@/components/retail/ImportPanel";
+import Modal from "@/components/Modal";
 import { useShopScope } from "@/lib/retailShop";
 
 /* 'cash' is deliberately absent from the mix below — this screen is the other
@@ -108,6 +110,9 @@ export default function NonCashPage() {
   /* The shop, shared with the left menu and every other screen — not this
      screen's own dropdown state. See lib/retailShop.ts. */
   const scope = useShopScope(branches);
+  /* THE UPLOADER, OPENED FROM THIS SCREEN. No separate Import page: a file goes
+     in while you are looking at the figures it changes. */
+  const [importOpen, setImportOpen] = useState(false);
   const branch = scope.single;
 
   /* ── section 1 state: one day, one rate ────────────────────────────────── */
@@ -427,8 +432,13 @@ export default function NonCashPage() {
       <PageHeader title="Non-cash" subtitle="Card, JazzCash, online and udhaar — sales that never reached the till."
         onRefresh={refreshAll} loading={loadingCard || loadingUnc || loadingMix}>
         <ShopSelect branches={branches} scope={scope} className="max-md:hidden" />
-        <ImportButton />
+        <ImportButton onClick={() => setImportOpen(true)} />
       </PageHeader>
+
+      <Modal open={importOpen} onClose={() => setImportOpen(false)} wide
+        title="Import" subtitle="Drop any NimbusRMS export — CSV, Excel or PDF. The file says what it is.">
+        <ImportPanel onDone={() => refreshAll()} />
+      </Modal>
 
       <StatCards stats={stats} loading={loadingUnc || loadingMix} />
 

@@ -595,7 +595,7 @@ export default function RetailDashboard() {
                 {missingCount.toLocaleString()} file{missingCount === 1 ? "" : "s"} still needed across {missing.length} day{missing.length === 1 ? "" : "s"}
               </div>
               <p className="mt-1 text-[12.5px] leading-relaxed text-ink/80 dark:text-[#d6cfc4]">
-                Upload them from the <b>Import</b> tab — order per shop is <b>Sales → Expenses → Non-cash</b>.
+                Use <b>Import</b> on the Sales, Expenses or Non-cash screen — order per shop is <b>Sales → Expenses → Non-cash</b>.
                 {nextUp && <> Next up: <b>{nextUp.label} — {nextUp.miss[0].label}</b> for <b>{missing[0].date}</b>.</>}
               </p>
             </div>

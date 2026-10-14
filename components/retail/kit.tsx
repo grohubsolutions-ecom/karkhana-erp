@@ -545,23 +545,23 @@ export function PageHeader({ title, subtitle, onRefresh, loading, children }: {
   );
 }
 
-/** IMPORT, FROM WHEREVER YOU ARE.
+/** IMPORT, ON THE SCREEN YOU ARE ALREADY ON.
  *
- *  Sales, Non-cash and Expenses are the three screens somebody is looking at
- *  when they realise a file still has to go in — the figures are short, or the
- *  day is blank, and the next move is always the same. Making them find Import
- *  in the menu first is three taps and a scroll to answer a question the screen
- *  itself just raised.
+ *  Sales, Non-cash and Expenses are where somebody is standing when they
+ *  realise a file still has to go in — the figures are short, or the day is
+ *  blank, and the next move is always the same. It opens the uploader here
+ *  rather than sending anybody to a screen of its own; there is no Import entry
+ *  in the menu any more, because this is where it was always needed.
  *
- *  It is a link, not a modal: the Import screen has the file picker, the
- *  preview and the checks, and none of that belongs duplicated in three places.
- */
-export function ImportButton() {
+ *  One component behind all three (components/retail/ImportPanel.tsx), so the
+ *  parse rules, the bill-wise guard and the duplicate protection cannot differ
+ *  depending on which screen opened it. */
+export function ImportButton({ onClick }: { onClick: () => void }) {
   return (
-    <Link href="/retail/import"
+    <button onClick={onClick}
       className="flex items-center justify-center gap-2 rounded-full border border-line bg-surface px-4 py-2 text-[13px] font-semibold text-ink transition hover:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:hover:bg-white/[0.12]">
       <Upload size={14} /> Import
-    </Link>
+    </button>
   );
 }
 

@@ -30,9 +30,11 @@
  * WHAT IS DELIBERATELY NOT COPIED
  *   · Day Close is not in the old app. It sits under each shop, where the rest
  *     of that shop's day already lives.
- *   · Import appears under each shop AND under MANAGE. One Nimbus file can
- *     carry six shops, so it belongs in MANAGE; but it is also what you reach
- *     for standing in a shop with a file, so it is there too.
+ *   · THERE IS NO IMPORT ENTRY. The uploader opens inside Sales, Non-cash and
+ *     Expenses — the screens whose figures the file changes. A menu entry for
+ *     it was a detour that existed only because the code happened to be on a
+ *     page of its own. The /retail/import route still answers, for links that
+ *     already exist.
  *   · Repayments exists in this build and had no menu entry in the old one. It
  *     is under Employee with the rest.
  *
@@ -63,16 +65,6 @@ export type NavItem = NavLeaf & { children?: NavLeaf[] };
    cash, does the till balance, what did the shop earn. */
 export const SHOP_SCREENS: NavLeaf[] = [
   { label: "Sales",       href: "/retail/sales",       Icon: Receipt,        colour: "#0891b2" },
-  /* IMPORT IS HERE AND ALSO UNDER MANAGE, ON PURPOSE.
-     It was taken out of this list once, on the reasoning that one Nimbus file
-     can carry six shops so the screen is not "about" any one of them. True, and
-     beside the point: this is the list somebody is looking at when they have a
-     file to upload, and the day's work IS sales, then expenses, then non-cash,
-     then the file that ties them together. Putting it only at the bottom of
-     MANAGE meant that with a shop expanded it scrolled off the end of the menu
-     and could not be found at all. Two entries pointing at one screen is not a
-     duplicate; it is the screen being where the hand already is. */
-  { label: "Import",      href: "/retail/import",      Icon: Upload,         colour: "#64748b" },
   { label: "Expenses",    href: "/retail/expenses",    Icon: NotebookPen,    colour: "#d97706" },
   { label: "Non-cash",    href: "/retail/payments",    Icon: ArrowLeftRight, colour: "#e11d48" },
   { label: "Cash Book",   href: "/retail/cashbook",    Icon: BookText,       colour: "#059669" },
@@ -107,14 +99,6 @@ export const HO_STAFF: NavLeaf[] = [
 /** The cross-shop screens. These are not about one shop, which is why they sit
  *  in their own group at the bottom rather than repeating under all nine. */
 export const MANAGE: NavLeaf[] = [
-  /* IMPORT IS NOT A SHOP SCREEN. It was under every shop in the first version
-     of this menu, which was wrong in a way that mattered: the Nimbus files name
-     their own store and the importer matches each row to a branch by
-     `nimbus_name`, so one upload can file sales to six shops at once. Putting it
-     under "FC DHA" told people it imports FC DHA — it does not, and a screen
-     that lies about its scope is how somebody ends up uploading the same file
-     nine times. The old Grohub menu had it outside the shops for this reason. */
-  { label: "Import",              short: "Import", href: "/retail/import",  Icon: Upload,     colour: "#64748b" },
   { label: "Card Reconciliation", short: "Cards", href: "/retail/cards",    Icon: CreditCard, colour: "#0ea5e9" },
   { label: "Bank Statements",     short: "Bank",  href: "/retail/bank",     Icon: Landmark,   colour: "#16a34a" },
   { label: "Salary",              href: "/retail/salaries", Icon: Wallet,   colour: "#0891b2" },
