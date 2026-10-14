@@ -471,7 +471,7 @@ export default function ExpensesPage() {
 
       <Modal open={importOpen} onClose={() => setImportOpen(false)} wide
         title="Import" subtitle="Drop any NimbusRMS export — CSV, Excel or PDF. The file says what it is.">
-        <ImportPanel onDone={() => load()} />
+        <ImportPanel inShop={shop.single ? Number(shop.single) : null} onDone={() => load()} />
       </Modal>
 
       <RetailRange preset={preset} setPreset={setPreset} cf={cf} setCf={setCf} ct={ct} setCt={setCt} />

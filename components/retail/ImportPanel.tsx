@@ -66,7 +66,13 @@ type ImportResult = {
  *  same wherever it is opened from, which is the only way they stay the same.
  *
  *  `onDone` lets the screen that opened it reload once something has landed. */
-export function ImportPanel({ onDone }: { onDone?: () => void } = {}) {
+export function ImportPanel({ onDone, inShop }: {
+  onDone?: () => void;
+  /** The branch id of the shop this was opened from, when that shop is a single
+   *  branch. A single-store file dropped while standing in FC Paragon is FC
+   *  Paragon's — see the note on `autoBid` below. */
+  inShop?: number | null;
+} = {}) {
   const phone = useIsPhone();
   const fileRef = useRef<HTMLInputElement>(null);
   /* The shared branch cache, which now carries nimbus_name for this screen —
@@ -119,7 +125,49 @@ export function ImportPanel({ onDone }: { onDone?: () => void } = {}) {
     return b ? b.id : null;
   }, [branches]);
 
-  const forceBid = needBranch && pickBranch ? Number(pickBranch) : null;
+  /* ── WHICH BRANCH IS A SINGLE-STORE FILE FOR? ───────────────────────────
+   *
+   * A Fashion Collection export has no Store column — the shop knows which shop
+   * it is, so it does not write it down. The importer used to stop and ask,
+   * every single time, with the answer sitting in plain sight: you are standing
+   * in that shop's Expenses screen with its name lit up in the menu.
+   *
+   * So it answers the question itself, from two things it can actually know:
+   *
+   *   1. THE SHOP YOU ARE IN. The uploader opens from Sales, Non-cash or
+   *      Expenses, and those screens are scoped to one shop. If that shop is a
+   *      single branch, the file is that branch's. Top Shop is six branches and
+   *      has no single answer, so it still asks — but Top Shop exports with a
+   *      Store column anyway, so it never reaches this.
+   *
+   *   2. THE FILE'S NAME. "FC DHA oct.csv", "fc-paragon-expenses.xlsx" — Nimbus
+   *      and the people using it put the shop in the filename more often than
+   *      not. Matched against each branch's `nimbus_name`, then its real name.
+   *      The name WINS over the shop you are in: somebody standing in FC
+   *      Paragon who opens a file called "FC DHA" meant FC DHA, and silently
+   *      filing it to Paragon because of where they happened to be standing is
+   *      exactly the mistake this is supposed to prevent.
+   *
+   * It is a default, not a decision. The picker is still there, it still shows
+   * what was chosen, and the Import button names the destination so it cannot
+   * be confirmed without being seen. */
+  const autoBid = useMemo(() => {
+    if (!needBranch) return null;
+    const pickable = branches.filter((b) => (b.chain ?? "") !== "Topshop");
+    const hay = normStore(fileName.replace(/\.[a-z0-9]+$/i, ""));
+    const named = pickable.find((b) => {
+      const ns = b.nimbus_name ? normStore(b.nimbus_name) : "";
+      return (ns && hay.includes(ns)) || hay.includes(normStore(b.name));
+    });
+    if (named) return named.id;
+    if (inShop && pickable.some((b) => b.id === inShop)) return inShop;
+    return null;
+  }, [needBranch, branches, fileName, inShop]);
+
+  /* The picker's own value wins once somebody has touched it. */
+  const effectiveBid = pickBranch ? Number(pickBranch) : autoBid;
+  const forceBid = needBranch ? effectiveBid : null;
+  const destination = branches.find((b) => b.id === effectiveBid)?.name ?? "";
 
   /* ── parse, per kind ─────────────────────────────────────────────────── */
   const sales = useMemo(() => {
@@ -655,14 +703,28 @@ export function ImportPanel({ onDone }: { onDone?: () => void } = {}) {
       )}
 
       {needBranch && (
-        <div className="mt-4 flex flex-wrap items-center gap-3 rounded-card border border-line bg-periwinkle-soft p-4 dark:border-white/[0.06] dark:bg-white/[0.04]">
+        <div className={`mt-4 flex flex-wrap items-center gap-3 rounded-card border p-4 ${
+          effectiveBid
+            ? "border-line bg-panel dark:border-white/[0.06] dark:bg-white/[0.04]"
+            : "border-line bg-periwinkle-soft dark:border-white/[0.06] dark:bg-white/[0.04]"}`}>
           <Info size={18} className="flex-none text-ink dark:text-white" />
           <p className="flex-1 text-[12.5px] font-medium text-ink dark:text-[#e7e2d8]">
-            This is a <strong>single-store</strong> file — it has no Store column, which is how a
-            Fashion Collection shop exports. Which branch is it? (Top Shop comes as the combined
-            all-stores export.)
+            {effectiveBid ? (
+              <>
+                No Store column in this file — that is how a Fashion Collection shop exports.
+                Filing it to <strong>{destination}</strong>
+                {pickBranch ? "" : autoBid === inShop ? ", the shop you are in" : ", from the file name"}.
+                Change it here if that is wrong.
+              </>
+            ) : (
+              <>
+                This is a <strong>single-store</strong> file — it has no Store column, which is how a
+                Fashion Collection shop exports. Which branch is it? (Top Shop comes as the combined
+                all-stores export.)
+              </>
+            )}
           </p>
-          <Select value={pickBranch} onChange={setPickBranch} className="max-md:w-full">
+          <Select value={String(effectiveBid ?? "")} onChange={setPickBranch} className="max-md:w-full">
             <option value="">Pick a branch…</option>
             {fcBranches.map((b) => <option key={b.id} value={String(b.id)}>{b.name}</option>)}
           </Select>
@@ -776,9 +838,13 @@ export function ImportPanel({ onDone }: { onDone?: () => void } = {}) {
           <div className="mt-4 flex flex-wrap items-center justify-between gap-3 max-md:flex-col-reverse max-md:items-stretch">
             <p className="text-[12.5px] text-muted dark:text-[#a89f93]">Showing the first 50 rows for checking.</p>
             <button onClick={run} disabled={busy || readyCount === 0} className={`${btnPrimary} max-md:w-full`}>
+              {/* THE DESTINATION IS ON THE BUTTON. The branch is now chosen for
+                  you, so the one place it must be impossible to miss is the
+                  control that writes. */}
               {busy ? "Working…"
                 : kind === "payments" ? `Classify ${readyCount.toLocaleString()} payments`
                 : kind === "comm_master" ? `Update ${readyCount.toLocaleString()} rates`
+                : destination ? `Import ${readyCount.toLocaleString()} rows into ${destination}`
                 : `Import ${readyCount.toLocaleString()} rows`}
             </button>
           </div>
