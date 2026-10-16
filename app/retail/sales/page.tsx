@@ -613,7 +613,7 @@ export default function RetailSalesPage() {
           point of it — a file is checked before it is written, not after. */}
       <Modal open={importOpen} onClose={() => setImportOpen(false)} wide
         title="Import" subtitle="Drop any NimbusRMS export — CSV, Excel or PDF. The file says what it is.">
-        <ImportPanel inShop={scope.single ? Number(scope.single) : null} onDone={() => load()} />
+        <ImportPanel inShopKey={scope.key} inShop={scope.single ? Number(scope.single) : null} onDone={() => load()} />
       </Modal>
 
       <RetailRange preset={preset} setPreset={setPreset} cf={cf} setCf={setCf} ct={ct} setCt={setCt}

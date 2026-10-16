@@ -437,7 +437,7 @@ export default function NonCashPage() {
 
       <Modal open={importOpen} onClose={() => setImportOpen(false)} wide
         title="Import" subtitle="Drop any NimbusRMS export — CSV, Excel or PDF. The file says what it is.">
-        <ImportPanel inShop={scope.single ? Number(scope.single) : null} onDone={() => refreshAll()} />
+        <ImportPanel inShopKey={scope.key} inShop={scope.single ? Number(scope.single) : null} onDone={() => refreshAll()} />
       </Modal>
 
       <StatCards stats={stats} loading={loadingUnc || loadingMix} />
