@@ -122,8 +122,15 @@ function WarehouseInner({ section }: { section: Tab }) {
   const [invFilter, setInvFilter] = useState("all");
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [pickOpen, setPickOpen] = useState(false);
-  const [basket, setBasket] = useState<{ item_id: string; barcode: string;
-    name: string; qty: number }[]>([]);
+  /* EVERY LINE CARRIES ITS OWN NOTE. There used to be one note box for the
+     whole basket, and Record wrote it onto every line — a GRN of three items
+     with 30, 12 and 6 B pair came out as "30 B pair" three times. Now the
+     note is taken onto the line when the line is added. `key` because the
+     same item can now sit on two lines: 168 good and 32 B pair of one shirt
+     are two lines, not one line of 200. */
+  const [basket, setBasket] = useState<{ key: number; item_id: string; barcode: string;
+    name: string; qty: number; note: string }[]>([]);
+  const lineSeq = useRef(0);
   const [pOpen, setPOpen] = useState(false);
   const [pName, setPName] = useState("");
   const [pParty, setPParty] = useState("");
@@ -567,13 +574,20 @@ function WarehouseInner({ section }: { section: Tab }) {
        — a GRN not entered yet, an opening balance never loaded — the line is
        taken anyway and the stock goes below zero until the arrival catches
        up. The lines below say where it lands. Nothing is refused. */
+    const ln = note.trim();
     setBasket((b) => {
-      /* The same item scanned twice is one line, not two. */
-      const at = b.findIndex((x) => x.item_id === found.item_id);
+      /* The same item with the SAME note scanned twice is one line. The same
+         item with a different note — good pieces and B pair — stays apart. */
+      const at = b.findIndex((x) => x.item_id === found.item_id && x.note === ln);
       if (at >= 0) return b.map((x, i) => i === at ? { ...x, qty: x.qty + q } : x);
-      return [...b, { item_id: found.item_id, barcode: found.barcode, name: found.name, qty: q }];
+      return [...b, { key: ++lineSeq.current, item_id: found.item_id, barcode: found.barcode,
+                      name: found.name, qty: q, note: ln }];
     });
     setScan(""); setFound(null); setQty("");
+    /* GR in: the note belongs to the line just added, so the box empties and
+       the next item does not inherit "30 B pair". STR out keeps it — a
+       delivery note is usually the same for the whole invoice. */
+    if (tab === "in") setNote("");
     /* Straight back to the scan box, so the scanner can keep going. */
     setTimeout(() => scanBox.current?.focus(), 0);
   }
@@ -585,9 +599,11 @@ function WarehouseInner({ section }: { section: Tab }) {
        so forgetting to press Add does not silently drop a line. */
     const lines = [...basket];
     if (found && parseFloat(qty) > 0) {
-      const at = lines.findIndex((x) => x.item_id === found.item_id);
+      const ln = note.trim();
+      const at = lines.findIndex((x) => x.item_id === found.item_id && x.note === ln);
       if (at >= 0) lines[at] = { ...lines[at], qty: lines[at].qty + parseFloat(qty) };
-      else lines.push({ item_id: found.item_id, barcode: found.barcode, name: found.name, qty: parseFloat(qty) });
+      else lines.push({ key: ++lineSeq.current, item_id: found.item_id, barcode: found.barcode,
+                        name: found.name, qty: parseFloat(qty), note: ln });
     }
     if (lines.length === 0) { setMErr("Nothing to record — add at least one item."); return; }
     if (type === "OUT" && !partyId) { setMErr("Which party is this going to?"); return; }
@@ -621,7 +637,8 @@ function WarehouseInner({ section }: { section: Tab }) {
     const { error } = await supabase.from("khana_stock_movements").insert(
       lines.map((l) => ({
         item_id: l.item_id, movement_type: type, quantity: l.qty,
-        note: note.trim() || null,
+        /* The line's own note — never one note copied onto every line. */
+        note: l.note.trim() || null,
         /* Only include created_at when a date was actually chosen. Sending it
            as undefined lands as null, which reads back as 1 Jan 1970 — the
            epoch, not a date anybody picked. */
@@ -1277,7 +1294,7 @@ function WarehouseInner({ section }: { section: Tab }) {
                     <input type="time" value={onTime} onChange={(e) => setOnTime(e.target.value)}
                       title="Time it moved - the time now unless you change it" className={inp} />
                   )}
-                  <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Note (optional)" className={inp} />
+                  <input value={note} onChange={(e) => setNote(e.target.value)} placeholder={tab === "in" ? "Note for this item (e.g. 30 B pair)" : "Note (optional)"} className={inp} />
                   <button onClick={addLine} disabled={!found || !(parseFloat(qty) > 0)}
                     title="Add this one and scan the next (or press Enter)"
                     className="rounded-xl2 border border-line px-4 py-2 text-[13px] font-semibold text-ink/75 hover:bg-panel disabled:opacity-40">
@@ -1415,13 +1432,19 @@ function WarehouseInner({ section }: { section: Tab }) {
                          scan box — that clears the moment the line is added,
                          and this is still here when Record is pressed. */
                       const after = tab === "out"
-                        ? Number(items.find((i) => i.item_id === l.item_id)?.quantity ?? 0) - l.qty
+                        ? Number(items.find((i) => i.item_id === l.item_id)?.quantity ?? 0)
+                          - basket.filter((x) => x.item_id === l.item_id).reduce((a, x) => a + x.qty, 0)
                         : 0;
                       return (
-                      <div key={l.item_id} className="flex items-center justify-between gap-3 border-b border-line/60 px-3 py-2 last:border-0">
-                        <span>
+                      <div key={l.key} className="flex items-center justify-between gap-3 border-b border-line/60 px-3 py-2 last:border-0">
+                        <span className="min-w-0 flex-1">
                           <span className="text-[13px] font-semibold text-ink">{l.name}</span>
                           <span className="block font-mono text-[11px] text-hint">{l.barcode}</span>
+                          {/* This line's note, fixable here before Record. */}
+                          <input value={l.note}
+                            onChange={(e) => setBasket((b) => b.map((x) => x.key === l.key ? { ...x, note: e.target.value } : x))}
+                            placeholder="note for this line (e.g. 30 B pair)"
+                            className="mt-1 w-full max-w-xs rounded-lg border border-line bg-surface px-2 py-1 text-[12px] outline-none focus:border-ink/30" />
                           {after < 0 && (
                             <span className="block text-[11px] font-semibold text-danger">
                               stock goes to {n(after)} — nothing came in for these yet
@@ -1430,7 +1453,7 @@ function WarehouseInner({ section }: { section: Tab }) {
                         </span>
                         <span className="flex items-center gap-3">
                           <span className="tnum text-[13px] font-bold text-ink">{n(l.qty)}</span>
-                          <button onClick={() => setBasket((b) => b.filter((x) => x.item_id !== l.item_id))}
+                          <button onClick={() => setBasket((b) => b.filter((x) => x.key !== l.key))}
                             className="text-[11px] font-semibold text-danger/70">remove</button>
                         </span>
                       </div>
@@ -1444,7 +1467,7 @@ function WarehouseInner({ section }: { section: Tab }) {
                      zero is said out loud, never refused: it means the goods
                      left before their arrival was written down. */
                   const held = Number(found.quantity);
-                  const already = basket.find((x) => x.item_id === found.item_id)?.qty ?? 0;
+                  const already = basket.filter((x) => x.item_id === found.item_id).reduce((a, x) => a + x.qty, 0);
                   const after = held - already - (parseFloat(qty) || 0);
                   return (
                     <p className="mt-2 text-[12.5px] text-ink/80">
