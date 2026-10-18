@@ -32,7 +32,7 @@ import { readGrid, findHeaderRow, dropRepeatedHeaders } from "@/lib/readGrid";
 import {
   detectKind, KIND_LABEL, normStore, withLineHashes, looksLikeMopCell,
   parseSalesRows, parseExpenseRows, parsePaymentRows, parseCommRows, linkAdvances,
-  receiptNo, shopFromReceipts, shopFromStamps, shopFromFileName,
+  receiptNo, shopFromReceipts, shopFromStamps, shopFromFileName, shopFromStaffNames,
   type ShopGuess, type ReceiptHigh, type StampHits,
   type NimbusKind, type SaleRow, type ExpenseRow, type PaymentRow, type CommRow,
 } from "@/lib/nimbus";
@@ -229,9 +229,19 @@ export function ImportPanel({ onDone, inShop, inShopKey }: {
           const lo = Math.min(...nums), hi = Math.max(...nums);
           const highs: ReceiptHigh[] = [];
           for (const b of branches) {
+            /* 400, NOT 50, AND THE NUMBER IS MEASURED. A busy Fashion
+               Collection day is 200-plus lines, so 50 rows do not even cover
+               the latest day and the top of the series is missed: checked
+               against the live data, 50 rows understated FC DHA by 14 receipts
+               and FC Paragon by 15, while 300 was exact for all eight shops.
+               400 leaves room for a bigger day. It only ever mattered for the
+               sentence shown on screen — the shops' series are thousands
+               apart, so a high that is short by 14 still identifies the right
+               one — but a reason that quotes a number not in his data is a
+               reason he is right to distrust. */
             const { data } = await supabase.from("retail_sale_lines")
               .select("receipt_no").eq("branch_id", b.id)
-              .order("sale_date", { ascending: false }).limit(50);
+              .order("sale_date", { ascending: false }).limit(400);
             const top = ((data ?? []) as { receipt_no: string }[])
               .map((x) => receiptNo(x.receipt_no) ?? 0).reduce((m, n) => (n > m ? n : m), 0);
             if (top > 0) highs.push({ branch_id: b.id, high: top });
@@ -259,12 +269,22 @@ export function ImportPanel({ onDone, inShop, inShopKey }: {
           if (alive) setProbe(shopFromStamps(own.size, hits));
           return;
         }
+        if (kind === "expense_single") {
+          /* No Store column, no receipts, no times — but the Comments name
+             people, and people belong to a shop. Needs the staff list, which
+             the panel already has. */
+          const ci = rows[0].findIndex((h) => h.trim() === "Comments");
+          if (ci < 0 || !staff.length) { if (alive) setProbe(null); return; }
+          const notes = rows.slice(1).map((r) => r[ci] ?? "");
+          if (alive) setProbe(shopFromStaffNames(notes, staff));
+          return;
+        }
         if (alive) setProbe(null);
       } catch { if (alive) setProbe(null); }
       finally { if (alive) setProbing(false); }
     })();
     return () => { alive = false; };
-  }, [needBranch, rows, kind, branches, rcptCol]);
+  }, [needBranch, rows, kind, branches, rcptCol, staff]);
 
   /* The picker's own value wins once somebody has touched it. */
   const effectiveBid = pickBranch ? Number(pickBranch) : autoBid;

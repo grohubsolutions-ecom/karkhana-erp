@@ -868,3 +868,64 @@ export function shopFromFileName(fileName: string,
   if (hit.length !== 1) return null;
   return { branch_id: hit[0].id, confidence: "likely", why: `the file name names ${hit[0].name}` };
 }
+
+/** WHOSE SHOP DOES AN ACCOUNT FILE BELONG TO? THE PEOPLE IN IT.
+ *
+ *  This was the one hole left. An expense export has no Store column, no
+ *  receipt numbers and no timestamps — nothing a machine can match — so it was
+ *  the one file still falling back to the shop you happened to be standing in.
+ *  Get that wrong and a day's expenses land on another shop's books.
+ *
+ *  But the Comments column is full of names: "MISS SEHAR ADVANCE", "MAM SONIA
+ *  ADVANCE", "MISS BUSHRA PUFF", "MUBEEN BHAI PUFF". Those are staff, and staff
+ *  belong to a shop. Four of them in one file, all on one payroll and none on
+ *  any other, says whose file it is as plainly as a store name would.
+ *
+ *  STAFF NAMES ONLY — never branch names. That is not fussiness: this very
+ *  file has a line reading "PARAGON RIDER", and a matcher that looked at shop
+ *  names would read that as Fashion Collection Paragon and file a whole day of
+ *  DHA's expenses to the wrong shop.
+ *
+ *  TWO DIFFERENT PEOPLE, not one. A single name can be a coincidence — a
+ *  supplier called Sonia, a brand called Gold — and the price of being wrong
+ *  here is a day of money in the wrong place. Two people from the same payroll
+ *  and nobody from another is not a coincidence. A single full name matched in
+ *  full counts, because "MISS SEHAR" is not how anyone writes a supplier.
+ */
+export function shopFromStaffNames(notes: (string | null)[], staff: StaffForMatch[]): ShopGuess | null {
+  const hay = " " + notes.map((n) => (n ?? "")).join(" ")
+    .toUpperCase().replace(/[^A-Z0-9\s]+/g, " ").replace(/\s+/g, " ").trim() + " ";
+  if (hay.trim().length < 3) return null;
+  const words = hay.trim().split(" ");
+  const fuzzable = words.filter((w) => w.length >= FUZZ_MIN);
+
+  /* branch -> the distinct people of that branch named in the file */
+  const per = new Map<number, { names: Set<string>; full: boolean }>();
+  for (const e of staff) {
+    if (e.branch_id == null) continue;
+    const toks = nameTokens(e.name);
+    if (!toks.length) continue;
+    const exact = toks.filter((t) => hay.includes(" " + t + " "));
+    const near = toks.filter((t) => t.length >= FUZZ_MIN && fuzzable.some((w) => oneEditApart(w, t)));
+    if (!exact.length && !near.length) continue;
+    /* The whole name as a run of words — decisive on its own. */
+    const full = toks.length > 1 && hay.includes(" " + toks.join(" ") + " ");
+    const slot = per.get(e.branch_id) ?? { names: new Set<string>(), full: false };
+    slot.names.add(e.name.toUpperCase());
+    if (full) slot.full = true;
+    per.set(e.branch_id, slot);
+  }
+  const ranked = [...per].map(([branch_id, v]) => ({ branch_id, n: v.names.size, full: v.full }))
+    .sort((a, b) => b.n - a.n);
+  if (!ranked.length) return null;
+  const top = ranked[0], next = ranked[1]?.n ?? 0;
+  if (top.n < 2 && !top.full) return null;
+  if (next > top.n * 0.34) return null;
+  return {
+    branch_id: top.branch_id,
+    confidence: top.n >= 3 ? "certain" : "likely",
+    why: top.n === 1
+      ? `a note names ${[...per.get(top.branch_id)!.names][0]}, who is on this shop's staff`
+      : `${top.n} of this shop's staff are named in the notes (${[...per.get(top.branch_id)!.names].slice(0, 3).join(", ")}${top.n > 3 ? ", …" : ""}) and nobody from another shop`,
+  };
+}
