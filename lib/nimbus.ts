@@ -744,3 +744,127 @@ export function parseCommRows(rows: string[][]): CommRow[] {
   }
   return out;
 }
+
+/* ── WHICH SHOP IS THIS FILE FROM? ────────────────────────────────────────
+ *
+ * A Fashion Collection export does not say. The sales report has no Store
+ * column at all; the non-cash report has one that reads "Fashion collection" —
+ * the chain, so Paragon's file and DHA's file are word-for-word identical in
+ * it. The owner's complaint, and he is right: being handed a dropdown is being
+ * asked a question the file can answer.
+ *
+ * It can, from the numbers already in the database:
+ *
+ *   SALES — THE RECEIPT SERIES. Every shop's till runs its own unbroken
+ *   counter. FC DHA's imported lines stop at receipt 22552; the file he sent
+ *   starts at 22553 and runs to 22895. It is the next page of that shop's
+ *   book. FC Paragon's counter is at 15478, seven thousand away, and no Top
+ *   Shop is past 6846 — so there is exactly one shop this file can belong to,
+ *   and no dropdown should ever have been shown for it.
+ *
+ *   NON-CASH — THE TIMESTAMPS. That file carries no amounts and no receipts.
+ *   What it does carry is the exact second of each card tap, and its whole
+ *   purpose is to match sale lines already imported on shop + date + time. So
+ *   the match itself identifies the shop: whichever branch owns sale lines at
+ *   those exact seconds is the branch whose card machine produced the file.
+ *
+ * Both are evidence, not a guess, and both report how sure they are so the
+ * screen can say WHY rather than just naming a shop. Ambiguity is never
+ * resolved by picking the first row — it returns null and the picker appears,
+ * which is the one case where asking is the right thing to do.
+ */
+export type ShopGuess = {
+  branch_id: number;
+  /** `certain` — the file's own numbers can only mean this shop.
+   *  `likely`  — the best of several, worth showing but not silent. */
+  confidence: "certain" | "likely";
+  /** One sentence, for the screen. Written for the shopkeeper, not the log. */
+  why: string;
+};
+
+/** The highest receipt number a branch has already imported. */
+export type ReceiptHigh = { branch_id: number; high: number };
+
+/** Leading integer of a Nimbus receipt. "22895(22590892)" → 22895. The number
+ *  in brackets is Nimbus's own global transaction id and is NOT per-shop, so it
+ *  must not be used for this. */
+export const receiptNo = (s: unknown): number | null => {
+  const m = String(s ?? "").trim().match(/^(\d+)/);
+  return m ? parseInt(m[1], 10) : null;
+};
+
+/** THE FILE IS THE NEXT PAGE OF WHOSE BOOK?
+ *
+ *  `lo`/`hi` are the file's own receipt range. A branch matches when the file
+ *  carries straight on from where that branch stopped, or overlaps the series
+ *  it already has (a re-import of a file already in, which must land on the
+ *  same shop). A gap is allowed — days can be missed — but only forwards and
+ *  only within `maxGap`, because a receipt number far past a branch's last one
+ *  is not evidence of anything.
+ *
+ *  Two branches matching means no answer. In practice their counters are
+ *  thousands apart, so one matches or none does. */
+export function shopFromReceipts(lo: number, hi: number, highs: ReceiptHigh[],
+  maxGap = 2000): ShopGuess | null {
+  if (!Number.isFinite(lo) || !Number.isFinite(hi) || lo <= 0) return null;
+  const hits = highs.filter((h) => h.high > 0 && lo > h.high - (hi - lo) - 1 && lo <= h.high + maxGap);
+  if (hits.length !== 1) return null;
+  const h = hits[0];
+  const exact = lo === h.high + 1;
+  return {
+    branch_id: h.branch_id,
+    confidence: "certain",
+    why: exact
+      ? `receipt ${lo.toLocaleString()} carries straight on from ${h.high.toLocaleString()}, the last one imported for this shop`
+      : lo <= h.high
+        ? `receipts ${lo.toLocaleString()}–${hi.toLocaleString()} are inside this shop's own series (already at ${h.high.toLocaleString()})`
+        : `receipts ${lo.toLocaleString()}–${hi.toLocaleString()} follow this shop's series, which had reached ${h.high.toLocaleString()}`,
+  };
+}
+
+/** How many of the file's timestamps each branch already owns a sale line for.
+ *  `[branch_id, matches]`, however the caller counted them. */
+export type StampHits = { branch_id: number; hits: number };
+
+/** THE CARD TAPS LAND IN SOMEBODY'S TILL.
+ *
+ *  JUDGED ON THE COUNT, NOT ON THE SHARE OF THE FILE. A match here is to the
+ *  exact second, which is a very specific key: three of them landing on one
+ *  branch and none anywhere else is strong evidence, and each further match
+ *  multiplies how unlikely a coincidence would have to be.
+ *
+ *  Share would be the wrong test because a low share has an innocent and very
+ *  common explanation — the sales for those days are not all imported yet, and
+ *  people do drop the non-cash file first. Demanding a fifth of the file would
+ *  make it give up and show a dropdown in exactly the case it can answer.
+ *
+ *  What it still refuses: fewer than three matches, and a runner-up anywhere
+ *  near the top. Two busy shops can collide on a second or two; they do not
+ *  collide repeatedly. */
+export function shopFromStamps(total: number, hits: StampHits[]): ShopGuess | null {
+  if (total <= 0) return null;
+  const ranked = hits.filter((h) => h.hits > 0).sort((a, b) => b.hits - a.hits);
+  if (!ranked.length) return null;
+  const top = ranked[0], next = ranked[1]?.hits ?? 0;
+  if (top.hits < 3) return null;                   /* one second could be chance */
+  if (next > top.hits * 0.34) return null;         /* no clear winner */
+  const share = top.hits / total;
+  return {
+    branch_id: top.branch_id,
+    confidence: top.hits >= 10 || share >= 0.5 ? "certain" : "likely",
+    why: `${top.hits} of ${total} payments match a sale already imported for this shop, to the exact second`,
+  };
+}
+
+/** The shop named in a file name, if any. Weakest of the three, but free. */
+export function shopFromFileName(fileName: string,
+  branches: { id: number; name: string; nimbus_name?: string | null }[]): ShopGuess | null {
+  const hay = normStore(fileName.replace(/\.[a-z0-9]+$/i, ""));
+  if (!hay) return null;
+  const hit = branches.filter((b) => {
+    const ns = b.nimbus_name ? normStore(b.nimbus_name) : "";
+    return (ns && hay.includes(ns)) || hay.includes(normStore(b.name));
+  });
+  if (hit.length !== 1) return null;
+  return { branch_id: hit[0].id, confidence: "likely", why: `the file name names ${hit[0].name}` };
+}

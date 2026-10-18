@@ -32,6 +32,8 @@ import { readGrid, findHeaderRow, dropRepeatedHeaders } from "@/lib/readGrid";
 import {
   detectKind, KIND_LABEL, normStore, withLineHashes, looksLikeMopCell,
   parseSalesRows, parseExpenseRows, parsePaymentRows, parseCommRows, linkAdvances,
+  receiptNo, shopFromReceipts, shopFromStamps, shopFromFileName,
+  type ShopGuess, type ReceiptHigh, type StampHits,
   type NimbusKind, type SaleRow, type ExpenseRow, type PaymentRow, type CommRow,
 } from "@/lib/nimbus";
 
@@ -109,6 +111,9 @@ export function ImportPanel({ onDone, inShop, inShopKey }: {
      silently swallowed this notice the moment the file finished parsing — the
      one moment it most needs to be on screen. */
   const [inferred, setInferred] = useState(false);
+  /* What the database says about whose file this is — see the probe below. */
+  const [probe, setProbe] = useState<ShopGuess | null>(null);
+  const [probing, setProbing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState<string | null>(null);
 
@@ -137,6 +142,12 @@ export function ImportPanel({ onDone, inShop, inShopKey }: {
        ones the file just changed. */
     onDone?.();
   }
+
+  /* Where the Receipt column sits, for the receipt-series probe. */
+  const rcptCol = useMemo(
+    () => (rows.length ? rows[0].findIndex((h) => h.trim() === "Receipt") : -1),
+    [rows],
+  );
 
   const resolveBranch = useCallback((ns: string): number | null => {
     const b = branches.find((x) => x.nimbus_name && normStore(x.nimbus_name) === ns);
@@ -169,18 +180,91 @@ export function ImportPanel({ onDone, inShop, inShopKey }: {
    * It is a default, not a decision. The picker is still there, it still shows
    * what was chosen, and the Import button names the destination so it cannot
    * be confirmed without being seen. */
-  const autoBid = useMemo(() => {
+  const auto = useMemo((): ShopGuess | null => {
     if (!needBranch) return null;
     const pickable = branches.filter((b) => (b.chain ?? "") !== "Topshop");
-    const hay = normStore(fileName.replace(/\.[a-z0-9]+$/i, ""));
-    const named = pickable.find((b) => {
-      const ns = b.nimbus_name ? normStore(b.nimbus_name) : "";
-      return (ns && hay.includes(ns)) || hay.includes(normStore(b.name));
-    });
-    if (named) return named.id;
-    if (inShop && pickable.some((b) => b.id === inShop)) return inShop;
+    const ok = (g: ShopGuess | null) =>
+      g && pickable.some((b) => b.id === g.branch_id) ? g : null;
+
+    /* THE FILE'S OWN NUMBERS FIRST. A receipt series or a set of timestamps is
+       a fact about the file; a file name is a habit and the shop you are in is
+       a coincidence. Where the numbers speak, nothing else gets a vote. */
+    const fromData = ok(probe);
+    if (fromData) return fromData;
+
+    const named = ok(shopFromFileName(fileName, branches));
+    if (named) return named;
+
+    if (inShop && pickable.some((b) => b.id === inShop)) {
+      return { branch_id: inShop, confidence: "likely", why: "it is the shop you are in" };
+    }
     return null;
-  }, [needBranch, branches, fileName, inShop]);
+  }, [needBranch, branches, fileName, inShop, probe]);
+
+  const autoBid = auto?.branch_id ?? null;
+
+  /* ── ASK THE DATABASE WHOSE FILE THIS IS ────────────────────────────────
+   *
+   * The two signals in lib/nimbus.ts need one thing each from the server, and
+   * only when a file has actually been dropped and could not name its own shop.
+   *
+   *   SALES: the highest receipt each branch has imported. Receipt numbers
+   *   climb, so the newest rows hold them — 50 recent rows per branch is
+   *   enough to find the top of each series, and it is 8 small reads rather
+   *   than an aggregate this project cannot add a function for.
+   *
+   *   NON-CASH: how many of the file's exact timestamps each branch already
+   *   owns a sale line for. One read, filtered to the file's own dates and
+   *   times, which is also precisely the join the classification will do.
+   */
+  useEffect(() => {
+    if (!needBranch || !rows.length || !supabase) { setProbe(null); return; }
+    let alive = true;
+    (async () => {
+      setProbing(true);
+      try {
+        if (kind === "sales_single") {
+          const nums = rows.slice(1).map((r) => receiptNo(r[rcptCol])).filter((n): n is number => n != null);
+          if (!nums.length) { if (alive) setProbe(null); return; }
+          const lo = Math.min(...nums), hi = Math.max(...nums);
+          const highs: ReceiptHigh[] = [];
+          for (const b of branches) {
+            const { data } = await supabase.from("retail_sale_lines")
+              .select("receipt_no").eq("branch_id", b.id)
+              .order("sale_date", { ascending: false }).limit(50);
+            const top = ((data ?? []) as { receipt_no: string }[])
+              .map((x) => receiptNo(x.receipt_no) ?? 0).reduce((m, n) => (n > m ? n : m), 0);
+            if (top > 0) highs.push({ branch_id: b.id, high: top });
+          }
+          if (alive) setProbe(shopFromReceipts(lo, hi, highs));
+          return;
+        }
+        if (kind === "payments") {
+          const pr = parsePaymentRows(rows, null, () => null).parsed;
+          if (!pr.length) { if (alive) setProbe(null); return; }
+          const dates = [...new Set(pr.map((p) => p.date))];
+          const times = [...new Set(pr.map((p) => p.time))];
+          const { data } = await supabase.from("retail_sale_lines")
+            .select("branch_id,sale_date,sale_time")
+            .in("sale_date", dates).in("sale_time", times.slice(0, 300)).limit(4000);
+          const own = new Set(pr.map((p) => p.date + "|" + p.time));
+          const per = new Map<number, Set<string>>();
+          ((data ?? []) as { branch_id: number; sale_date: string; sale_time: string }[]).forEach((l) => {
+            const k = l.sale_date + "|" + l.sale_time;
+            if (!own.has(k)) return;
+            if (!per.has(l.branch_id)) per.set(l.branch_id, new Set());
+            per.get(l.branch_id)!.add(k);
+          });
+          const hits: StampHits[] = [...per].map(([branch_id, set]) => ({ branch_id, hits: set.size }));
+          if (alive) setProbe(shopFromStamps(own.size, hits));
+          return;
+        }
+        if (alive) setProbe(null);
+      } catch { if (alive) setProbe(null); }
+      finally { if (alive) setProbing(false); }
+    })();
+    return () => { alive = false; };
+  }, [needBranch, rows, kind, branches, rcptCol]);
 
   /* The picker's own value wins once somebody has touched it. */
   const effectiveBid = pickBranch ? Number(pickBranch) : autoBid;
@@ -822,12 +906,22 @@ export function ImportPanel({ onDone, inShop, inShopKey }: {
           chosen, or a shop that covers several branches. When it does know, it
           says so in one quiet line with a way to change it — which is one more
           safeguard than the original had, and it costs nothing to read. */}
+      {/* STILL WORKING IT OUT. Two or three small reads, so it is usually gone
+          before it is read — but a silent pause in front of a money import
+          invites a click on whatever is nearest. */}
+      {needBranch && probing && !effectiveBid && (
+        <p className="mt-4 px-1 text-[12.5px] text-muted dark:text-[#a89f93]">
+          Working out which shop this file is from…
+        </p>
+      )}
+
       {needBranch && effectiveBid && !changing && (
         <p className="mt-4 flex flex-wrap items-center gap-x-2 gap-y-1 px-1 text-[12.5px] text-muted dark:text-[#a89f93]">
           <Check size={14} className="flex-none text-success" />
           <span>
-            Single-store file — filing to <strong className="text-ink dark:text-[#e7e2d8]">{destination}</strong>
-            {pickBranch ? "" : autoBid === inShop ? " (the shop you are in)" : " (from the file name)"}.
+            {pickBranch ? <>Filing to <strong className="text-ink dark:text-[#e7e2d8]">{destination}</strong>.</>
+              : <>This is <strong className="text-ink dark:text-[#e7e2d8]">{destination}</strong>
+                 {auto?.why ? <> — {auto.why}</> : null}.</>}
           </span>
           <button onClick={() => setChanging(true)}
             className="font-semibold text-ink underline underline-offset-2 dark:text-[#e7e2d8]">Change</button>
@@ -837,12 +931,23 @@ export function ImportPanel({ onDone, inShop, inShopKey }: {
       {needBranch && (!effectiveBid || changing) && (
         <div className="mt-4 flex flex-wrap items-center gap-3 rounded-card border border-line bg-periwinkle-soft p-4 dark:border-white/[0.06] dark:bg-white/[0.04]">
           <Info size={18} className="flex-none text-ink dark:text-white" />
+          {/* WHEN IT GENUINELY CANNOT TELL, IT SAYS WHAT IT TRIED.
+              A bare "which branch is it?" reads as the app not bothering. The
+              file has no Store column, its receipt series matched no shop and
+              its name says nothing — that is worth one sentence, because every
+              one of those is something the person can fix at the source. */}
           <p className="flex-1 text-[12.5px] font-medium text-ink dark:text-[#e7e2d8]">
-            This is a <strong>single-store</strong> file — it has no Store column, which is how a
-            Fashion Collection shop exports. Which branch is it?{" "}
-            {inShopIsMulti
-              ? <>You are in a shop that covers several branches, so this one cannot be worked out — Top Shop exports as the combined all-stores file, which needs no answer at all.</>
-              : <>(Top Shop comes as the combined all-stores export.)</>}
+            {changing ? <>Filing this to a different shop.</> : <>
+              This file does not say which shop it is from, and nothing in it matched one.
+              {kind === "sales_single" && <> Its receipt numbers do not carry on from any shop already
+                imported — which happens when that shop&apos;s earlier days have not been imported yet.</>}
+              {kind === "payments" && <> Its timestamps match no sale already imported — the sales file
+                for these days goes in first, and then this routes itself.</>}
+              {kind === "expense_single" && <> An account file carries no receipt numbers or times,
+                so there is nothing in it to go on.</>}
+              {inShopIsMulti && <> You are in a shop that covers several branches, so that cannot
+                answer it either.</>}
+            </>}
           </p>
           <Select value={String(effectiveBid ?? "")}
             onChange={(v) => { setPickBranch(v); setChanging(false); }} className="max-md:w-full">

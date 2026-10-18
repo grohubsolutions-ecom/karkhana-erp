@@ -38,7 +38,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  ArrowLeftRight, CreditCard, Smartphone, Globe, Users, Banknote, HelpCircle, CheckCircle2, Circle,
+  ArrowLeftRight, CreditCard, Smartphone, Globe, Users, Banknote, HelpCircle, CheckCircle2, Circle, Pencil,
 } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { rangeDates } from "@/lib/dateRange";
@@ -127,6 +127,14 @@ export default function NonCashPage() {
 
   /* ── section 2 state: the backlog ──────────────────────────────────────── */
   const [unc, setUnc] = useState<UncGroup[]>([]);
+  /* ALREADY-TAGGED RECEIPTS, SO A WRONG TAG CAN BE PUT RIGHT.
+     Tagging used to be one-way: the moment a receipt was classified it left
+     the list above and there was no screen anywhere that could change it
+     again. A card payment mistagged as JazzCash then sits in the bank
+     reconciliation for ever, and the only remedy was SQL. */
+  const [done, setDone] = useState<UncGroup[]>([]);
+  const [loadingDone, setLoadingDone] = useState(true);
+  const [doneOpen, setDoneOpen] = useState(false);
   const [loadingUnc, setLoadingUnc] = useState(true);
   const [errUnc, setErrUnc] = useState("");
   const [busy, setBusy] = useState("");
@@ -272,6 +280,57 @@ export default function NonCashPage() {
     setLoadingUnc(false);
   }, [scope.key]);
   useEffect(() => { loadUnc(); }, [loadUnc]);
+
+  /** The same grouping as loadUnc, over receipts that HAVE been tagged, for
+   *  the chosen day only. Bounded by the day on purpose: the backlog above is
+   *  unbounded because an untagged receipt is money nobody has accounted for,
+   *  whereas this is a correction tool and a correction is something you make
+   *  about a day you are looking at. */
+  const loadDone = useCallback(async () => {
+    if (!isSupabaseConfigured || !supabase) { setLoadingDone(false); return; }
+    const db = supabase;
+    setLoadingDone(true);
+    const { rows, error } = await fetchAll<UncLine & { payment_method: string | null }>((lo, hi) => {
+      let q = db.from("retail_sale_lines")
+        .select("id,branch_id,sale_date,sale_time,receipt_no,receipt_txn,sales_amount,payment_method")
+        .eq("sale_date", day)
+        .in("payment_method", ["meezan_card", "jazzcash", "credit", "online"]);
+      if (scope.ids) q = q.in("branch_id", scope.ids);
+      return q.order("id", { ascending: true }).range(lo, hi);
+    });
+    if (error) { setLoadingDone(false); return; }
+    const m = new Map<string, UncGroup & { pm: string }>();
+    rows.forEach((r) => {
+      const k = `${r.branch_id}|${r.receipt_txn || r.id}|${r.sale_date}`;
+      const g = m.get(k) ?? {
+        key: k, branch_id: r.branch_id,
+        date: String(r.sale_date ?? ""), time: String(r.sale_time ?? ""),
+        receipt: String(r.receipt_no ?? r.receipt_txn ?? ""),
+        amt: 0, ids: [], pm: String(r.payment_method ?? ""),
+      };
+      g.amt += num(r.sales_amount);
+      g.ids.push(Number(r.id));
+      m.set(k, g);
+    });
+    setDone([...m.values()].sort((a, b) => b.time.localeCompare(a.time)));
+    setLoadingDone(false);
+  }, [day, scope.key]);
+  useEffect(() => { loadDone(); }, [loadDone]);
+
+  /** Change a tag that is already set, or take it off altogether. Goes through
+   *  the same `setMethod` as the backlog buttons, so the chunking and the error
+   *  handling cannot drift apart from it. Untagging puts the receipt back in
+   *  the list above rather than deleting anything: the sale is real, it is only
+   *  the question "what did they pay with" that is being reopened. */
+  async function reclassify(g: UncGroup, pm: string) {
+    if (!supabase) return;
+    setBusy(g.key); setErrUnc("");
+    const e = await setMethod(g, pm);
+    if (e) { setErrUnc(e); setBusy(""); return; }
+    setBusy("");
+    await Promise.all([loadDone(), loadUnc(), loadCard()]);
+    refreshAll();
+  }
 
   /** The write, and the only one on this screen. Both the computer's per-row
    *  buttons and the phone's bottom bar go through here, so the two cannot
@@ -758,6 +817,88 @@ export default function NonCashPage() {
           Collection shops take credit sales at all. Tagging writes to every line on the receipt at once,
           because half a bill on card and half on cash is not a thing that happens.
         </SourceNote>
+      </section>
+
+      {/* ── 2b. PUT A WRONG TAG RIGHT ─────────────────────────────────────
+          Tagging was one-way. The moment a receipt was classified it left the
+          list above, and nothing anywhere could change it again — so a card
+          payment tagged JazzCash stayed wrong in the bank reconciliation until
+          somebody ran SQL. The buttons are the same four, plus Untag, and they
+          go through the same write. Collapsed by default: it is a correction
+          tool, and a list of things that are already right is noise until the
+          moment you need it. */}
+      <section className="mt-6">
+        <button onClick={() => setDoneOpen((v) => !v)}
+          className="inline-flex items-center gap-2 rounded-full border border-line bg-surface px-3.5 py-2 text-[12.5px] font-semibold text-ink transition hover:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:hover:bg-white/[0.12]">
+          <Pencil size={13} />
+          {doneOpen ? "Hide" : "Change"} a tag already set
+          {!loadingDone && done.length > 0 && (
+            <span className="tabular-nums text-muted dark:text-[#a89f93]">({done.length} on {day})</span>
+          )}
+        </button>
+
+        {doneOpen && (
+          <div className="mt-3 overflow-hidden rounded-card border border-line bg-surface dark:border-white/[0.06] dark:bg-[#201c17]">
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[820px] text-[13px]">
+                <thead className="bg-panel/70 text-left text-[12px] uppercase tracking-wide text-muted dark:bg-white/[0.04] dark:text-[#a89f93]">
+                  <tr>
+                    <th className="px-4 py-3 font-semibold">Time</th>
+                    <th className="px-4 py-3 font-semibold">Shop</th>
+                    <th className="px-4 py-3 font-semibold">Receipt</th>
+                    <th className="px-4 py-3 text-right font-semibold">Amount</th>
+                    <th className="px-4 py-3 font-semibold">Tagged as</th>
+                    <th className="px-4 py-3 font-semibold">Change to</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-line dark:divide-white/[0.05]">
+                  {loadingDone ? (
+                    Array.from({ length: 4 }).map((_, i) => (
+                      <tr key={i}><td colSpan={6} className="px-4 py-3"><div className="h-4 animate-pulse rounded bg-panel/70 dark:bg-white/[0.05]" /></td></tr>
+                    ))
+                  ) : done.length === 0 ? (
+                    <tr><td colSpan={6} className="px-4 py-10 text-center text-[13px] text-muted dark:text-[#a89f93]">
+                      No non-cash receipt is tagged on {day}.
+                    </td></tr>
+                  ) : (
+                    done.map((g) => {
+                      const cur = (g as UncGroup & { pm: string }).pm;
+                      const curLabel = CLASSIFY_AS.find((c) => c.pm === cur)?.label ?? cur;
+                      return (
+                        <tr key={g.key} className={`text-ink transition dark:text-[#e7e2d8] ${busy === g.key ? "opacity-40" : "hover:bg-panel/50 dark:hover:bg-white/[0.03]"}`}>
+                          <td className="px-4 py-3 text-muted dark:text-[#a89f93]">{text(g.time)}</td>
+                          <td className="px-4 py-3 font-semibold">{branchName(g.branch_id)}</td>
+                          <td className="px-4 py-3">{text(g.receipt)}</td>
+                          <td className="px-4 py-3 text-right font-semibold tabular-nums">{money(g.amt)}</td>
+                          <td className="px-4 py-3">
+                            <Pill tone={cur === "jazzcash" ? "warn" : cur === "credit" ? "bad" : "info"}>{curLabel}</Pill>
+                          </td>
+                          <td className="px-4 py-3">
+                            <span className="flex flex-wrap gap-1.5">
+                              {CLASSIFY_AS.filter((c) => c.pm !== cur).map((c) => (
+                                <button key={c.pm} onClick={() => reclassify(g, c.pm)} disabled={busy === g.key}
+                                  className={`rounded-full px-3 py-1.5 text-[12px] font-semibold transition disabled:opacity-50 dark:bg-white/[0.08] dark:text-white ${c.cls}`}>
+                                  {c.label}
+                                </button>
+                              ))}
+                              {/* Not a delete. The sale stays; only the answer
+                                  to "what did they pay with" is reopened, and
+                                  the receipt reappears in the list above. */}
+                              <button onClick={() => reclassify(g, "unclassified")} disabled={busy === g.key}
+                                className="rounded-full border border-line px-3 py-1.5 text-[12px] font-semibold text-muted transition hover:bg-panel disabled:opacity-50 dark:border-white/10 dark:text-[#a89f93] dark:hover:bg-white/[0.08]">
+                                Untag
+                              </button>
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
       </section>
 
       {/* ── 3. THE MIX ──────────────────────────────────────────────────── */}
