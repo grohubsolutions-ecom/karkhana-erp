@@ -34,8 +34,9 @@
  *     Net Total is NEGATIVE when the courier owes you.
  *     Order Ref is NOT reliable — row 37 of INV-20250018 reads "tayyaba".
  *     Keyed on tracking number only.
- *     Its per-row net can never foot to its own Grand Total: the fuel surcharge
- *     (20% of charges) is applied at invoice level, not per row. Guard on COD.
+ *     Up to INV-20250025 fuel (20% of charges) was charged once at invoice
+ *     level and the Tax column read 0.00. From INV-20250026 (OwnEx's new
+ *     system, Oct 2026) fuel is on every row. See parseOwnExInvoice.
  */
 import { useRef, useState } from "react";
 import { Upload, Loader2, CheckCircle2, AlertTriangle, ShieldCheck } from "lucide-react";
@@ -299,121 +300,140 @@ function parsePostExCpr(flat: string): Batch[] {
 /* ---------------------------------------------------------------------------
    OwnEx invoice. One per file, and a different shape from a PostEx CPR.
 
-   ANCHORED ON THE TRACKING NUMBER, NOT THE ROW LAYOUT.
-   The first version matched "Sr, OrderRef, Tracking" and required OrderRef to
-   be a single word. OwnEx lets agents type anything into that field, and they
-   do — "Intzar ali", "Nosha Owais", "TS1668BILAL NASIR", "1026 Incomplete
-   Warning", "tayyaba". Every one of those rows silently vanished, which is why
-   INV-20250013 read 118 parcels against a declared 119.
+   ANCHORED ON THE TRACKING NUMBER, NOT THE ROW LAYOUT. OwnEx lets agents type
+   anything into Order Ref ("Intzar ali", "tayyaba"), so the 12-digit tracking
+   number is the only thing on a row that is anchored on. The FIRST six amounts
+   after it are COD · Upfront · Reserved · Charges · Fuel · Net Total.
 
-   The 12-digit tracking number is the only thing on the line that cannot be
-   typed wrong, so it is the only thing anchored on.
+   OCTOBER 2026: OwnEx moved to a new system (courier-portal.com, ~10 Oct) and
+   its invoice changed. INV-20250026 read 108 parcels against 122:
+     1. Amounts arrive in two pieces. pdf.js hands "-2,207.00" over as "-2,207"
+        and ".00" (21 times on INV-26) and "256,107" as "256," + "107". Neither
+        half is an amount, so a row holding one had fewer than six and was
+        dropped — exactly the 14 missing. They are glued back first.
+     2. The header became a row of labels over a row of values
+            INVOICE NUMBER  INVOICE DATE  BOOKINGS  STATUS
+            INV-20250026    10/10/2026    122       Paid
+        so the number read as the word "INVOICE" and the date as today. The
+        number is now the INV-nnnn pattern itself, the date the first date after
+        its label. A missing number or date blocks the import.
+     3. Fuel is now charged PER ROW (the fifth amount, 20% of the charge) and the
+        row's net includes it. Older invoices carry 0.00 there and charge fuel
+        once at the bottom. Both are handled: a row's stored net is COD less the
+        charge, and fuel is taken off once, from the rows or from the summary.
 
-   FIRST six money columns, not the last:
-       COD · Upfront · Reserved · Charges · Tax · Net Total
-   The invoice's grand-total line sits after the final parcel with no separator,
-   so slice(-6) picked up the totals on that one row and threw the COD sum out
-   by exactly that row's value on five of eight invoices.
+   THE DATE IS READ AS WRITTEN (M/D/YYYY). new Date("8/9/2026").toISOString()
+   in Pakistan gives 2026-08-08 — every earlier OwnEx invoice was stored one day
+   early. No time zone is involved now.
 
-   Weights (0.5, 1, 5) and dates never match the two-decimal money pattern, so
-   they cannot be mistaken for columns.
+   THE SIGN IS OwnEx's. Net Total is negative when the courier owes you and
+   positive when you owe it — a return, and also a delivered exchange with COD 0
+   or COD below the charge. Taking abs() of a delivered row turned those costs
+   into money received. Every row is now   net = fuel − Net Total = COD − charge.
 
-   Verified against all eight real invoices: 1,175 parcels, every count and
-   every rupee against the invoice's own declaration.
+   WHAT HAS TO AGREE before anything is offered, all from the invoice itself:
+     parcel count · delivered COD · charges · fuel (when on the rows) ·
+     Payable − Receivable = Grand Total · the payout from the summary =
+     COD − charges − fuel · the payout from the rows.
+   The summary's net is Payable − Receivable — the money actually paid.
 
-   The fuel surcharge is charged at INVOICE level, not per row, so per-row net
-   can never foot to the Grand Total. COD is what gets guarded — it does. */
-function parseOwnExInvoice(flat: string): Batch[] {
-  const ref = /INVOICE NUMBER:?\s*(\S+)/i.exec(flat)?.[1] ?? "";
-  const dt  = /INVOICE DATE:?\s*([\d/]+)/i.exec(flat)?.[1];
-  let date = new Date().toISOString().slice(0, 10);
-  if (dt) { const x = new Date(dt); if (!isNaN(x.getTime())) date = x.toISOString().slice(0, 10); }
+   Verified on the real files: INV-20250010 and 12–18 (old layout, 1,175
+   parcels) and INV-20250026 (new layout, 122 parcels, Rs 224,271), every guard
+   passing on every one, and a check-only run of INV-26 against the live
+   database: 122 read, 121 matched, net 224,271, nothing written.
+--------------------------------------------------------------------------- */
+const AMT = String.raw`-?[\d,]+\.\d{2}`;
+const amt = (s?: string) => n2(unParen(s));
 
-  const declDel  = /Delivered\s+(\d+)\s+([\d,]+\.\d{2})/i.exec(flat);
-  const declShip = /Shipping Charges\s+(\d+)\s+([\d,]+\.\d{2})/i.exec(flat);
-  const fuel     = /Fuel Surcharge\s+\d+\s+([\d,]+\.\d{2})/i.exec(flat);
-  const grand    = /Grand Total\s*Rs\.?\s*(-?[\d,]+\.\d{2})/i.exec(flat);
+function parseOwnExInvoice(raw: string): Batch[] {
+  /* 1. Glue split amounts: "-2,207 .00" → "-2,207.00", "256, 107" → "256,107". */
+  const flat = raw
+    .replace(/(\d)\s+(?=\.\d{2}(?!\d))/g, "$1")
+    .replace(/(\d,)\s+(?=\d{3}(?!\d))/g, "$1");
 
+  /* 2. Number and date, whichever way the header is laid out. */
+  const ref = /\bINV-\d{5,}\b/.exec(flat)?.[0] ?? "";
+  /* Old: "INVOICE DATE: 8/9/2026". New: "INVOICE DATE BOOKINGS STATUS
+     INV-20250026 10/10/2026". Matched exactly — a loose search would find a
+     pickup date in the rows if the invoice date were ever missing. */
+  const dm = /INVOICE DATE:?\s*(?:BOOKINGS\s+STATUS\s+\S+\s+)?(\d{1,2})\/(\d{1,2})\/(\d{4})\b/i.exec(flat);
+  const date = dm ? `${dm[3]}-${dm[1].padStart(2, "0")}-${dm[2].padStart(2, "0")}` : "";
+
+  /* 3. The invoice's own figures. "Grand Total Rs. A Rs. B Rs. C" lists Total
+        Payable, Total Service Charges and the Grand Total in that order on both
+        layouts — the first of the three is NOT the grand total. */
+  const declDel  = new RegExp(String.raw`Delivered\s+(\d+)\s+(${AMT})`, "i").exec(flat);
+  const declShip = new RegExp(String.raw`Shipping Charges\s+(\d+)\s+(${AMT})`, "i").exec(flat);
+  const fuelM    = new RegExp(String.raw`Fuel Surcharge\s+\d+\s+(${AMT})`, "i").exec(flat);
+  const payRec   = new RegExp(String.raw`Payable\s+(${AMT})\s+Receivable\s+(${AMT})`, "i").exec(flat);
+  const grandM   = new RegExp(String.raw`Grand Total\s*Rs\.?\s*(${AMT})\s*Rs\.?\s*(${AMT})\s*Rs\.?\s*(${AMT})`, "i").exec(flat);
+
+  /* 4. The rows. */
   const rows: CprRow[] = [];
-  const re = /(\d{12})\s+(.*?)(?=\d{12}\s|Developed by Own Express|$)/g;
+  let sumCharges = 0, sumFuel = 0, sumOwnexNet = 0;
+  const re = /(\d{12})\s+(.*?)(?=\d{12}\s|Developed by Own Express|Own Express · Invoice|$)/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(flat))) {
     const rest = m[2];
     const st = /\b(Delivered|Returned|Return)\b/i.exec(rest);
     if (!st) continue;
-    const ns = rest.match(/-?[\d,]+\.\d{2}/g);
+    const ns = rest.match(new RegExp(AMT, "g"));
     if (!ns || ns.length < 6) continue;
     const v = ns.slice(0, 6).map((x) => Number(x.replace(/,/g, "")));
-    /* SIGN MATTERS, AND abs() DESTROYED IT.
-       OwnEx writes Net Total from its own point of view:
-           delivered   -3,349.00   negative — the courier owes YOU
-           returned      +150.00   positive — YOU owe the courier the shipping
-       Taking the absolute value flattened both into a positive receipt, so 153
-       return charges were stored as if they were money received, and 0084's
-       safety rule (only touch rows whose net is <= 0) skipped every one.
-       Delivered stays positive; a return is stored as the cost it is. */
-    const delivered = isDelivered(st[1]);
+    sumCharges += v[3]; sumFuel += v[4]; sumOwnexNet += v[5];
     rows.push({ tracking_id: m[1], status: st[1],
                 cod: n2(v[0]), fee: n2(v[3]), tax: n2(v[4]),
-                net: delivered ? n2(Math.abs(v[5])) : -n2(Math.abs(v[5])),
-                paid_on: date });
+                net: n2(v[4] - v[5]),
+                paid_on: date || null });
   }
+  sumCharges = n2(sumCharges); sumFuel = n2(sumFuel); sumOwnexNet = n2(sumOwnexNet);
 
-  const delivered = rows.filter((r) => isDelivered(r.status));
-  const codDelivered = n2(delivered.reduce((t, r) => t + r.cod, 0));
+  const delivered     = rows.filter((r) => isDelivered(r.status));
+  const codDelivered  = n2(delivered.reduce((t, r) => t + r.cod, 0));
   const declaredCount = declShip ? Number(declShip[1]) : undefined;
-  const declaredCod = declDel ? unParen(declDel[2]) : undefined;
+  const declaredCod   = declDel ? amt(declDel[2]) : undefined;
+  const shipping      = declShip ? amt(declShip[2]) : undefined;
+  const fuel          = fuelM ? amt(fuelM[1]) : 0;
+  const payout        = payRec ? n2(amt(payRec[1]) - amt(payRec[2])) : undefined;
+  const grand         = grandM ? amt(grandM[3]) : undefined;
+  const fuelOnRows    = sumFuel !== 0;
+  const fromRows      = n2(rows.reduce((t, r) => t + r.net, 0) - (fuelOnRows ? sumFuel : fuel));
 
-  /* THE PAYOUT IS COMPUTED FROM THE INVOICE'S OWN LABELLED LINES.
-       delivered COD − delivery charges (all parcels) − fuel surcharge
-
-     It used to be READ, from whatever number followed "Grand Total Rs." in the
-     extracted text. PDF text comes out in layout order, not reading order, and
-     on most OwnEx invoices that pattern caught the Delivered COD figure instead.
-     The importer then took COD as the net and ADDED the charges back on to make
-     a "Total" that appears nowhere on the paper:
-
-         INV-20250023   shown  Total 69,010 · Net 39,670
-                        real   COD 39,670 − 24,450 − 4,890 = Net 10,330
-
-     Twenty invoices carried the same fault, every one overstating what OwnEx
-     paid by exactly its own charges. The previous comment here explained the
-     misread as "OwnEx states the net", which is how a wrong reading of one
-     invoice became the rule for all of them.
-
-     Delivered COD is checked against the parcel rows above. The Grand Total
-     is now only a cross-check. If it matches the payout, good. If it matches the
-     delivered COD, it is the known misread and is ignored. If it matches neither,
-     the import stops and names all three numbers — a settlement that cannot be
-     made to add up is not written. */
-  const shipping = declShip ? unParen(declShip[2]) : undefined;
-  const fuelAmt  = fuel ? unParen(fuel[1]) : 0;
-  const payout = (declaredCod !== undefined && shipping !== undefined)
-    ? n2(declaredCod - shipping - fuelAmt) : undefined;
-  const grandRead = grand ? Math.abs(unParen(grand[1])) : undefined;
-
+  const off = (a: number, b: number) => Math.abs(a - b) > 1;
   let problem: string | undefined;
-  if (!rows.length) problem = "no parcel rows could be read";
-  else if (declaredCount && rows.length !== declaredCount)
+  if (!ref) problem = "the invoice number could not be read";
+  else if (!date) problem = "the invoice date could not be read";
+  else if (!rows.length) problem = "no parcel rows could be read";
+  else if (!declaredCount) problem = "the invoice's own parcel count could not be read";
+  else if (rows.length !== declaredCount)
     problem = `read ${rows.length} parcels, the invoice says ${declaredCount}`;
-  else if (declaredCod !== undefined && Math.abs(codDelivered - declaredCod) > 1)
+  else if (declaredCod === undefined)
+    problem = "the invoice's delivered COD could not be read";
+  else if (off(codDelivered, declaredCod))
     problem = `delivered COD totals ${codDelivered}, the invoice says ${declaredCod}`;
-  else if (payout === undefined)
-    problem = "the invoice's Delivered or Shipping Charges line could not be read — cannot work out the payout";
-  else if (grandRead !== undefined
-           && Math.abs(grandRead - payout) > 1
-           && Math.abs(grandRead - declaredCod!) > 1)
-    problem = `Grand Total reads ${grandRead}, but delivered COD ${declaredCod} − charges ${shipping} − fuel ${fuelAmt} = ${payout}`;
+  else if (shipping !== undefined && off(sumCharges, shipping))
+    problem = `the rows' charges total ${sumCharges}, the invoice says ${shipping}`;
+  else if (fuelOnRows && off(sumFuel, fuel))
+    problem = `the rows' fuel surcharge totals ${sumFuel}, the invoice says ${fuel}`;
+  else if (payout === undefined || grand === undefined)
+    problem = "the invoice's payable, receivable or grand total could not be read";
+  else if (off(payout, -grand))
+    problem = `payable less receivable is ${payout}, the grand total says ${-grand}`;
+  else if (shipping !== undefined && off(payout, n2(declaredCod - shipping - fuel)))
+    problem = `the invoice carries other charges of ${n2(declaredCod - shipping - fuel - payout)} (adjustment, upfront or pre-delivery) that this import does not record — check the invoice`;
+  else if (off(fromRows, payout))
+    problem = `the rows come to ${fromRows}, the invoice pays ${payout}`;
+  else if (fuelOnRows && off(sumOwnexNet, grand))
+    problem = `the rows' net totals ${sumOwnexNet}, the grand total says ${grand}`;
 
   return [{
     ref, date, rows, courier: "OwnEx", declaredCount,
     declaredNet: payout,
-    computedNet: payout,
+    computedNet: fromRows,
     problem,
-    summary: payout !== undefined ? {
-      gross: declaredCod!, shipping: shipping!, gst: fuelAmt,
-      wh_income: 0, wh_sales: 0, net: payout,
-    } : undefined,
+    summary: (declaredCod !== undefined && shipping !== undefined && payout !== undefined)
+      ? { gross: declaredCod, shipping, gst: fuel, wh_income: 0, wh_sales: 0, net: payout }
+      : undefined,
   }];
 }
 
@@ -425,7 +445,7 @@ async function readPdf(file: File): Promise<Parsed> {
              note: `${batches.filter((b) => b.ref !== "__dupes__").length} settlement${batches.filter((b) => b.ref !== "__dupes__").length === 1 ? "" : "s"} found in this file. Each is checked against its own summary before anything is written; any that disagrees is skipped and named.` };
   }
   return { batches: parseOwnExInvoice(flat), source: "pdf",
-           note: "The fuel surcharge on an OwnEx invoice is applied at invoice level, not per row, so per-row net will not foot to the Grand Total. The check runs on COD, which does." };
+           note: "Checked against the invoice's own figures: parcel count, delivered COD, charges, fuel surcharge, and Payable − Receivable = Grand Total." };
 }
 
 /* ======================================================================== */
