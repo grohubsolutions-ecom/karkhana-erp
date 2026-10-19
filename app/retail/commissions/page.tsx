@@ -55,13 +55,24 @@ import { Coins, Percent, Gift, Plus, Search, Save, Trash2, AlertTriangle, Pencil
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import Modal, { Field, inputCls, btnPrimary, btnGhost } from "@/components/Modal";
 import {
-  Shell, PageHeader, StatCards, DataTable, Tabs, Pill, Select, PreviewNote, SourceNote,
+  Shell, PageHeader, StatCards, DataTable, Tabs, Pill, Select, PreviewNote, SourceNote, ImportButton,
   money, num, text, today, addDays, fetchAll, fetchKeyset, commBonus,
   useIsPhone, RowCard, useBranches,
   type CommCfg, type Row, type Col,
 } from "@/components/retail/kit";
 import { useStaleRates, reloadStale, staleSeen, markStaleSeen } from "@/lib/retailStale";
 import { useShopScope } from "@/lib/retailShop";
+/* THE RATE SHEET ARRIVES AS A FILE, NOT AS TYPING.
+ *
+ * Item Rates is a table of thousands of barcodes and there was no way to get a
+ * file into it from this screen — only "Add item", one barcode at a time. The
+ * importer has read the commission master since the port (header test: Item
+ * Code + Commission + Percentage; CSV, Excel and PDF all go through
+ * lib/readGrid), so the only thing missing here was the button that opens it.
+ * It is the same panel the Sales and Expenses screens open, so a file dropped
+ * on the wrong screen still lands in the right table — the file says what it
+ * is, the screen does not. */
+import { ImportPanel } from "@/components/retail/ImportPanel";
 
 /* ── types ───────────────────────────────────────────────────────────────── */
 
@@ -186,6 +197,7 @@ export default function CommissionsPage() {
   const [dhaForm, setDhaForm] = useState<DhaForm | null>(null);
   const [saving, setSaving] = useState(false);
   const [savedCfg, setSavedCfg] = useState("");
+  const [importOpen, setImportOpen] = useState(false);
 
   /* stale DHA rates */
   const [staleOpen, setStaleOpen] = useState(false);
@@ -648,6 +660,11 @@ export default function CommissionsPage() {
         onRefresh={() => { loadRef(); loadCells(); reloadStale(dhaId); }}
         loading={loading || refLoading}
       >
+        {/* On every tab, not just Item Rates. Somebody holding the new rate
+            sheet is looking at the commission figures it is going to change,
+            and being sent to another tab to find the button is how the sheet
+            stays unimported. */}
+        <ImportButton onClick={() => setImportOpen(true)} />
         {tab === "rates" && (
           <button onClick={() => setRateForm({ isEdit: false, item_code: "", item_name: "", retail_price: "", commission: "", percentage: "5" })} className={btnPrimary}>
             <Plus size={15} /> Add item
@@ -659,6 +676,23 @@ export default function CommissionsPage() {
           </button>
         )}
       </PageHeader>
+
+      {/* `inShop` is the shop from the left menu, passed so a single-store file
+          needs no dropdown. A rate sheet is company-wide — retail_commission_master
+          has no branch_id and every shop is paid from the same row — so the shop
+          changes nothing for THIS file. It is passed anyway because this is the
+          one shared panel: a sales or expense file dropped here is still that
+          shop's file, and the panel has to be told which shop that is.
+
+          onDone reloads both halves: the rate sheet itself, and the grid, whose
+          every figure is retail_price × percentage. Reloading the rates and
+          leaving the grid showing the old money is the version of this that
+          makes somebody import the file a second time. */}
+      <Modal open={importOpen} onClose={() => setImportOpen(false)} wide
+        title="Import" subtitle="Drop any NimbusRMS export — CSV, Excel or PDF. The file says what it is.">
+        <ImportPanel inShopKey={shop.key} inShop={shop.single ? Number(shop.single) : null}
+          onDone={() => { loadRef(); loadCells(); }} />
+      </Modal>
 
       <Tabs tabs={TABS} value={tab} onChange={(t) => { setTab(t); setQ(""); }} />
 
