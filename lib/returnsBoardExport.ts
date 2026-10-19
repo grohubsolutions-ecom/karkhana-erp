@@ -18,7 +18,7 @@ export type BoardRow = {
   tracking_id: string; order_number: string | null; store_code: string | null;
   courier: string | null; return_date: string | null; person_received?: boolean;
 };
-export type BoardOpts = { scope: "pending" | "period"; from: string | null; to: string | null; courier: string; store: string };
+export type BoardOpts = { scope: "pending" | "period" | "stuck"; from: string | null; to: string | null; courier: string; store: string };
 
 const STORES = ["LM", "TS", "TRZ"];
 const STORE_NAME: Record<string, string> = { ALL: "All stores", LM: "Little Minors", TS: "TopShop", TRZ: "Trenzee" };
@@ -49,11 +49,13 @@ function build(rows: BoardRow[], o: BoardOpts) {
     });
   }
   const depth = Math.max(0, ...cols.map((c) => c.list.length));
-  const pend = (r: BoardRow) => o.scope === "pending" || !r.person_received;
+  /* On the pending and stuck boards every row is "to do" — there is no
+     received/struck state to carry, so the whole list counts. */
+  const pend = (r: BoardRow) => o.scope === "pending" || o.scope === "stuck" || !r.person_received;
   const now = new Date();
   const printed = now.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric" })
     + ", " + now.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
-  const title = o.scope === "pending" ? "Pending returns" : "Returns";
+  const title = o.scope === "stuck" ? "Stuck at courier" : o.scope === "pending" ? "Pending returns" : "Returns";
   const scope = `${STORE_NAME[o.store] ?? o.store} - ${o.courier === "Both" ? "PostEx & OwnEx" : o.courier}`
     + (o.scope === "period" ? ` - returned ${o.from && o.to ? `${o.from} to ${o.to}` : "at any time"}` : "");
   return { couriers, stores, cols, depth, pend, printed, title, scope,
@@ -107,7 +109,7 @@ export function downloadBoardExcel(rows: BoardRow[], o: BoardOpts) {
 
   rowsXml.push(`<row r="1" ht="22" customHeight="1">${str("A1", b.title, 3)}</row>`);
   merges.push(`A1:${lastCol}1`);
-  rowsXml.push(`<row r="2">${str("A2", `Printed on ${b.printed}   |   ${o.scope === "pending" ? "Pending" : "Pending of " + b.total}: ${b.pendingCount}   |   ${b.scope}`, 4)}</row>`);
+  rowsXml.push(`<row r="2">${str("A2", `Printed on ${b.printed}   |   ${o.scope === "stuck" ? "Stuck" : o.scope === "pending" ? "Pending" : "Pending of " + b.total}: ${b.pendingCount}   |   ${b.scope}`, 4)}</row>`);
   merges.push(`A2:${lastCol}2`);
 
   // Courier band
@@ -116,7 +118,7 @@ export function downloadBoardExcel(rows: BoardRow[], o: BoardOpts) {
     const start = 1 + ci * b.stores.length * 2;
     const end = start + b.stores.length * 2 - 1;
     const cnt = b.cols.filter((x) => x.courier === c).reduce((t, x) => t + x.list.filter(b.pend).length, 0);
-    for (let k = start; k <= end; k++) r1 += str(`${col(k)}${HEAD}`, k === start ? `${c}  (${cnt} pending)` : "", band(c));
+    for (let k = start; k <= end; k++) r1 += str(`${col(k)}${HEAD}`, k === start ? `${c}  (${cnt}${o.scope === "stuck" ? " stuck" : " pending"})` : "", band(c));
     merges.push(`${col(start)}${HEAD}:${col(end)}${HEAD}`);
   });
   rowsXml.push(`<row r="${HEAD}" ht="20" customHeight="1">${r1}</row>`);
@@ -346,6 +348,7 @@ function placeAll(cols: { list: BoardRow[] }[], fit: BoardFit) {
 
 export function downloadBoardPdf(rows: BoardRow[], o: BoardOpts) {
   const b = build(rows, o);
+  const stuck = o.scope === "stuck";
   const W = 842, H = 595, M = 26;
   const usable = W - M * 2;
   const CH = 20, SH = 24;                               // courier band, store band
@@ -373,12 +376,13 @@ export function downloadBoardPdf(rows: BoardRow[], o: BoardOpts) {
     // Heading: title and scope on the left, Pending and Printed-on cards on the right.
     s += T(M, H - M - 14, "F2", 17, b.title);
     s += T(M, H - M - 28, "F1", 8.5, `Grohub Solutions - ${b.scope}`, "444441");
-    s += T(M, H - M - 39, "F1", 8.5, o.scope === "pending" ? "Not yet received or cancelled - the same list as the Pending tab" : "", "444441");
+    s += T(M, H - M - 39, "F1", 8.5, stuck ? "Still in transit but not moving - chase the courier (OwnEx especially). Oldest first." : o.scope === "pending" ? "Not yet received or cancelled - the same list as the Pending tab" : "", "444441");
     const cardW2 = 190, cardW1 = 96, cardH = 38, cy = H - M - cardH;
     const c2x = W - M - cardW2, c1x = c2x - 8 - cardW1;
-    s += rect(c1x, cy, cardW1, cardH, "EEEDFE") + box(c1x, cy, cardW1, cardH, "534AB7");
-    s += TC(c1x + cardW1 / 2, cy + 26, "F2", 7.5, o.scope === "pending" ? "PENDING" : `PENDING OF ${b.total}`, "3C3489");
-    s += TC(c1x + cardW1 / 2, cy + 8, "F2", 16, String(b.pendingCount), "3C3489");
+    const cFill = stuck ? "FBEAE7" : "EEEDFE", cBox = stuck ? "B5452F" : "534AB7", cInk = stuck ? "8A2F1E" : "3C3489";
+    s += rect(c1x, cy, cardW1, cardH, cFill) + box(c1x, cy, cardW1, cardH, cBox);
+    s += TC(c1x + cardW1 / 2, cy + 26, "F2", 7.5, stuck ? "STUCK" : o.scope === "pending" ? "PENDING" : `PENDING OF ${b.total}`, cInk);
+    s += TC(c1x + cardW1 / 2, cy + 8, "F2", 16, String(b.pendingCount), cInk);
     s += rect(c2x, cy, cardW2, cardH, "F1EFE8") + box(c2x, cy, cardW2, cardH, "5F5E5A");
     s += TC(c2x + cardW2 / 2, cy + 26, "F2", 7.5, "PRINTED ON", "444441");
     s += TC(c2x + cardW2 / 2, cy + 10, "F2", 9.5, b.printed, "111111");
@@ -431,7 +435,7 @@ export function downloadBoardPdf(rows: BoardRow[], o: BoardOpts) {
         }
       });
     }
-    if (!b.depth) s += TC(M + usable / 2, yS - rh + (rh - 9 * 0.72) / 2, "F1", 9, "No pending returns. Nothing to chase.", "444441");
+    if (!b.depth) s += TC(M + usable / 2, yS - rh + (rh - 9 * 0.72) / 2, "F1", 9, stuck ? "Nothing stuck at courier right now." : "No pending returns. Nothing to chase.", "444441");
 
     // Grid
     const bottom = yS - n * rh;
@@ -453,7 +457,7 @@ export function downloadBoardPdf(rows: BoardRow[], o: BoardOpts) {
     // Footer: signatures on the last page, page number on every page.
     if (pi === fit.pages - 1) {
       const sy = bottom - 26, sw = (usable - 40) / 3;
-      ["Prepared by", "Received by", "Cancelled in Shopify by"].forEach((lbl, k) => {
+      (stuck ? ["Prepared by", "Chased by", "Courier contacted"] : ["Prepared by", "Received by", "Cancelled in Shopify by"]).forEach((lbl, k) => {
         const x = M + k * (sw + 20);
         s += line(x, sy, x + sw, sy, "000000", 0.7) + T(x, sy - 10, "F1", 8.5, lbl, "111111");
       });
@@ -558,17 +562,20 @@ export const BASE_CSS = `
 export function boardHead(rows: PrintRow[], o: BoardOpts) {
   const printed = new Date().toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
   const time = new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
-  const title = o.scope === "pending" ? "Pending returns" : "Returns";
-  const what = o.scope === "pending"
+  const stuck = o.scope === "stuck";
+  const title = stuck ? "Stuck at courier" : o.scope === "pending" ? "Pending returns" : "Returns";
+  const what = stuck
+    ? "Still in transit but not moving — chase the courier (OwnEx especially). Oldest first."
+    : o.scope === "pending"
     ? "Not yet received or cancelled — the same list as the Pending tab"
     : `Returned ${o.from && o.to ? `${longDate(o.from)} – ${longDate(o.to)}` : "at any time"}`;
   const scope = `${STORE_NAME[o.store] ?? o.store} · ${o.courier === "Both" ? "PostEx & OwnEx" : o.courier}`;
-  const count = o.scope === "pending" ? rows.length : rows.filter((r) => !r.person_received).length;
+  const count = o.scope === "period" ? rows.filter((r) => !r.person_received).length : rows.length;
   return `
   <div class="head">
     <div><h1>${escHtml(title)}</h1><div class="sub">Grohub Solutions · ${escHtml(scope)}</div><div class="sub">${escHtml(what)}</div></div>
     <div style="display:flex;gap:10px">
-      <div class="card pend"><div class="k">${o.scope === "pending" ? "PENDING" : "PENDING OF " + rows.length}</div><div class="v">${count}</div></div>
+      <div class="card pend"><div class="k">${stuck ? "STUCK AT COURIER" : o.scope === "pending" ? "PENDING" : "PENDING OF " + rows.length}</div><div class="v">${count}</div></div>
       <div class="card"><div class="k">PRINTED ON</div><div class="v" style="font-size:13px">${escHtml(printed)}</div><div class="k" style="font-weight:400">${escHtml(time)}</div></div>
     </div>
   </div>`;
@@ -586,81 +593,12 @@ const SHEET_W = 790, SHEET_H = 543;
 /* Heading 48 + gap 6 + bands 44 + key 15 + signatures 29, and 10 to spare. */
 const HTML_ROWS_H = SHEET_H - 48 - 6 - 44 - 15 - 29 - 10;
 
-export function boardHtml(rows: PrintRow[], o: BoardOpts) {
-  const b = build(rows, o);
-  const fit = fitBoard(b.cols, SHEET_W - 2, HTML_ROWS_H);
-  const { at, rowsOn } = placeAll(b.cols, fit);
-  const tone = (c: string) => TONE_HTML[c] ?? TONE_HTML.Other;
-  const L = fit.lanes, nS = b.stores.length;
-  const allLanes = L.reduce((a, x) => a + x, 0);
-  const pt = (n: number) => `${n.toFixed(2)}pt`;
-
-  const now = new Date();
-  const printed = now.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
-  const time = now.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
-  const what = o.scope === "pending"
-    ? "Not yet received or cancelled — the same list as the Pending tab"
-    : `Returned ${o.from && o.to ? `${longDate(o.from)} – ${longDate(o.to)}` : "at any time"}`;
-  const scope = `${STORE_NAME[o.store] ?? o.store} · ${o.courier === "Both" ? "PostEx & OwnEx" : o.courier}`;
-  const head = `
-    <div class="hd">
-      <div><h1>${escHtml(b.title)}</h1><div class="sub">Grohub Solutions · ${escHtml(scope)}</div><div class="sub">${escHtml(what)}</div></div>
-      <div class="cards">
-        <div class="card pend"><div class="k">${o.scope === "pending" ? "PENDING" : "PENDING OF " + b.total}</div><div class="v">${b.pendingCount}</div></div>
-        <div class="card pr"><div class="k">PRINTED ON</div><div class="v">${escHtml(printed)}, ${escHtml(time)}</div></div>
-      </div>
-    </div>`;
-
-  const cols = (fit.seq ? `<col style="width:${pt(SEQ_W)}">` : "")
-    + b.cols.map((_, c) => `<col style="width:${pt(fit.widths[c] / L[c])}">`.repeat(L[c])).join("");
-  const courierRow = (fit.seq ? `<th rowspan="2" class="seq">#</th>` : "") + b.couriers.map((c, ci) => {
-    const mine = b.cols.slice(ci * nS, ci * nS + nS);
-    const span = L.slice(ci * nS, ci * nS + nS).reduce((a, x) => a + x, 0);
-    const pend = mine.reduce((a, k) => a + k.list.filter(b.pend).length, 0);
-    const total = mine.reduce((a, k) => a + k.list.length, 0);
-    const t = tone(c);
-    return `<th colspan="${span}" class="courier split" style="background:${t.fill};color:${t.ink}">${escHtml(c)}
-      <span class="cnt">· ${pend}${o.scope === "period" ? ` pending of ${total}` : " pending"}</span></th>`;
-  }).join("");
-  const storeRow = b.cols.map((k, i) => {
-    const t = tone(k.courier);
-    return `<th colspan="${L[i]}" class="store${i % nS === 0 ? " split" : ""}" style="background:${t.fill};color:${t.ink}">
-      <div class="sn">${escHtml(STORE_NAME[k.store] ?? k.store)}</div><div class="sc">${k.list.filter(b.pend).length}</div></th>`;
-  }).join("");
-
-  const footer = `
-    <div class="key"><b>&#9744;</b> tick when the parcel arrives &nbsp;·&nbsp; strike the order through once it is in hand and cancelled in Shopify
-      &nbsp;·&nbsp; each column in order-number order${fit.seq ? "" : ", down one list then the next"} &nbsp;·&nbsp; date = the day the courier returned it</div>
-    <div class="sign"><div>Prepared by</div><div>Received by</div><div>Cancelled in Shopify by</div></div>`;
-
-  const sheets = rowsOn.map((n, p) => {
-    let body = "";
-    for (let r = 0; r < n; r++) {
-      body += `<tr>${fit.seq ? `<td class="seq">${r + 1}</td>` : ""}` + b.cols.map((_, c) => {
-        let cells = "";
-        for (let l = 0; l < L[c]; l++) {
-          const e = at.get(`${p}:${r}:${c}:${l}`);
-          const cls = `cell${l === 0 && c % nS === 0 ? " split" : ""}${l > 0 ? " lane" : ""}`;
-          if (!e) { cells += `<td class="${cls}"></td>`; continue; }
-          const got = !b.pend(e);
-          cells += `<td class="${cls}${got ? " got" : ""}"><span class="bx">${got ? "&#10003;" : ""}</span><span class="on">${escHtml(e.order_number ?? e.tracking_id)}</span><span class="dt">${escHtml(dd(e.return_date))}</span></td>`;
-        }
-        return cells;
-      }).join("") + "</tr>";
-    }
-    if (!b.depth) body = `<tr><td class="cell empty" colspan="${allLanes + (fit.seq ? 1 : 0)}">No pending returns. Nothing to chase.</td></tr>`;
-    return `<div class="sheet">${head}
-      <table class="board"><colgroup>${cols}</colgroup>
-        <thead><tr>${courierRow}</tr><tr>${storeRow}</tr></thead>
-        <tbody>${body}</tbody>
-      </table>
-      ${p === rowsOn.length - 1 ? footer : `<div class="key">Continued on page ${p + 2} of ${rowsOn.length}.</div>`}
-    </div>`;
-  }).join("");
-
-  return `<!doctype html><html><head><meta charset="utf-8"><title>${escHtml(b.title)}</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
+/* The sheet's stylesheet. The few sizes that change with how full a board is —
+   row height, the order-number font, the date font, the tick box — are CSS
+   variables set per .sheet, NOT baked into these rules. That is what lets one
+   document carry two boards of different densities (the pending board, then the
+   stuck-at-courier chase list) each at its own fitted size. */
+const BOARD_CSS = `
   @page { size: A4 landscape; margin: 26pt; }
   * { box-sizing: border-box; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   html, body { margin: 0; padding: 0; background: #fff; }
@@ -679,6 +617,8 @@ export function boardHtml(rows: PrintRow[], o: BoardOpts) {
   .card .v { font-size: 9.5pt; font-weight: 800; margin-top: 2pt; }
   .card.pend { min-width: 96pt; background: #EEEDFE; border-color: #534AB7; color: #3C3489; }
   .card.pend .k { color: #3C3489; } .card.pend .v { font-size: 16pt; line-height: 1; }
+  .card.stuck { min-width: 96pt; background: #FBEAE7; border-color: #B5452F; color: #8A2F1E; }
+  .card.stuck .k { color: #8A2F1E; } .card.stuck .v { font-size: 16pt; line-height: 1; }
   .card.pr { min-width: 190pt; }
   table.board { width: 100%; border-collapse: collapse; table-layout: fixed; margin-top: 6pt; }
   .board th, .board td { border: 0.5pt solid #9a9892; padding: 0; overflow: hidden; }
@@ -686,29 +626,126 @@ export function boardHtml(rows: PrintRow[], o: BoardOpts) {
   .board th.courier .cnt { font-size: 9pt; font-weight: 600; }
   .board th.store { height: 24pt; text-align: center; line-height: 1.1; white-space: nowrap; }
   .board .sn { font-size: 8.5pt; font-weight: 800; } .board .sc { font-size: 7.5pt; font-weight: 700; }
-  .board .seq { background: #F1EFE8; color: #444; font-weight: 700; text-align: center; font-size: ${pt(Math.min(7.5, fit.f))}; }
-  .board tbody tr { height: ${pt(fit.rh)}; }
+  .board .seq { background: #F1EFE8; color: #444; font-weight: 700; text-align: center; font-size: var(--seqf); }
+  .board tbody tr { height: var(--rh); }
   /* The cell's own text size is the fitted one: left at the page default
      (16px) it props every row open to 17px, whatever the board asked for. */
-  .board td { font-size: ${pt(fit.f)}; line-height: 1; }
+  .board td { font-size: var(--f); line-height: 1; }
   .board td.cell { white-space: nowrap; padding: 0 3pt; vertical-align: middle; }
   .board td.lane { border-left: 0.5pt dashed #b4b2aa; }
   .board td.got { background: #EAF3DE; }
   .board td.empty { text-align: center; font-size: 9pt; color: #444; }
-  .bx { display: inline-block; width: ${pt(fit.bs)}; height: ${pt(fit.bs)}; border: ${fit.bs > 5 ? "0.6pt" : "0.45pt"} solid #222;
-        margin-right: 3.5pt; vertical-align: middle; font-size: ${pt(fit.bs * 0.8)}; line-height: ${pt(fit.bs)}; text-align: center; }
-  .on { font-size: ${pt(fit.f)}; font-weight: 700; vertical-align: middle; }
-  .dt { font-size: ${pt(fit.fd)}; color: #555; margin-left: 4pt; vertical-align: middle; }
+  .bx { display: inline-block; width: var(--bs); height: var(--bs); border: var(--bxbw) solid #222;
+        margin-right: 3.5pt; vertical-align: middle; font-size: var(--bxf); line-height: var(--bs); text-align: center; }
+  .on { font-size: var(--f); font-weight: 700; vertical-align: middle; }
+  .dt { font-size: var(--fd); color: #555; margin-left: 4pt; vertical-align: middle; }
   .got .on { text-decoration: line-through; color: #27500A; }
   .board .split { border-left: 1.8pt solid #333; }
   .key { height: 10pt; margin-top: 5pt; font-size: 7.5pt; line-height: 10pt; color: #333; white-space: nowrap; overflow: hidden; }
   .sign { display: flex; gap: 20pt; margin-top: 16pt; font-size: 8.5pt; }
   .sign div { flex: 1; border-top: 0.7pt solid #000; padding-top: 3pt; }
-</style></head><body>
-${sheets}
+`;
+
+/* One board as its .sheet page(s), no document shell — so boardHtml can lay out
+   a single board and boardHtmlMulti can put two on the one printout, each at its
+   own fitted size (the per-board sizes ride on CSS variables set here). */
+function boardSheets(rows: PrintRow[], o: BoardOpts): string {
+  const b = build(rows, o);
+  const fit = fitBoard(b.cols, SHEET_W - 2, HTML_ROWS_H);
+  const { at, rowsOn } = placeAll(b.cols, fit);
+  const tone = (c: string) => TONE_HTML[c] ?? TONE_HTML.Other;
+  const L = fit.lanes, nS = b.stores.length;
+  const allLanes = L.reduce((a, x) => a + x, 0);
+  const pt = (n: number) => `${n.toFixed(2)}pt`;
+  const stuck = o.scope === "stuck";
+
+  const now = new Date();
+  const printed = now.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+  const time = now.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+  const what = stuck
+    ? "Still in transit but not moving — a failed attempt, or 15+ days with no update. Chase the courier (OwnEx especially). Oldest first."
+    : o.scope === "pending"
+    ? "Not yet received or cancelled — the same list as the Pending tab"
+    : `Returned ${o.from && o.to ? `${longDate(o.from)} – ${longDate(o.to)}` : "at any time"}`;
+  const scope = `${STORE_NAME[o.store] ?? o.store} · ${o.courier === "Both" ? "PostEx & OwnEx" : o.courier}`;
+  const cardCls = stuck ? "card stuck" : "card pend";
+  const cardK = stuck ? "STUCK AT COURIER" : o.scope === "pending" ? "PENDING" : "PENDING OF " + b.total;
+  const head = `
+    <div class="hd">
+      <div><h1>${escHtml(b.title)}</h1><div class="sub">Grohub Solutions · ${escHtml(scope)}</div><div class="sub">${escHtml(what)}</div></div>
+      <div class="cards">
+        <div class="${cardCls}"><div class="k">${cardK}</div><div class="v">${b.pendingCount}</div></div>
+        <div class="card pr"><div class="k">PRINTED ON</div><div class="v">${escHtml(printed)}, ${escHtml(time)}</div></div>
+      </div>
+    </div>`;
+
+  const cols = (fit.seq ? `<col style="width:${pt(SEQ_W)}">` : "")
+    + b.cols.map((_, c) => `<col style="width:${pt(fit.widths[c] / L[c])}">`.repeat(L[c])).join("");
+  const courierRow = (fit.seq ? `<th rowspan="2" class="seq">#</th>` : "") + b.couriers.map((c, ci) => {
+    const mine = b.cols.slice(ci * nS, ci * nS + nS);
+    const span = L.slice(ci * nS, ci * nS + nS).reduce((a, x) => a + x, 0);
+    const pend = mine.reduce((a, k) => a + k.list.filter(b.pend).length, 0);
+    const total = mine.reduce((a, k) => a + k.list.length, 0);
+    const t = tone(c);
+    return `<th colspan="${span}" class="courier split" style="background:${t.fill};color:${t.ink}">${escHtml(c)}
+      <span class="cnt">· ${pend}${o.scope === "period" ? ` pending of ${total}` : stuck ? " stuck" : " pending"}</span></th>`;
+  }).join("");
+  const storeRow = b.cols.map((k, i) => {
+    const t = tone(k.courier);
+    return `<th colspan="${L[i]}" class="store${i % nS === 0 ? " split" : ""}" style="background:${t.fill};color:${t.ink}">
+      <div class="sn">${escHtml(STORE_NAME[k.store] ?? k.store)}</div><div class="sc">${k.list.filter(b.pend).length}</div></th>`;
+  }).join("");
+
+  const footer = `
+    <div class="key">${stuck
+      ? `<b>&#9744;</b> chase these with the courier &nbsp;·&nbsp; tick once it moves or comes back &nbsp;·&nbsp; each column in order-number order${fit.seq ? "" : ", down one list then the next"} &nbsp;·&nbsp; date = when it was dispatched`
+      : `<b>&#9744;</b> tick when the parcel arrives &nbsp;·&nbsp; strike the order through once it is in hand and cancelled in Shopify &nbsp;·&nbsp; each column in order-number order${fit.seq ? "" : ", down one list then the next"} &nbsp;·&nbsp; date = the day the courier returned it`}</div>
+    <div class="sign">${stuck
+      ? "<div>Prepared by</div><div>Chased by</div><div>Courier contacted</div>"
+      : "<div>Prepared by</div><div>Received by</div><div>Cancelled in Shopify by</div>"}</div>`;
+
+  /* The per-board sizes travel as CSS variables on each .sheet, so BOARD_CSS can
+     stay one static stylesheet and still size two boards differently. */
+  const vars = `--fit:1;--rh:${pt(fit.rh)};--f:${pt(fit.f)};--fd:${pt(fit.fd)};`
+    + `--bs:${pt(fit.bs)};--bxbw:${fit.bs > 5 ? "0.6pt" : "0.45pt"};--bxf:${pt(fit.bs * 0.8)};--seqf:${pt(Math.min(7.5, fit.f))}`;
+
+  return rowsOn.map((n, p) => {
+    let body = "";
+    for (let r = 0; r < n; r++) {
+      body += `<tr>${fit.seq ? `<td class="seq">${r + 1}</td>` : ""}` + b.cols.map((_, c) => {
+        let cells = "";
+        for (let l = 0; l < L[c]; l++) {
+          const e = at.get(`${p}:${r}:${c}:${l}`);
+          const cls = `cell${l === 0 && c % nS === 0 ? " split" : ""}${l > 0 ? " lane" : ""}`;
+          if (!e) { cells += `<td class="${cls}"></td>`; continue; }
+          const got = !b.pend(e);
+          cells += `<td class="${cls}${got ? " got" : ""}"><span class="bx">${got ? "&#10003;" : ""}</span><span class="on">${escHtml(e.order_number ?? e.tracking_id)}</span><span class="dt">${escHtml(dd(e.return_date))}</span></td>`;
+        }
+        return cells;
+      }).join("") + "</tr>";
+    }
+    if (!b.depth) body = `<tr><td class="cell empty" colspan="${allLanes + (fit.seq ? 1 : 0)}">${stuck ? "Nothing stuck at courier right now." : "No pending returns. Nothing to chase."}</td></tr>`;
+    return `<div class="sheet" style="${vars}">${head}
+      <table class="board"><colgroup>${cols}</colgroup>
+        <thead><tr>${courierRow}</tr><tr>${storeRow}</tr></thead>
+        <tbody>${body}</tbody>
+      </table>
+      ${p === rowsOn.length - 1 ? footer : `<div class="key">Continued on page ${p + 2} of ${rowsOn.length}.</div>`}
+    </div>`;
+  }).join("");
+}
+
+/* The document shell around one or more boards' sheets: the stylesheet and the
+   fit safety-net script, which measures every .sheet — so it already handles a
+   printout that holds two boards. */
+function boardDoc(title: string, body: string): string {
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${escHtml(title)}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>${BOARD_CSS}</style></head><body>
+${body}
 <script>
 (function () {
-  /* The safety net: if the drawn sheet came out taller or wider than the page,
+  /* The safety net: if a drawn sheet came out taller or wider than the page,
      shrink it to fit rather than let the printer start a second sheet. */
   var H = ${SHEET_H} * 96 / 72 - 3, W = ${SHEET_W} * 96 / 72;
   function fit() {
@@ -724,4 +761,16 @@ ${sheets}
 })();
 </script>
 </body></html>`;
+}
+
+export function boardHtml(rows: PrintRow[], o: BoardOpts) {
+  return boardDoc(build(rows, o).title, boardSheets(rows, o));
+}
+
+/* Two boards on one printout: the pending board, then the stuck-at-courier chase
+   list on its own page — one print action, nothing left to pencil in by hand.
+   Each board keeps its own fitted row height and font. */
+export function boardHtmlMulti(parts: { rows: PrintRow[]; o: BoardOpts }[]) {
+  const title = parts[0] ? build(parts[0].rows, parts[0].o).title : "Returns";
+  return boardDoc(title, parts.map((p) => boardSheets(p.rows, p.o)).join(""));
 }

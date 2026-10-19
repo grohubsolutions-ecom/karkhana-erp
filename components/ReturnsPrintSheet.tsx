@@ -29,7 +29,7 @@ import { supabase } from "@/lib/supabase";
 import { rangeDates } from "@/lib/dateRange";
 import Modal, { btnPrimary, btnGhost, inputCls, Field } from "@/components/Modal";
 import { exportExcel, exportPDF, type ExportTable } from "@/lib/export";
-import { downloadBoardExcel, downloadBoardPdf, boardHtml, boardHead, BASE_CSS } from "@/lib/returnsBoardExport";
+import { downloadBoardExcel, downloadBoardPdf, boardHtml, boardHtmlMulti, boardHead, BASE_CSS } from "@/lib/returnsBoardExport";
 
 type R = {
   tracking_id: string; order_number: string | null; store_code: string | null;
@@ -37,7 +37,7 @@ type R = {
   cod_amount?: number | null; customer_name?: string | null; city?: string | null; phone?: string | null;
   reason?: string | null; shopify_cancelled?: boolean; person_received?: boolean;
 };
-type Scope = "pending" | "period";
+type Scope = "pending" | "period" | "stuck";
 type Opts = { scope: Scope; from: string | null; to: string | null; courier: string; store: string };
 
 const PERIODS = [
@@ -76,19 +76,24 @@ export default function ReturnsPrintButton({ store = "ALL" }: { store?: string }
   const [busy, setBusy] = useState<"" | "print" | "xlsx" | "pdf">("");
   const [err, setErr] = useState("");
 
-  async function fetchRows(from: string | null, to: string | null): Promise<R[]> {
+  async function fetchRows(which: Scope, from: string | null, to: string | null): Promise<R[]> {
     const all: R[] = [];
+    const cols = "tracking_id,order_number,store_code,courier,return_date,cod_amount,customer_name,city,phone,courier_reason_text,order_cancelled_at";
     /* Paged: every request stops at 1,000 rows, and a checklist that silently
        ended there would be a checklist with its end torn off. */
     for (let off = 0; ; off += 1000) {
       let data: unknown[] | null; let error: { message: string } | null;
-      if (scope === "pending") {
-        // The Pending tab's own filter, so paper and screen always agree.
-        let q = supabase!.from("v_returns_all")
-          .select("tracking_id,order_number,store_code,courier,return_date,cod_amount,customer_name,city,phone,courier_reason_text,order_cancelled_at")
-          .eq("needs_chasing", true)
-          .order("return_date", { ascending: false, nullsFirst: false })
+      if (which === "pending" || which === "stuck") {
+        /* Pending reads the Pending tab's own flag, so paper and screen agree.
+           Stuck reads its own live view (v_returns_stuck) — the same parcels the
+           "Stuck at courier" tab shows, the ones that never reach Pending on
+           their own and were being pencilled onto the sheet by hand. Both views
+           carry the same columns, so the one board draws either. */
+        let q = supabase!.from(which === "stuck" ? "v_returns_stuck" : "v_returns_all")
+          .select(cols)
+          .order("return_date", { ascending: which === "stuck", nullsFirst: false })
           .range(off, off + 999);
+        if (which === "pending") q = q.eq("needs_chasing", true);
         if (courier !== "Both") q = q.eq("courier", courier);
         if (st !== "ALL") q = q.eq("store_code", st);
         ({ data, error } = await q);
@@ -118,11 +123,24 @@ export default function ReturnsPrintButton({ store = "ALL" }: { store?: string }
     w.document.write("<p style='font:14px system-ui;padding:24px'>Preparing the returns sheet…</p>");
     setBusy("print");
     try {
-      const [from, to] = scope === "pending" ? [null, null] : rangeDates(period);
-      const rows = await fetchRows(from, to);
+      const [from, to] = scope === "period" ? rangeDates(period) : [null, null];
       const o: Opts = { scope, from, to, courier, store: st };
+      let doc: string;
+      if (scope === "pending" && layout === "board") {
+        /* THE PENCIL SHEET, FINISHED. The pending board, then the stuck-at-courier
+           chase list on its own page — one print, so the parcels the team used to
+           add by hand are already on the paper. The stuck page is skipped on a day
+           nothing is stuck. */
+        const [pending, stuck] = await Promise.all([fetchRows("pending", null, null), fetchRows("stuck", null, null)]);
+        doc = stuck.length
+          ? boardHtmlMulti([{ rows: pending, o }, { rows: stuck, o: { ...o, scope: "stuck" } }])
+          : boardHtml(pending, o);
+      } else {
+        const rows = await fetchRows(scope, from, to);
+        doc = layout === "board" ? boardHtml(rows, o) : listHtml(rows, o);
+      }
       w.document.open();
-      w.document.write(layout === "board" ? boardHtml(rows, o) : listHtml(rows, o));
+      w.document.write(doc);
       w.document.close();
       w.focus();
       setTimeout(() => { try { w.print(); } catch { /* the sheet stays open to print by hand */ } }, 350);
@@ -141,8 +159,8 @@ export default function ReturnsPrintButton({ store = "ALL" }: { store?: string }
     if (!supabase) return;
     setErr(""); setBusy(kind);
     try {
-      const [from, to] = scope === "pending" ? [null, null] : rangeDates(period);
-      const rows = await fetchRows(from, to);
+      const [from, to] = scope === "period" ? rangeDates(period) : [null, null];
+      const rows = await fetchRows(scope, from, to);
       const o: Opts = { scope, from, to, courier, store: st };
       if (layout === "board") {
         if (kind === "xlsx") downloadBoardExcel(rows, o); else downloadBoardPdf(rows, o);
@@ -178,15 +196,23 @@ export default function ReturnsPrintButton({ store = "ALL" }: { store?: string }
       </button>
 
       <Modal open={open} onClose={() => !busy && setOpen(false)}
-             title="Print pending returns"
-             subtitle="PostEx and OwnEx side by side, split by store — order number and date, newest first.">
+             title="Print returns"
+             subtitle="PostEx and OwnEx side by side, split by store — order number and date, in order-number order.">
         <div className="grid gap-4">
           <Field label="What to print">
             <div className="flex flex-wrap gap-2">
               <button type="button" onClick={() => setScope("pending")} className={chip(scope === "pending")}>Pending returns</button>
+              <button type="button" onClick={() => setScope("stuck")} className={chip(scope === "stuck")}>Stuck at courier</button>
               <button type="button" onClick={() => setScope("period")} className={chip(scope === "period")}>All returns in a period</button>
             </div>
           </Field>
+          <p className="-mt-2 text-[12px] leading-snug text-muted dark:text-[#a89f93]">
+            {scope === "pending"
+              ? "The printed board also prints the stuck-at-courier chase list on page 2 — the parcels the team used to add to the sheet by hand."
+              : scope === "stuck"
+              ? "Parcels still marked in transit but not moving — a failed attempt, or no update for 15+ days. Chase the courier (OwnEx especially)."
+              : "Every return in the chosen window; received ones are struck through."}
+          </p>
           {scope === "period" && (
             <Field label="Returned in">
               <div className="flex flex-wrap gap-2">
