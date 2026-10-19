@@ -25,6 +25,12 @@ const STORE_NAME: Record<string, string> = { ALL: "All stores", LM: "Little Mino
 
 /* ----------------------------------------------------------- the model */
 type Col = { courier: string; store: string; list: BoardRow[] };
+/* The number inside an order reference, for sequencing a store column:
+   "#LM16105" -> 16105. A reference with no digits (e.g. "BORSA.PK") sorts last. */
+const orderNo = (r: BoardRow) => {
+  const m = String(r.order_number ?? "").match(/\d+/);
+  return m ? parseInt(m[0], 10) : Number.POSITIVE_INFINITY;
+};
 function build(rows: BoardRow[], o: BoardOpts) {
   const couriers = o.courier === "Both" ? ["PostEx", "OwnEx"] : [o.courier];
   for (const r of rows) { const c = r.courier || "Other"; if (!couriers.includes(c)) couriers.push(c); }
@@ -35,8 +41,11 @@ function build(rows: BoardRow[], o: BoardOpts) {
     cols.push({
       courier: c, store: s,
       list: rows.filter((r) => (r.courier || "Other") === c && (r.store_code || "-") === s)
-        .sort((a, b) => String(b.return_date ?? "").localeCompare(String(a.return_date ?? ""))
-                     || String(b.order_number ?? "").localeCompare(String(a.order_number ?? ""))),
+        /* In order-number sequence within each store, smallest first, so a
+           column reads as a clean run (…16105, 16222, 16254…) instead of the
+           date-shuffled jumble it was. No-number refs fall to the end. */
+        .sort((a, b) => orderNo(a) - orderNo(b)
+                     || String(a.order_number ?? a.tracking_id).localeCompare(String(b.order_number ?? b.tracking_id))),
     });
   }
   const depth = Math.max(0, ...cols.map((c) => c.list.length));
@@ -268,8 +277,12 @@ export type BoardFit = {
   seq: boolean;                                     // the # column — only while every column is one list
   perPage: number; pages: number;                   // rows a page can take, pages used
 };
-const RH_MAX = 17, RH_CLASSIC = 13.5, RH_MIN = 7.75, SEQ_W = 24;
-const fontFor = (rh: number) => Math.min(8.5, Math.floor(rh * 0.52 * 4) / 4);
+/* Bigger, readable print: use the space the page has. When the returns fit with
+   room to spare the rows grow tall and the order number goes up to 12pt; only a
+   very deep column trades that height back down, and never below ~6.5pt. (It was
+   capped at 8.5pt / 17pt even on a near-empty sheet, which is what printed tiny.) */
+const RH_MAX = 26, RH_CLASSIC = 13.5, RH_MIN = 10, SEQ_W = 24;
+const fontFor = (rh: number) => Math.min(12, Math.floor(rh * 0.65 * 4) / 4);
 const dateFont = (f: number) => Math.max(3.5, Math.round(f * 0.82 * 4) / 4);
 const boxFor = (f: number) => Math.max(3.5, Math.round(f * 0.88 * 4) / 4);
 
@@ -617,7 +630,7 @@ export function boardHtml(rows: PrintRow[], o: BoardOpts) {
 
   const footer = `
     <div class="key"><b>&#9744;</b> tick when the parcel arrives &nbsp;·&nbsp; strike the order through once it is in hand and cancelled in Shopify
-      &nbsp;·&nbsp; each column newest first${fit.seq ? "" : ", down one list then the next"} &nbsp;·&nbsp; date = the day the courier returned it</div>
+      &nbsp;·&nbsp; each column in order-number order${fit.seq ? "" : ", down one list then the next"} &nbsp;·&nbsp; date = the day the courier returned it</div>
     <div class="sign"><div>Prepared by</div><div>Received by</div><div>Cancelled in Shopify by</div></div>`;
 
   const sheets = rowsOn.map((n, p) => {
