@@ -70,6 +70,10 @@ export default function EmployeesScreen({ scope }: { scope: Scope }) {
   const [history, setHistory] = useState<{ ledger: number; attendance: number; salary: number; wages: number } | null>(null);
   const [checking, setChecking] = useState(false);
   const [confirmDel, setConfirmDel] = useState(false);
+  /* employee id -> how many rows exist against them, across all four tables */
+  const [hasHistory, setHasHistory] = useState<Map<number, number>>(new Map());
+  const [busyRow, setBusyRow] = useState<number | null>(null);
+  const [rowConfirm, setRowConfirm] = useState<number | null>(null);
   const [form, setForm] = useState({ ...BLANK });
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -193,6 +197,56 @@ export default function EmployeesScreen({ scope }: { scope: Scope }) {
     setErr(""); setOpen(true);
   }
 
+  /** HISTORY FOR EVERY PERSON AT ONCE.
+   *
+   *  The remove action belongs ON THE ROW — that is where you look for it, and
+   *  burying it one click inside the edit form is the same as not having it.
+   *  But the row cannot offer the right action without knowing what the person
+   *  would take with them, and asking four questions per person is sixty-eight
+   *  times four requests.
+   *
+   *  So it asks four questions in total: the employee_id column of each of the
+   *  four tables, counted here. Those columns are small and the whole thing is
+   *  one round trip per table, however many staff there are. */
+  const loadAllHistory = useCallback(async () => {
+    if (!supabase) return;
+    const tally = new Map<number, number>();
+    const one = async (table: string) => {
+      const { data } = await supabase!.from(table).select("employee_id").limit(20000);
+      ((data ?? []) as { employee_id: number | null }[]).forEach((r) => {
+        if (r.employee_id == null) return;
+        tally.set(Number(r.employee_id), (tally.get(Number(r.employee_id)) ?? 0) + 1);
+      });
+    };
+    await Promise.all([
+      one("retail_employee_ledger"), one("retail_attendance"),
+      one("retail_salary_payments"), one("retail_wage_payments"),
+    ]);
+    setHasHistory(tally);
+  }, []);
+  useEffect(() => { loadAllHistory(); }, [loadAllHistory]);
+
+  /** Row-level end / bring back. Same write as the one in the form. */
+  async function rowSetActive(e: Employee, active: boolean) {
+    if (!supabase || busyRow) return;
+    setBusyRow(e.id); setErr("");
+    const { error } = await supabase.from("retail_employees").update({ active }).eq("id", e.id);
+    setBusyRow(null);
+    if (error) { setErr(error.message); return; }
+    reloadEmployees();
+  }
+
+  /** Row-level delete, only ever reachable on a record with no history. */
+  async function rowDelete(e: Employee) {
+    if (!supabase || busyRow) return;
+    if ((hasHistory.get(e.id) ?? 0) > 0) { setErr(`${e.name} has history — end them instead.`); return; }
+    setBusyRow(e.id); setErr("");
+    const { error } = await supabase.from("retail_employees").delete().eq("id", e.id);
+    setBusyRow(null);
+    if (error) { setErr(error.message); return; }
+    setRowConfirm(null); reloadEmployees(); loadAllHistory();
+  }
+
   /** WHAT WOULD BE LOST. Four counts, because the answer governs whether a
    *  hard delete is offered at all:
    *
@@ -299,17 +353,59 @@ export default function EmployeesScreen({ scope }: { scope: Scope }) {
         return o > 0.001 ? <span className="font-semibold text-danger">{money(o)}</span> : <span className="text-muted dark:text-[#a89f93]">—</span>;
       } },
     { head: "Net to pay", right: true, bold: true, cell: (e) => money(earned(e) - owed(e)) },
-    { head: "", right: true, cell: (e) => (
-        <div className="flex justify-end gap-1.5">
-          <button onClick={() => setAccountFor(e)}
-            className="rounded-full border border-line bg-surface px-3 py-1.5 text-[12px] font-semibold text-ink transition hover:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:hover:bg-white/[0.12]">
-            Account
-          </button>
-          <button onClick={() => startEdit(e)} className="rounded-full p-1.5 text-muted transition hover:bg-panel hover:text-ink dark:text-[#a89f93] dark:hover:bg-white/[0.06] dark:hover:text-white" aria-label={`Edit ${e.name}`}>
-            <Pencil size={15} />
-          </button>
-        </div>
-      ) },
+    /* END / BRING BACK / DELETE, ON THE ROW.
+       Which one appears still depends on what the person is carrying — see
+       loadAllHistory — but you can now see it without opening anything, which
+       is what was asked for and what "a delete button" means to the person
+       looking at a list. */
+    { head: "", right: true, cell: (e) => {
+        const carries = hasHistory.get(e.id) ?? 0;
+        const busy = busyRow === e.id;
+        return (
+          <div className="flex items-center justify-end gap-1.5">
+            <button onClick={() => setAccountFor(e)}
+              className="rounded-full border border-line bg-surface px-3 py-1.5 text-[12px] font-semibold text-ink transition hover:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:hover:bg-white/[0.12]">
+              Account
+            </button>
+            <button onClick={() => startEdit(e)} className="rounded-full p-1.5 text-muted transition hover:bg-panel hover:text-ink dark:text-[#a89f93] dark:hover:bg-white/[0.06] dark:hover:text-white" aria-label={`Edit ${e.name}`}>
+              <Pencil size={15} />
+            </button>
+
+            {e.active === false ? (
+              <button onClick={() => rowSetActive(e, true)} disabled={busy}
+                className="rounded-full border border-line px-3 py-1.5 text-[12px] font-semibold text-success transition hover:bg-success-soft disabled:opacity-50 dark:border-white/10"
+                aria-label={`Bring ${e.name} back`}>
+                {busy ? "…" : "Bring back"}
+              </button>
+            ) : carries > 0 ? (
+              /* Has a past: ending is the only safe removal. The title says why,
+                 for anyone who wonders where the bin went. */
+              <button onClick={() => rowSetActive(e, false)} disabled={busy}
+                title={`${e.name} has ${carries} record${carries === 1 ? "" : "s"} (ledger, attendance, pay). Ending keeps those readable; deleting would destroy or orphan them.`}
+                className="rounded-full p-1.5 text-muted transition hover:bg-danger-soft hover:text-danger disabled:opacity-50 dark:text-[#a89f93] dark:hover:bg-white/[0.06]"
+                aria-label={`End ${e.name}`}>
+                <UserMinus size={15} />
+              </button>
+            ) : rowConfirm === e.id ? (
+              <span className="flex items-center gap-1">
+                <button onClick={() => rowDelete(e)} disabled={busy}
+                  className="rounded-full bg-danger px-2.5 py-1.5 text-[12px] font-semibold text-white transition hover:opacity-90 disabled:opacity-50">
+                  {busy ? "…" : "Delete"}
+                </button>
+                <button onClick={() => setRowConfirm(null)}
+                  className="rounded-full px-2 py-1.5 text-[12px] font-semibold text-muted dark:text-[#a89f93]">Keep</button>
+              </span>
+            ) : (
+              /* Nothing recorded against them — a real delete, on the row. */
+              <button onClick={() => setRowConfirm(e.id)}
+                className="rounded-full p-1.5 text-muted transition hover:bg-danger-soft hover:text-danger dark:text-[#a89f93] dark:hover:bg-white/[0.06]"
+                aria-label={`Delete ${e.name}`}>
+                <Trash2 size={15} />
+              </button>
+            )}
+          </div>
+        );
+      } },
   ];
 
   return (

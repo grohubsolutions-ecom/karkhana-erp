@@ -71,6 +71,7 @@ export default function BranchesPage() {
   const [holds, setHolds] = useState<{ sales: number; expenses: number; staff: number; book: number } | null>(null);
   const [checking, setChecking] = useState(false);
   const [confirmDel, setConfirmDel] = useState(false);
+  const [busyRow, setBusyRow] = useState<number | null>(null);
   const [form, setForm] = useState({ ...BLANK });
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -205,6 +206,16 @@ export default function BranchesPage() {
 
   const holdTotal = holds ? holds.sales + holds.expenses + holds.staff + holds.book : 0;
 
+  /** The same write as the one in the form, reachable from the row. */
+  async function rowSetActive(b: Branch, active: boolean) {
+    if (!supabase || busyRow) return;
+    setBusyRow(b.id); setErr("");
+    const { error } = await supabase.from("retail_branches").update({ active }).eq("id", b.id);
+    setBusyRow(null);
+    if (error) { setErr(error.message); return; }
+    load();
+  }
+
   async function setOpenForBusiness(b: Branch, active: boolean) {
     if (!supabase) { setErr("Not connected."); return; }
     setSaving(true); setErr("");
@@ -290,12 +301,34 @@ export default function BranchesPage() {
         return <span className={`font-semibold ${net < 0 ? "text-danger" : "text-success"}`}>{money(net)}</span>;
       } },
     { head: "Receipts", right: true, cell: (b) => (perf[String(b.id)] ?? EMPTY_PERF).receipts.size.toLocaleString() },
-    { head: "", right: true, cell: (b) => (
-        <button onClick={() => startEdit(b)}
-          className="inline-flex items-center gap-1.5 rounded-full border border-line bg-surface px-3 py-1.5 text-[12px] font-semibold text-ink transition hover:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:hover:bg-white/[0.12]">
-          <Pencil size={13} /> Edit
-        </button>
-      ) },
+    /* CLOSE / REOPEN ON THE ROW. Closing needs no counting — it is safe for
+       any shop, trading or not — so it can sit here without the four lookups
+       the delete decision needs. A real delete stays inside Edit, where the
+       shop's holdings are counted and shown first: a shop with 20,000 sale
+       lines against it must never be one click from gone. */
+    { head: "", right: true, cell: (b) => {
+        const busy = busyRow === b.id;
+        return (
+          <div className="flex items-center justify-end gap-1.5">
+            <button onClick={() => startEdit(b)}
+              className="inline-flex items-center gap-1.5 rounded-full border border-line bg-surface px-3 py-1.5 text-[12px] font-semibold text-ink transition hover:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:hover:bg-white/[0.12]">
+              <Pencil size={13} /> Edit
+            </button>
+            {b.active === false ? (
+              <button onClick={() => rowSetActive(b, true)} disabled={busy}
+                className="rounded-full border border-line px-3 py-1.5 text-[12px] font-semibold text-success transition hover:bg-success-soft disabled:opacity-50 dark:border-white/10">
+                {busy ? "…" : "Reopen"}
+              </button>
+            ) : (
+              <button onClick={() => rowSetActive(b, false)} disabled={busy}
+                title="Stops the shop appearing in pickers and payroll. Its sales, expenses and staff stay exactly as they are."
+                className="rounded-full border border-line px-3 py-1.5 text-[12px] font-semibold text-muted transition hover:bg-danger-soft hover:text-danger disabled:opacity-50 dark:border-white/10 dark:text-[#a89f93]">
+                {busy ? "…" : "Close"}
+              </button>
+            )}
+          </div>
+        );
+      } },
   ];
 
   return (
