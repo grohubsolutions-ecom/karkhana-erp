@@ -449,7 +449,16 @@ async function readPdf(file: File): Promise<Parsed> {
 }
 
 /* ======================================================================== */
-type Result = { ref: string; ok: boolean; report: Record<string, unknown> };
+/* `shopify` marks the Shopify follow-up of an import. It is reported on its own
+   line and never counted as the settlement being refused — see run(). */
+type Result = { ref: string; ok: boolean; report: Record<string, unknown>; shopify?: boolean };
+
+/* Parcels per shopify-writeback call. One order costs about 1.5–2 s there
+   (the write, the tag, the audit row, and a 550 ms pause for Shopify's rate
+   limit), and the function is cut off at 150 s. All 122 parcels of
+   INV-20250026 in one call ran 3 minutes: the browser got a 504 after 150 s,
+   and 16 orders were never reached. 30 a call comes back in about a minute. */
+const SHOPIFY_CHUNK = 30;
 
 export default function CprImport({ onDone }: { onDone?: () => void }) {
   const fileRef = useRef<HTMLInputElement>(null);
@@ -560,25 +569,60 @@ export default function CprImport({ onDone }: { onDone?: () => void }) {
          Cancelling a return is NOT done here. That decision stays with a person
          — see the panel on the settlement, which lists what the agents missed
          and waits to be told. */
+      /* IN BATCHES, AND REPORTED APART FROM THE IMPORT.
+         INV-20250026 imported cleanly and still showed "0 of 1 imported · 1
+         refused": the Shopify step timed out, its error went into this list
+         under the SAME settlement number, and the one-line-per-settlement view
+         below kept the last entry — the timeout — in place of the import.
+         Now the parcels go over in batches of SHOPIFY_CHUNK, the function's own
+         counts are added up, and the outcome is one separate Shopify line.
+         The function skips what it already did, so "Send again" on the
+         settlement finishes anything left over. */
       if (!dry && !error && (data as { ok?: boolean })?.ok === true && deliveredNums.length) {
-        setProgress(`Updating Shopify for ${b.ref || "this settlement"}…`);
+        type Tally = { done: number; skipped: number; failed: number; lost: number; why: string };
+        const tally: Record<"paid" | "deliver", Tally> = {
+          paid:    { done: 0, skipped: 0, failed: 0, lost: 0, why: "" },
+          deliver: { done: 0, skipped: 0, failed: 0, lost: 0, why: "" },
+        };
+        const n = deliveredNums.length;
         for (const action of ["paid", "deliver"] as const) {
-          const { error: se } = await supabase.functions.invoke("shopify-writeback", {
-            body: { action, tracking: deliveredNums, dry_run: false, max: 200 },
-          });
-          if (se) acc.push({ ref: b.ref, ok: false,
-            report: { shopify: `${action}: ${se.message} — the import itself is safe; use the buttons on the settlement to retry.` } });
+          const t = tally[action];
+          for (let k = 0; k < n; k += SHOPIFY_CHUNK) {
+            setProgress(`Shopify · ${b.ref || "this settlement"} · ${action === "paid" ? "marking paid" : "marking delivered"} ${Math.min(k + SHOPIFY_CHUNK, n)} of ${n}…`);
+            const part = deliveredNums.slice(k, k + SHOPIFY_CHUNK);
+            const { data: sd, error: se } = await supabase.functions.invoke("shopify-writeback", {
+              body: { action, tracking: part, dry_run: false, max: 200 },
+            });
+            if (se) { t.lost += part.length; if (!t.why) t.why = se.message; continue; }
+            const r = (sd ?? {}) as { closed?: number; skipped?: number; failed?: number;
+                                       sample?: { failed?: string }[] };
+            t.done += r.closed ?? 0; t.skipped += r.skipped ?? 0; t.failed += r.failed ?? 0;
+            if (!t.why) t.why = r.sample?.find((s) => s.failed)?.failed ?? "";
+          }
         }
+        const line = (label: string, t: Tally) =>
+          `${label} ${t.done}` +
+          (t.skipped ? ` · ${t.skipped} already done or not in Shopify` : "") +
+          (t.failed ? ` · ${t.failed} failed` : "") +
+          (t.lost ? ` · ${t.lost} not reached` : "");
+        const bad = tally.paid.failed + tally.paid.lost + tally.deliver.failed + tally.deliver.lost;
+        const why = [tally.paid.why, tally.deliver.why].filter(Boolean)
+          .map((w) => w.replace(/[.\s]+$/, ""))
+          .filter((w, i, all) => all.indexOf(w) === i).join(" — ");
+        acc.push({ ref: b.ref, ok: bad === 0, shopify: true, report: {
+          shopify: `Shopify: ${line("marked paid", tally.paid)}; ${line("marked delivered", tally.deliver)}.` +
+                   (bad ? ` ${why ? why + ". " : ""}The import itself is saved — press Send again on the settlement to retry.` : ""),
+        } });
         setResults([...acc]);
       }
     }
     setBusy(false); setProgress("");
     if (dry) setChecked(acc.every((r) => r.ok));
-    else if (acc.some((r) => r.ok)) { setCommitted(true); onDone?.(); }
+    else if (acc.some((r) => r.ok && !r.shopify)) { setCommitted(true); onDone?.(); }
   }
 
   const passed = results.length > 0 && results.every((r) => r.ok);
-  const failed = results.filter((r) => !r.ok);
+  const failed = results.filter((r) => !r.ok && !r.shopify);
   const guardReady = selfDeclaring || (!!ref.trim() && !!dCount && !!dTotal);
 
   return (
@@ -712,8 +756,13 @@ export default function CprImport({ onDone }: { onDone?: () => void }) {
                  pushed into this list — so importing one invoice successfully
                  read "1 of 2 passed · 1 refused", which looks like half the file
                  was rejected. Nothing had been. Keeping only the latest outcome
-                 per settlement makes the count mean what it says. */
-              const latest = [...new Map(results.map((r) => [r.ref || "—", r])).values()];
+                 per settlement makes the count mean what it says.
+                 The Shopify follow-up is kept OUT of that map: sharing the
+                 settlement's number, it used to replace the import's own line,
+                 so a Shopify timeout read as the settlement being refused. */
+              const latest = [...new Map(results.filter((r) => !r.shopify)
+                .map((r) => [r.ref || "—", r])).values()];
+              const shop = results.filter((r) => r.shopify);
               const bad = latest.filter((r) => !r.ok);
               return (
               <div className="mt-3">
@@ -735,6 +784,16 @@ export default function CprImport({ onDone }: { onDone?: () => void }) {
                     </div>
                   ))}
                 </div>
+                {shop.map((r, i) => (
+                  <div key={`shop-${i}`}
+                       className={`mt-2 flex items-start gap-2 rounded-card border px-2.5 py-1.5 text-[12px] ${
+                         r.ok ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+                              : "border-amber-300 bg-amber-50 text-amber-900"}`}>
+                    {r.ok ? <CheckCircle2 size={13} className="mt-0.5 shrink-0 text-emerald-600" />
+                          : <AlertTriangle size={13} className="mt-0.5 shrink-0 text-amber-600" />}
+                    <span><span className="font-mono">{r.ref}</span> · {String(r.report.shopify ?? "")}</span>
+                  </div>
+                ))}
               </div>
               );
             })()}
