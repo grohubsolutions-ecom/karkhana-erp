@@ -310,7 +310,9 @@ function parsePostExCpr(flat: string): Batch[] {
      1. Amounts arrive in two pieces. pdf.js hands "-2,207.00" over as "-2,207"
         and ".00" (21 times on INV-26) and "256,107" as "256," + "107". Neither
         half is an amount, so a row holding one had fewer than six and was
-        dropped — exactly the 14 missing. They are glued back first.
+        dropped — exactly the 14 missing. They are glued back first. The split
+        can also fall before the comma: INV-20250027 has "7,997.00" as "7" and
+        ",997.00", which read as 997 and put delivered COD 14,000 short.
      2. The header became a row of labels over a row of values
             INVOICE NUMBER  INVOICE DATE  BOOKINGS  STATUS
             INV-20250026    10/10/2026    122       Paid
@@ -342,14 +344,16 @@ function parsePostExCpr(flat: string): Batch[] {
    passing on every one, and a check-only run of INV-26 against the live
    database: 122 read, 121 matched, net 224,271, nothing written.
 --------------------------------------------------------------------------- */
-const AMT = String.raw`-?[\d,]+\.\d{2}`;
+/* An amount starts with a digit. ",529.00" — the tail of a split "-7,529.00" —
+   used to match as 529 and was taken for a real figure. */
+const AMT = String.raw`-?\d[\d,]*\.\d{2}`;
 const amt = (s?: string) => n2(unParen(s));
 
 function parseOwnExInvoice(raw: string): Batch[] {
   /* 1. Glue split amounts: "-2,207 .00" → "-2,207.00", "256, 107" → "256,107". */
   const flat = raw
-    .replace(/(\d)\s+(?=\.\d{2}(?!\d))/g, "$1")
-    .replace(/(\d,)\s+(?=\d{3}(?!\d))/g, "$1");
+    .replace(/(\d)\s+(?=[.,]\d)/g, "$1")          // "-2,207 .00", "-7 ,529.00"
+    .replace(/(\d,)\s+(?=\d{3}(?!\d))/g, "$1");   // "256, 107.00"
 
   /* 2. Number and date, whichever way the header is laid out. */
   const ref = /\bINV-\d{5,}\b/.exec(flat)?.[0] ?? "";
@@ -371,6 +375,12 @@ function parseOwnExInvoice(raw: string): Batch[] {
   /* 4. The rows. */
   const rows: CprRow[] = [];
   let sumCharges = 0, sumFuel = 0, sumOwnexNet = 0;
+  /* EVERY ROW CHECKS ITSELF: Net Total = charge + fuel − reserved, to the
+     rupee, on every row of every invoice (1,297 rows across INV-10…18 and
+     INV-26, delivered and returned alike). A misread amount breaks it on that
+     row, so the import can name the parcel instead of only a total being off.
+     INV-20250027: #TS4220 "7,997.00" arrived as "7" + ",997.00" and read as 997. */
+  const unbalanced: string[] = [];
   const re = /(\d{12})\s+(.*?)(?=\d{12}\s|Developed by Own Express|Own Express · Invoice|$)/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(flat))) {
@@ -380,6 +390,7 @@ function parseOwnExInvoice(raw: string): Batch[] {
     const ns = rest.match(new RegExp(AMT, "g"));
     if (!ns || ns.length < 6) continue;
     const v = ns.slice(0, 6).map((x) => Number(x.replace(/,/g, "")));
+    if (Math.abs(v[3] + v[4] - v[2] - v[5]) > 1) unbalanced.push(m[1]);
     sumCharges += v[3]; sumFuel += v[4]; sumOwnexNet += v[5];
     rows.push({ tracking_id: m[1], status: st[1],
                 cod: n2(v[0]), fee: n2(v[3]), tax: n2(v[4]),
@@ -404,6 +415,8 @@ function parseOwnExInvoice(raw: string): Batch[] {
   if (!ref) problem = "the invoice number could not be read";
   else if (!date) problem = "the invoice date could not be read";
   else if (!rows.length) problem = "no parcel rows could be read";
+  else if (unbalanced.length)
+    problem = `${unbalanced.length} row${unbalanced.length === 1 ? "" : "s"} misread — the amounts do not add up on tracking ${unbalanced.slice(0, 5).join(", ")}${unbalanced.length > 5 ? "…" : ""}`;
   else if (!declaredCount) problem = "the invoice's own parcel count could not be read";
   else if (rows.length !== declaredCount)
     problem = `read ${rows.length} parcels, the invoice says ${declaredCount}`;
@@ -525,7 +538,13 @@ export default function CprImport({ onDone }: { onDone?: () => void }) {
     if (!parsed || !supabase) return;
     setBusy(true); setErr(""); setResults([]);
     const acc: Result[] = [];
-    const list = many ? good : all;
+    /* ONLY WHAT PASSED, ALWAYS.
+       This read `many ? good : all`, so a single file that failed its own
+       check was imported anyway: INV-20250027 showed "1 will be skipped —
+       delivered COD totals 229067, the invoice says 243067" and was written
+       regardless, because the server's dry run only re-checks the parcel
+       count. A settlement that disagrees with itself is never sent. */
+    const list = good;
 
     for (let i = 0; i < list.length; i++) {
       const b = list[i];
@@ -802,12 +821,12 @@ export default function CprImport({ onDone }: { onDone?: () => void }) {
                 edge, where it could not be scrolled to, hiding Close. */}
             <div className="mt-4 flex flex-wrap items-center justify-end gap-2">
               <button className={btnGhost} disabled={busy} onClick={() => setOpen(false)}>Close</button>
-              <button className={btnGhost} disabled={busy || !guardReady} onClick={() => run(true)}>
+              <button className={btnGhost} disabled={busy || !guardReady || !good.length} onClick={() => run(true)}>
                 Check {many ? `all ${good.length}` : "only"}
               </button>
               {/* Unreachable until every dry run passed. A guard that can be
                   skipped is decoration. */}
-              <button className={btnPrimary} disabled={busy || !checked || committed} onClick={() => run(false)}>
+              <button className={btnPrimary} disabled={busy || !checked || committed || !good.length} onClick={() => run(false)}>
                 {committed ? <><CheckCircle2 size={15} /> Imported</> : "Import for real"}
               </button>
             </div>
@@ -815,6 +834,7 @@ export default function CprImport({ onDone }: { onDone?: () => void }) {
             {/* A disabled button with no explanation is just a wall. */}
             <div className="mt-1.5 text-right text-[11.5px] text-hint dark:text-[#8a8175]">
               {committed ? "Imported. Re-importing the same file is safe — it updates rather than duplicates."
+               : !good.length ? "Nothing can be imported — the file disagrees with itself (see above)."
                : !guardReady ? "Fill in the count and COD total from the courier's portal to run the check."
                : !checked ? <>Run <b>Check only</b> first — nothing can be written until it passes.</>
                : results.length && failed.length ? `${failed.length} settlement${failed.length === 1 ? "" : "s"} refused; only the ones that passed will be written.`
