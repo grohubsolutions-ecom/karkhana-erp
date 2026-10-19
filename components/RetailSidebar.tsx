@@ -122,7 +122,7 @@ export default function RetailSidebar({ open, onClose }: { open?: boolean; onClo
         <div className="flex items-center gap-2.5 px-5 pb-4 pt-4">
           <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-ink text-white dark:bg-white dark:text-[#141414]"><Store size={18} /></span>
           <div className="min-w-0 leading-tight">
-            <div className="text-[15px] font-extrabold tracking-tight dark:text-[#f4f1ea]">FS Traders</div>
+            <div className="text-[15px] font-extrabold tracking-tight dark:text-[#f4f1ea]">Shops Sales</div>
             <div className="text-[11px] text-muted dark:text-[#a89f93]">Retail shops</div>
           </div>
         </div>

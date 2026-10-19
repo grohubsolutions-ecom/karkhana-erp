@@ -275,8 +275,12 @@ export function ImportPanel({ onDone, inShop, inShopKey }: {
           const nums = rows.slice(1).map((r) => receiptNo(r[rcptCol])).filter((n): n is number => n != null);
           if (!nums.length) { if (alive) setProbe(null); return; }
           const lo = Math.min(...nums), hi = Math.max(...nums);
-          const highs: ReceiptHigh[] = [];
-          for (const b of branches) {
+          /* ONE ROUND TRIP, NOT NINE. This was a `for…of` with an `await`
+             inside, so the nine shops were asked one after another and the
+             file sat there doing nothing while each 400-row read went to
+             Mumbai and back. They do not depend on each other, so they go
+             together. */
+          const highs: ReceiptHigh[] = (await Promise.all(branches.map(async (b) => {
             /* 400, NOT 50, AND THE NUMBER IS MEASURED. A busy Fashion
                Collection day is 200-plus lines, so 50 rows do not even cover
                the latest day and the top of the series is missed: checked
@@ -287,13 +291,13 @@ export function ImportPanel({ onDone, inShop, inShopKey }: {
                apart, so a high that is short by 14 still identifies the right
                one — but a reason that quotes a number not in his data is a
                reason he is right to distrust. */
-            const { data } = await supabase.from("retail_sale_lines")
+            const { data } = await supabase!.from("retail_sale_lines")
               .select("receipt_no").eq("branch_id", b.id)
               .order("sale_date", { ascending: false }).limit(400);
             const top = ((data ?? []) as { receipt_no: string }[])
               .map((x) => receiptNo(x.receipt_no) ?? 0).reduce((m, n) => (n > m ? n : m), 0);
-            if (top > 0) highs.push({ branch_id: b.id, high: top });
-          }
+            return top > 0 ? { branch_id: b.id, high: top } : null;
+          }))).filter((x): x is ReceiptHigh => x != null);
           if (alive) setProbe(shopFromReceipts(lo, hi, highs));
           return;
         }

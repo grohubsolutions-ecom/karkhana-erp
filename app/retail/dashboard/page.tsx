@@ -520,7 +520,7 @@ export default function RetailDashboard() {
       receipts: M.receipts, shops: byBranch.filter((b) => b.s > 0).length,
       byShop: byBranch.map((b) => ({ name: b.name, sales: b.s })),
     });
-    const r = await shareOrCopy(text, "FS Traders — summary");
+    const r = await shareOrCopy(text, "Shops Sales — summary");
     if (r === "cancelled") return;
     setNote(r === "shared" ? "Sent." : r === "copied" ? "Copied — paste it into WhatsApp." : "Could not share.");
     setTimeout(() => setNote(""), 4000);

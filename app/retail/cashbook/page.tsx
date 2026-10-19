@@ -60,7 +60,7 @@ import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import Modal, { Field, inputCls, btnPrimary, btnGhost } from "@/components/Modal";
 import {
   Shell, PageHeader, StatCards, DataTable, Pill, Select, PreviewNote, SourceNote,
-  useBranches, money, moneyOrDash, num, text, today, iso, fetchAll, Diff,
+  useBranches, money, moneyOrDash, num, text, today, iso, Diff,
   type Row, type Col,
 } from "@/components/retail/kit";
 
@@ -113,7 +113,9 @@ type Book = {
   updated_at?: string | null;
 };
 
-type SaleLine = { sale_date: string; sales: number | null; sales_amount: number | null; payment_method: string | null; quantity: number | null };
+/** One day × one payment method, as retail_sales_agg_m returns it. `gross` is
+ *  sum(sales), `sales` is sum(sales_amount) — the function's names, kept. */
+type DayAgg = { sale_date: string | null; payment_method: string | null; gross: number | null; sales: number | null; returns: number | null };
 type ExpLine = { expense_date: string; amount: number | null; txn_type: string | null; category: string | null };
 
 /** What Nimbus reported for a day, before any manual override. */
@@ -301,33 +303,40 @@ export default function CashBookPage() {
       supabase.from("retail_expenses").select("expense_date,amount,txn_type,category").eq("branch_id", bid).gte("expense_date", from).lte("expense_date", to),
     ]);
 
-    /* PostgREST caps a response at 1000 rows and a .limit(5000) does not raise
-       that — it just returns what it returns. A silently truncated day of sale
-       lines here is a wrong cash position that looks entirely plausible, so
-       this pages. Ordered by id because an unordered .range() may repeat or
-       skip rows across pages. */
-    const { rows: sales, error: salesErr } = await fetchAll<SaleLine>((f, t) =>
-      supabase!.from("retail_sale_lines")
-        .select("sale_date,sales,sales_amount,payment_method,quantity")
-        .eq("branch_id", bid).gte("sale_date", from).lte("sale_date", to)
-        .order("id", { ascending: true }).range(f, t)
-    );
+    /* THE DAY TOTALS ARE ADDED UP BY POSTGRES, NOT BY THE BROWSER.
+     *
+     * This used to page every sale line in the window down to the device and
+     * total them here — measured on the real table, 10 requests and 8,128 rows
+     * (769 kB) for one shop's default window, to produce one small number per
+     * day per column. retail_sales_agg_m already returns exactly these
+     * measures, and grouping on sale_date + payment_method gives the whole
+     * window in ONE request of a few kilobytes: `gross` is sum(sales),
+     * `sales` is sum(sales_amount), and `returns` is the negative-quantity
+     * lines — POSITIVE in the function, which is why it is negated back here,
+     * because this screen's Returns column has always been negative.
+     *
+     * The 1000-row cap that forced the paging cannot bite any more: the result
+     * is days × payment methods, so a whole year is about 1,800 rows. */
+    const { data: dayRows, error: salesErr } = await supabase.rpc("retail_sales_agg_m", {
+      p_from: from, p_to: to, p_branches: [bid], p_by: ["sale_date", "payment_method"],
+    });
 
     /* A partial load is not shown. Half a chain reads exactly like a whole one
        and every balance under the gap would be wrong without saying so. */
-    const firstErr = bookRes.error?.message || prevRes.error?.message || expRes.error?.message || salesErr;
+    const firstErr = bookRes.error?.message || prevRes.error?.message || expRes.error?.message || salesErr?.message;
     if (firstErr) { setErr("Couldn't load: " + firstErr); setDays([]); setLoading(false); return; }
 
     const agg: Record<string, Agg> = {};
-    sales.forEach((r) => {
+    ((dayRows ?? []) as DayAgg[]).forEach((r) => {
+      if (!r.sale_date) return;
       const a = agg[r.sale_date] ?? (agg[r.sale_date] = ZERO_AGG());
-      a.gross += num(r.sales);
-      const amt = num(r.sales_amount);
+      a.gross += num(r.gross);
+      const amt = num(r.sales);
       a.net += amt;
       /* A return is a sale line with a negative quantity. Its amount is already
          negative, so it nets itself out of the day — this column only exists to
-         show how much of the day was given back. */
-      if (num(r.quantity) < 0) a.rtn += amt;
+         show how much of the day was given back, and it is shown negative. */
+      a.rtn -= num(r.returns);
       const pm = r.payment_method;
       if (pm === "cash") a.cash += amt;
       else if (pm === "online") a.online += amt;

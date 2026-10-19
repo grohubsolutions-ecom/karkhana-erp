@@ -29,7 +29,7 @@ const DEPARTMENTS = [
      neither, so can() returned false for every normal user and this box only
      ever appeared for super admins, who skip the check. It looked fine to the
      only people who ever looked. */
-  { href: "/retail", title: "FS Traders", subtitle: "Retail shops · sales, cash book & commissions", icon: Store, light: "bg-salmon-soft", chip: "dark:bg-salmon",
+  { href: "/retail", title: "Shops Sales", subtitle: "Retail shops · sales, cash book & commissions", icon: Store, light: "bg-salmon-soft", chip: "dark:bg-salmon",
     needs: ["retail.access", "retail.dashboard.view", "retail.sales.view", "retail.cashbook.view",
             "retail.expenses.view", "retail.employees.view", "retail.payroll.view"] },
   /* Administration is not a business — it is the room where people and access

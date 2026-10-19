@@ -167,5 +167,5 @@ export function officeSummary(d: OfficeDay, maxShops = 12): string {
     ? "*By shop*\n" + shops.map((s) => `${s.name}: ${rs(s.sales)}`).join("\n")
       + ((d.byShop ?? []).filter((s) => s.sales).length > maxShops ? `\n…and ${(d.byShop ?? []).filter((s) => s.sales).length - maxShops} more` : "")
     : undefined;
-  return shareText("FS Traders — summary", d.label ?? dayLabel(d.date), lines, tail);
+  return shareText("Shops Sales — summary", d.label ?? dayLabel(d.date), lines, tail);
 }

@@ -46,7 +46,7 @@ import RangeBar from "@/components/RangeBar";
 import { rangeDates } from "@/lib/dateRange";
 import {
   Shell, PageHeader, StatCards, DataTable, Pill, PreviewNote, SourceNote,
-  money, num, fetchAll, type Row, type Col, type Branch,
+  money, num, type Col, type Branch,
 } from "@/components/retail/kit";
 
 /** Ported verbatim from normStore in the original, and the same as the copy in
@@ -56,13 +56,16 @@ const normStore = (s: unknown) => String(s ?? "").toUpperCase().replace(/\s+/g, 
 
 const BLANK = { name: "", code: "", chain: "", nimbus_name: "", color: "#EBA98F", business: "", active: true };
 
-type Perf = { sales: number; margin: number; qty: number; exp: number; receipts: Set<string> };
-const EMPTY_PERF: Perf = { sales: 0, margin: 0, qty: 0, exp: 0, receipts: new Set() };
+type Perf = { sales: number; margin: number; qty: number; exp: number; receipts: number };
+const EMPTY_PERF: Perf = { sales: 0, margin: 0, qty: 0, exp: 0, receipts: 0 };
+/** One row per shop, as retail_sales_agg_m returns it. */
+type AggRow = { branch_id: number | null; sales: number | null; margin: number | null; qty: number | null; receipts: number | null };
+type ExpRow = { branch_id: number | null; expense: number | null; income: number | null };
 
 export default function BranchesPage() {
   const [branches, setBranches] = useState<Branch[]>([]);
-  const [sales, setSales] = useState<Row[]>([]);
-  const [expenses, setExpenses] = useState<Row[]>([]);
+  const [agg, setAgg] = useState<AggRow[]>([]);
+  const [expAgg, setExpAgg] = useState<ExpRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
   const [preset, setPreset] = useState("30d");
@@ -84,49 +87,58 @@ export default function BranchesPage() {
     /* nimbus_name and needs_review are the point of this screen, so they are
        selected here rather than through the kit's useBranches, which reads the
        short list every screen needs to name a row. */
+    /* THE SHOP TOTALS ARE ADDED UP BY POSTGRES, NOT BY THE BROWSER.
+     *
+     * This screen used to page every sale line in the range down to the phone
+     * and total them here. Measured against the real table (67,506 lines):
+     *
+     *   30 days   11 requests, 10,098 rows, 1.2 MB
+     *   All time  68 requests, 72,174 rows, 8.4 MB   — 5.5 s before a figure
+     *
+     * to produce nine rows of five numbers. The roll-ups that the Sales and
+     * Dashboard screens already use return exactly those numbers — including
+     * the receipt count, on the same branch|receipt_txn/receipt_no/id key this
+     * file used to build by hand — so the whole range is now ONE request of
+     * about a kilobyte, whatever the range is. Nothing on this screen ever
+     * needed an individual line. */
     const [b, s, e] = await Promise.all([
       supabase.from("retail_branches")
         .select("id,code,name,chain,business,active,color,nimbus_name,needs_review")
         .order("chain").order("name"),
-      fetchAll<Row>((a, z) => {
-        let q = supabase!.from("retail_sale_lines")
-          .select("branch_id,sales_amount,gross_margin,quantity,receipt_txn,receipt_no,id");
-        if (from) q = q.gte("sale_date", from);
-        if (to) q = q.lte("sale_date", to);
-        return q.order("id", { ascending: true }).range(a, z);
+      /* 'receipts' is a flag, not a dimension: it switches on the distinct
+         count, which is the expensive half of the function. This screen prints
+         a Receipts column, so it is asked for here. */
+      supabase.rpc("retail_sales_agg_m", {
+        p_from: from || null, p_to: to || null, p_branches: null, p_by: ["branch_id", "receipts"],
       }),
-      fetchAll<Row>((a, z) => {
-        let q = supabase!.from("retail_expenses").select("branch_id,amount,txn_type");
-        if (from) q = q.gte("expense_date", from);
-        if (to) q = q.lte("expense_date", to);
-        return q.order("id", { ascending: true }).range(a, z);
+      supabase.rpc("retail_expense_rollup", {
+        p_from: from || null, p_to: to || null, p_branch: null, p_by: ["branch_id"],
       }),
     ]);
-    if (b.error || s.error || e.error) setErr(b.error?.message || s.error || e.error);
+    if (b.error || s.error || e.error) setErr(b.error?.message || s.error?.message || e.error?.message || "");
     setBranches((b.data as Branch[]) ?? []);
-    setSales(s.rows);
-    setExpenses(e.rows);
+    setAgg((s.data as AggRow[]) ?? []);
+    setExpAgg((e.data as ExpRow[]) ?? []);
     setLoading(false);
   }, [preset, cf, ct]);
   useEffect(() => { load(); }, [load]);
 
   const perf = useMemo(() => {
     const m: Record<string, Perf> = {};
-    sales.forEach((r) => {
-      const k = String(r.branch_id);
-      (m[k] ||= { sales: 0, margin: 0, qty: 0, exp: 0, receipts: new Set() });
-      m[k].sales += num(r.sales_amount); m[k].margin += num(r.gross_margin); m[k].qty += num(r.quantity);
-      m[k].receipts.add(String(r.receipt_txn || r.receipt_no || r.id));
+    const at = (id: unknown) => (m[String(id)] ||= { sales: 0, margin: 0, qty: 0, exp: 0, receipts: 0 });
+    agg.forEach((r) => {
+      const p = at(r.branch_id);
+      p.sales += num(r.sales); p.margin += num(r.margin); p.qty += num(r.qty);
+      p.receipts += num(r.receipts);
     });
-    expenses.forEach((r) => {
-      const k = String(r.branch_id);
-      (m[k] ||= { sales: 0, margin: 0, qty: 0, exp: 0, receipts: new Set() });
+    expAgg.forEach((r) => {
       /* Income is the same table with txn_type flipped, so it comes off the
-         expense figure rather than being counted as one. */
-      m[k].exp += r.txn_type === "income" ? -num(r.amount) : num(r.amount);
+         expense figure rather than being counted as one. The roll-up returns
+         the two as separate columns, which is the same subtraction. */
+      at(r.branch_id).exp += num(r.expense) - num(r.income);
     });
     return m;
-  }, [sales, expenses]);
+  }, [agg, expAgg]);
 
   const totalSales = useMemo(() => Object.values(perf).reduce((a, v) => a + v.sales, 0), [perf]);
   const maxSales = useMemo(() => Math.max(...Object.values(perf).map((v) => v.sales), 1), [perf]);
@@ -300,7 +312,7 @@ export default function BranchesPage() {
         const net = p.margin - p.exp;
         return <span className={`font-semibold ${net < 0 ? "text-danger" : "text-success"}`}>{money(net)}</span>;
       } },
-    { head: "Receipts", right: true, cell: (b) => (perf[String(b.id)] ?? EMPTY_PERF).receipts.size.toLocaleString() },
+    { head: "Receipts", right: true, cell: (b) => (perf[String(b.id)] ?? EMPTY_PERF).receipts.toLocaleString() },
     /* CLOSE / REOPEN ON THE ROW. Closing needs no counting — it is safe for
        any shop, trading or not — so it can sit here without the four lookups
        the delete decision needs. A real delete stays inside Edit, where the

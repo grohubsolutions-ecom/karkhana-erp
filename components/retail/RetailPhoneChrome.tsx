@@ -68,7 +68,7 @@ export function RetailTopBar({ onMore }: { onMore: () => void }) {
           </span>
           <div className="min-w-0 flex-1 leading-tight">
             <div className="truncate text-[15.5px] font-extrabold tracking-tight text-ink dark:text-[#f4f1ea]">{title}</div>
-            <div className="text-[10.5px] uppercase tracking-wide text-hint dark:text-[#8a8175]">FS Traders</div>
+            <div className="text-[10.5px] uppercase tracking-wide text-hint dark:text-[#8a8175]">Shops Sales</div>
           </div>
           {showShop && (
             <button onClick={() => setPick(true)}
@@ -223,7 +223,7 @@ export function RetailMoreSheet({ open, onClose }: { open: boolean; onClose: () 
   async function logout() { if (supabase) await supabase.auth.signOut(); router.replace("/login"); }
 
   return (
-    <Sheet open={open} onClose={onClose} title="FS Traders" subtitle="Everything in this department">
+    <Sheet open={open} onClose={onClose} title="Shops Sales" subtitle="Everything in this department">
       <div className="space-y-4">
         {can(ROUTE_PERMS[DASHBOARD.href] ?? null) && (
           <div className="grid grid-cols-2 gap-2">
