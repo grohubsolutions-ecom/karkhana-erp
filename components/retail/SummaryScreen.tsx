@@ -39,6 +39,7 @@ import {
   money, num, attHours, isHourly, type Row, type Col, type Employee,
 } from "@/components/retail/kit";
 import { useStaffScope } from "@/lib/retailShop";
+import { AddEmployeeButton, EmployeeRowActions, useEmployeeHistory } from "@/components/retail/EmployeeActions";
 
 type Scope = "shops" | "ho";
 type Line = {
@@ -55,6 +56,9 @@ export default function SummaryScreen({ scope }: { scope: Scope }) {
   const [led, setLed] = useState<Row[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
+  /* Staff can be added and removed from here, not only from the Employees
+     screen — this is where you notice somebody is missing or has left. */
+  const { history, reloadHistory } = useEmployeeHistory();
 
   const pool = useMemo(
     () => branches.filter((b) => (scope === "ho" ? isHeadOffice(b) : !isHeadOffice(b))),
@@ -138,6 +142,10 @@ export default function SummaryScreen({ scope }: { scope: Scope }) {
     { head: "Advance", right: true, cell: (l) => (l.advance ? money(l.advance) : "—") },
     { head: "Credit", right: true, cell: (l) => (l.credit ? money(l.credit) : "—") },
     { head: "Repaid", right: true, cell: (l) => (l.repaid ? money(l.repaid) : "—") },
+    { head: "", right: true, phone: "hide", cell: (l) => (
+        <EmployeeRowActions e={l.emp} history={history}
+          onChanged={() => { reloadHistory(); load(); }} />
+      ) },
     { head: "Net payable", right: true, bold: true, cell: (l) =>
         l.net < 0 ? <span className="text-danger">{money(l.net)}</span> : money(l.net) },
   ];
@@ -151,6 +159,8 @@ export default function SummaryScreen({ scope }: { scope: Scope }) {
       >
         <MonthPicker value={month} onChange={setMonth} />
         {pickable.length > 1 && <BranchPicker branches={pickable} value={branch} onChange={setBranch} />}
+        <AddEmployeeButton branches={pickable} defaultBranch={branch || undefined}
+          onAdded={() => { reloadHistory(); load(); }} />
       </PageHeader>
 
       <StatCards stats={stats} loading={loading} />

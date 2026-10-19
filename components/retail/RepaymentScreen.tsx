@@ -34,6 +34,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Coins, HandCoins, Users, CalendarClock, Trash2, Pencil, Check } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import Modal, { Field, inputCls, btnPrimary, btnGhost } from "@/components/Modal";
+import { AddEmployeeButton, EmployeeRowActions, useEmployeeHistory } from "@/components/retail/EmployeeActions";
 import {
   Shell, PageHeader, StatCards, DataTable, Pill, BranchPicker, MonthPicker,
   PreviewNote, SourceNote, fetchAll, useEmployees, isHeadOffice,
@@ -75,6 +76,7 @@ export default function RepaymentScreen({ scope }: { scope: Scope }) {
   /** Same idea for the plan amount, which is edited in place in its cell. */
   const [planDrafts, setPlanDrafts] = useState<Record<number, string>>({});
   const [delFor, setDelFor] = useState<Row | null>(null);
+  const { history, reloadHistory } = useEmployeeHistory();
   const [editFor, setEditFor] = useState<Row | null>(null);
   const [editForm, setEditForm] = useState({ entry_date: "", paid: "", details: "" });
 
@@ -317,10 +319,13 @@ export default function RepaymentScreen({ scope }: { scope: Scope }) {
           className="w-[148px] rounded-xl2 border border-line bg-canvas px-2.5 py-1.5 text-[13px] text-ink outline-none transition focus:border-ink/30 dark:border-white/10 dark:bg-white/[0.04] dark:text-white" />
       ) },
     { head: "", right: true, cell: (e) => (
-        <button onClick={() => record(e)} disabled={saving === e.id}
-          className="inline-flex items-center gap-1.5 rounded-full bg-ink px-3.5 py-1.5 text-[12px] font-semibold text-white transition hover:opacity-90 disabled:opacity-50 dark:bg-white dark:text-[#141414]">
-          <Check size={13} /> {saving === e.id ? "Saving…" : "Record"}
-        </button>
+        <span className="flex items-center justify-end gap-1.5">
+          <button onClick={() => record(e)} disabled={saving === e.id}
+            className="inline-flex items-center gap-1.5 rounded-full bg-ink px-3.5 py-1.5 text-[12px] font-semibold text-white transition hover:opacity-90 disabled:opacity-50 dark:bg-white dark:text-[#141414]">
+            <Check size={13} /> {saving === e.id ? "Saving…" : "Record"}
+          </button>
+          <EmployeeRowActions e={e} history={history} onChanged={() => { reloadHistory(); load(); }} />
+        </span>
       ) },
   ];
 
@@ -352,6 +357,8 @@ export default function RepaymentScreen({ scope }: { scope: Scope }) {
       >
         <MonthPicker value={month} onChange={setMonth} />
         {pickable.length > 1 && <BranchPicker branches={pickable} value={branch} onChange={setBranch} />}
+        <AddEmployeeButton branches={pickable} defaultBranch={branch || undefined}
+          onAdded={() => { reloadHistory(); load(); }} />
       </PageHeader>
 
       <StatCards stats={stats} loading={loading} />

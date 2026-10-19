@@ -42,6 +42,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { CalendarCheck, UserCheck, UserX, Clock, Sun, ChevronLeft, ChevronRight, CheckCheck } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import Modal, { Field, inputCls, btnPrimary, btnGhost } from "@/components/Modal";
+import { AddEmployeeButton, EmployeeRowActions, useEmployeeHistory } from "@/components/retail/EmployeeActions";
 import {
   Shell, PageHeader, StatCards, Tabs, BranchPicker, MonthPicker, PreviewNote, SourceNote,
   ActionBar, useIsPhone,
@@ -78,6 +79,7 @@ export default function AttendanceScreen({ scope }: { scope: Scope }) {
   const [grid, setGrid] = useState<Record<string, Rec>>({});
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
+  const { history, reloadHistory } = useEmployeeHistory();
   const [timeFor, setTimeFor] = useState<Employee | null>(null);
   const [tin, setTin] = useState(""); const [tout, setTout] = useState("");
   const [bulk, setBulk] = useState(false);
@@ -246,6 +248,8 @@ export default function AttendanceScreen({ scope }: { scope: Scope }) {
               className="rounded-full border border-line bg-surface px-3.5 py-2 text-[12.5px] font-semibold text-ink outline-none dark:border-white/10 dark:bg-white/[0.06] dark:text-white" />
           : <MonthPicker value={month} onChange={setMonth} />}
         {pickable.length > 1 && <BranchPicker branches={pickable} value={branch} onChange={setBranch} />}
+        <AddEmployeeButton branches={pickable} defaultBranch={branch || undefined}
+          onAdded={() => { reloadHistory(); load(); }} />
       </PageHeader>
 
       <Tabs tabs={[{ key: "day" as const, label: "Today" }, { key: "month" as const, label: "Month view" }]} value={tab} onChange={setTab} />
@@ -303,6 +307,9 @@ export default function AttendanceScreen({ scope }: { scope: Scope }) {
                         {hourly ? `${money(e.hourly_rate)}/hr` : `${money(e.monthly_salary)}/month`}
                       </div>
                     </div>
+                    {/* End / bring back / delete, on the person's own card. */}
+                    <EmployeeRowActions e={e} history={history}
+                      onChanged={() => { reloadHistory(); load(); }} />
                   </div>
                   {hourly ? (
                     <button onClick={() => openTimes(e)}
@@ -373,6 +380,10 @@ export default function AttendanceScreen({ scope }: { scope: Scope }) {
                       </button>
                     );
                   })}
+                  {/* End / bring back / delete, on the computer list too — the
+                      phone cards above carry the same control. */}
+                  <EmployeeRowActions e={e} history={history}
+                    onChanged={() => { reloadHistory(); load(); }} />
                 </div>
               </div>
             );

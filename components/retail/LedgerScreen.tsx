@@ -60,6 +60,7 @@ import {
 } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import Modal, { Field, inputCls, btnPrimary, btnGhost } from "@/components/Modal";
+import { AddEmployeeButton, EmployeeRowActions, useEmployeeHistory } from "@/components/retail/EmployeeActions";
 import {
   Shell, PageHeader, StatCards, DataTable, Tabs, Pill, Select, BranchPicker, MonthPicker,
   PreviewNote, SourceNote, useEmployees, isHeadOffice, money, num, text, today,
@@ -416,6 +417,7 @@ export default function LedgerScreen({ scope }: { scope: Scope }) {
   const [advSaving, setAdvSaving] = useState(false);
   const [statementFor, setStatementFor] = useState<Employee | null>(null);
   const [delFor, setDelFor] = useState<Row | null>(null);
+  const { history, reloadHistory } = useEmployeeHistory();
   const [editFor, setEditFor] = useState<Row | null>(null);
   const [editForm, setEditForm] = useState({ entry_date: "", advance: "", purchase_credit: "", paid: "", details: "" });
 
@@ -670,9 +672,12 @@ export default function LedgerScreen({ scope }: { scope: Scope }) {
             : <Pill tone="good">Settled</Pill>
       ) },
     { head: "", right: true, cell: (r) => (
-        <button onClick={() => setStatementFor(r.e)} className="rounded-full border border-line bg-surface px-3 py-1.5 text-[12px] font-semibold text-ink transition hover:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:hover:bg-white/[0.12]">
-          Statement
-        </button>
+        <span className="flex items-center justify-end gap-1.5">
+          <button onClick={() => setStatementFor(r.e)} className="rounded-full border border-line bg-surface px-3 py-1.5 text-[12px] font-semibold text-ink transition hover:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:hover:bg-white/[0.12]">
+            Statement
+          </button>
+          <EmployeeRowActions e={r.e} history={history} onChanged={() => { reloadHistory(); load(); }} />
+        </span>
       ) },
   ];
 
@@ -726,6 +731,8 @@ export default function LedgerScreen({ scope }: { scope: Scope }) {
              screen explaining why. */
           <BranchPicker branches={pickable} value={branch} onChange={(v) => { setBranch(v); setEmployeeId(""); }} />
         )}
+        <AddEmployeeButton branches={pickable} defaultBranch={branch || undefined}
+          onAdded={() => { reloadHistory(); load(); }} />
         {tab === "entries" && (
           <Select value={employeeId} onChange={setEmployeeId}>
             <option value="">Everyone</option>
