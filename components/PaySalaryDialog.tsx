@@ -112,15 +112,23 @@ export default function PaySalaryDialog({ target, year, month, onClose, onDone }
           </div>
           {advs.length > 0 && (
             <ul className="mt-2 space-y-1 border-t border-amber-300/50 pt-2 text-[12.5px] dark:border-white/10">
-              {advs.map((a) => (
-                <li key={a.id} className="flex items-baseline justify-between gap-3">
-                  <span className="min-w-0 text-muted dark:text-[#a89f93]">
-                    <span className="tabular-nums">{a.date}</span>
-                    {a.note ? <span className={a.carried_from ? " font-semibold text-ink dark:text-[#e7e2d8]" : ""}> · {a.note}</span> : null}
-                  </span>
-                  <span className="shrink-0 font-semibold tabular-nums text-ink dark:text-[#e7e2d8]">{rs(a.amount)}</span>
-                </li>
-              ))}
+              {advs.map((a) => {
+                /* H296: a minus row is money given back — it already came off the advance above. */
+                const back = Number(a.amount) < 0;
+                return (
+                  <li key={a.id} className="flex items-baseline justify-between gap-3">
+                    <span className="min-w-0 text-muted dark:text-[#a89f93]">
+                      <span className="tabular-nums">{a.date}</span>
+                      {back && <span className="font-semibold text-emerald-700 dark:text-success"> · Given back</span>}
+                      {a.note && !(back && a.note === "Advance returned")
+                        ? <span className={a.carried_from ? " font-semibold text-ink dark:text-[#e7e2d8]" : ""}> · {a.note}</span> : null}
+                    </span>
+                    <span className={`shrink-0 font-semibold tabular-nums ${back ? "text-emerald-700 dark:text-success" : "text-ink dark:text-[#e7e2d8]"}`}>
+                      {back ? `− ${rs(-Number(a.amount))}` : rs(a.amount)}
+                    </span>
+                  </li>
+                );
+              })}
             </ul>
           )}
         </div>

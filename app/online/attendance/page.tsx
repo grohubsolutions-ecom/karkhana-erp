@@ -1,11 +1,13 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Users, CalendarCheck, HandCoins, Wallet, RefreshCw, Phone, Pencil, Trash2 } from "lucide-react";
+import { Users, CalendarCheck, HandCoins, Wallet, RefreshCw, Phone, Pencil, Trash2, Undo2 } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { AddEmployee, DayRoster, AddAdvance, localISO } from "@/components/AttendanceEntry";
 import MonthlySummary from "@/components/MonthlySummary";
 import { useConfirm } from "@/components/ConfirmDialog";
 import RosterEmployeeEdit, { type RosterEmp } from "@/components/RosterEmployeeEdit";
+import AdvanceReturn, { type ReturnEntry } from "@/components/AdvanceReturn";
+import { btnGhost } from "@/components/Modal";
 import { Segmented, PageActions, useIsPhone } from "@/components/HubUI";
 
 type Tab = "employees" | "attendance" | "advances" | "salaries";
@@ -57,8 +59,48 @@ export default function AttendancePage() {
   const [actErr, setActErr] = useState("");
   const [removing, setRemoving] = useState<string | null>(null);
   const [editing, setEditing] = useState<RosterEmp | null>(null);
+  /* ADVANCE RETURN (H296): money an employee gives back comes off that
+     month's advance, so that month's pay goes up by the same amount. It
+     changes pay, so — like Paid and Give extra day — only for whoever may
+     manage Hub attendance. */
+  const [canManage, setCanManage] = useState(false);
+  const [retOpen, setRetOpen] = useState(false);
+  const [retEdit, setRetEdit] = useState<ReturnEntry | null>(null);
 
   const empName = (id: unknown) => emps.find((e) => e.id === id)?.name ?? String(id ?? "—");
+
+  useEffect(() => {
+    if (!isSupabaseConfigured || !supabase) return;
+    supabase.rpc("has_permission", { p_permission_code: "hub.attendance.manage" })
+      .then(({ data }) => setCanManage(data === true));
+  }, []);
+
+  function openReturnEdit(r: Row) {
+    setRetEdit({
+      id: String(r.id), emp_id: String(r.emp_id), name: empName(r.emp_id),
+      amount: Number(r.amount), date: String(r.date ?? ""), note: r.note ? String(r.note) : null,
+      deduct_year: Number(r.deduct_year), deduct_month: Number(r.deduct_month),
+    });
+    setRetOpen(true);
+  }
+
+  async function removeReturn(r: Row) {
+    if (!supabase) return;
+    const amt = Math.abs(Number(r.amount) || 0);
+    const mon = `${MONTHS[Number(r.deduct_month)] ?? r.deduct_month} ${String(r.deduct_year ?? "")}`;
+    if (!(await confirm({
+      title: `Take off ${empName(r.emp_id)}'s return of ${money(amt)}?`,
+      body: `The ${mon} advance goes back up by ${money(amt)}, so ${mon} pay goes down by the same.`,
+      confirmLabel: "Take it off",
+    }))) return;
+    setActErr(""); setMsg("");
+    const { data, error } = await supabase.rpc("hub_advance_return_remove", { p_id: String(r.id) });
+    const res = data as { ok?: boolean; error?: string; report?: string } | null;
+    if (error) { setActErr(error.message); return; }
+    if (!res?.ok) { setActErr(res?.error ?? "It was not taken off and no reason was given."); return; }
+    await load("advances");
+    setMsg(res.report ?? "Return taken off.");
+  }
 
   /* REMOVING SOMEBODY FROM THE ROSTER.
      This list had no way off it. People can be added to it from this very
@@ -179,12 +221,17 @@ export default function AttendancePage() {
         { label: "Leave", value: c.L.toLocaleString(), Icon: CalendarCheck, bg: "bg-amber-soft" },
       ];
     }
-    const uns = rows.filter((r) => !r.settled);
+    /* H296: a return is a row with a minus amount — money that came back, not
+       an advance — so it is counted on its own card, not netted into "given". */
+    const given = rows.filter((r) => Number(r.amount) > 0);
+    const back = rows.filter((r) => Number(r.amount) < 0);
+    const uns = given.filter((r) => !r.settled);
     /* H284: an advance carried forward from one month's pay to the next is the
        same money, not more of it — counted once, where it was given. */
     return [
-      { label: "Advances", value: rows.length.toLocaleString(), Icon: HandCoins, bg: "bg-periwinkle-soft" },
-      { label: "Total given", value: money(rows.filter((r) => !r.carried_from).reduce((t, r) => t + (Number(r.amount) || 0), 0)), Icon: Wallet, bg: "bg-success-soft" },
+      { label: "Advances", value: given.length.toLocaleString(), Icon: HandCoins, bg: "bg-periwinkle-soft" },
+      { label: "Total given", value: money(given.filter((r) => !r.carried_from).reduce((t, r) => t + (Number(r.amount) || 0), 0)), Icon: Wallet, bg: "bg-success-soft" },
+      { label: "Returned", value: money(back.reduce((t, r) => t - (Number(r.amount) || 0), 0)), Icon: Undo2, bg: "bg-lavender-soft" },
       { label: "Unsettled", value: uns.length.toLocaleString(), Icon: HandCoins, bg: "bg-amber-soft" },
     ];
   }, [tab, rows, emps, attCounts]);
@@ -222,6 +269,11 @@ export default function AttendancePage() {
           <PageActions>
             {tab === "employees" && <AddEmployee onDone={() => load(tab)} />}
             {tab === "advances" && <AddAdvance emps={emps} onDone={() => load(tab)} />}
+            {tab === "advances" && canManage && (
+              <button onClick={() => { setRetEdit(null); setRetOpen(true); }} className={btnGhost}>
+                <Undo2 size={15} /> Advance return
+              </button>
+            )}
             <button onClick={() => load(tab)} className="flex items-center justify-center gap-2 rounded-full border border-line bg-surface px-4 py-2 text-[13px] font-semibold text-ink transition hover:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:hover:bg-white/[0.12]">
               <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> Refresh
             </button>
@@ -328,21 +380,43 @@ export default function AttendancePage() {
               </div>
               </div>
             ))
-          : rows.map((r, i) => (
+          : rows.map((r, i) => {
+              const ret = Number(r.amount) < 0;
+              const mon = `${MONTHS[Number(r.deduct_month)] ?? r.deduct_month} ${String(r.deduct_year ?? "")}`;
+              return (
               <div key={i} className="rounded-xl2 border border-line bg-surface px-4 py-3 dark:border-white/[0.06] dark:bg-[#201c17]">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <div className="truncate text-[14.5px] font-bold text-ink dark:text-[#f4f1ea]">{empName(r.emp_id)}</div>
-                    <div className="text-[12px] text-muted dark:text-[#a89f93]">Given {String(r.date ?? "—")} · from {MONTHS[Number(r.deduct_month)] ?? r.deduct_month} {String(r.deduct_year ?? "")} pay</div>
+                    <div className="text-[12px] text-muted dark:text-[#a89f93]">
+                      {ret ? `Given back ${String(r.date ?? "—")} · off the ${mon} advance` : `Given ${String(r.date ?? "—")} · from ${mon} pay`}
+                    </div>
                   </div>
                   <div className="shrink-0 text-right">
-                    <div className="text-[14.5px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">{money(r.amount)}</div>
-                    {r.settled ? <span className="text-[12px] font-semibold text-success">Settled</span> : <span className="text-[12px] font-semibold text-amber-strong dark:text-amber">Not settled</span>}
+                    <div className={`text-[14.5px] font-extrabold tabular-nums ${ret ? "text-emerald-700 dark:text-success" : "text-ink dark:text-[#f4f1ea]"}`}>
+                      {ret ? `− ${money(-Number(r.amount))}` : money(r.amount)}
+                    </div>
+                    {ret ? <span className="text-[12px] font-semibold text-emerald-700 dark:text-success">Returned</span>
+                      : r.settled ? <span className="text-[12px] font-semibold text-success">Settled</span> : <span className="text-[12px] font-semibold text-amber-strong dark:text-amber">Not settled</span>}
                   </div>
                 </div>
-                {r.note ? <div className="mt-1 text-[12.5px] text-muted dark:text-[#a89f93]">{String(r.note)}</div> : null}
+                {r.note && !(ret && r.note === "Advance returned") ? <div className="mt-1 text-[12.5px] text-muted dark:text-[#a89f93]">{String(r.note)}</div> : null}
+                {/* A return entered wrongly is put right here — until its month is paid. */}
+                {ret && canManage && !r.settled && (
+                  <div className="mt-2.5 flex gap-2">
+                    <button onClick={() => openReturnEdit(r)}
+                      className="flex h-10 items-center gap-1.5 rounded-full border border-line px-3.5 text-[12.5px] font-semibold active:bg-panel dark:border-white/15">
+                      <Pencil size={13} /> Edit
+                    </button>
+                    <button onClick={() => removeReturn(r)}
+                      className="flex h-10 items-center gap-1.5 rounded-full border border-line px-3.5 text-[12.5px] font-semibold text-red-700 active:bg-red-50 dark:border-white/15">
+                      <Trash2 size={13} /> Remove
+                    </button>
+                  </div>
+                )}
               </div>
-            ))}
+              );
+            })}
         </div>
       ) : (
       /* ---------------------------------------------------------- desktop */
@@ -353,16 +427,16 @@ export default function AttendancePage() {
               <tr className="border-b border-line text-[11.5px] uppercase tracking-wide text-hint dark:border-white/[0.06] dark:text-[#8a8175]">
                 {tab === "employees" && <><th className="px-4 py-3 font-semibold">Name</th><th className="px-4 py-3 font-semibold">Designation</th><th className="px-4 py-3 font-semibold">Department</th><th className="px-4 py-3 text-right font-semibold">Salary</th><th className="px-4 py-3 text-right font-semibold">Work days</th><th className="px-4 py-3 font-semibold">Phone</th><th className="px-4 py-3 text-right font-semibold">Actions</th></>}
                 {tab === "attendance" && <><th className="px-4 py-3 font-semibold">Employee</th><th className="px-4 py-3 font-semibold">Date</th><th className="px-4 py-3 font-semibold">Time in</th><th className="px-4 py-3 font-semibold">Status</th><th className="px-4 py-3" /></>}
-                {tab === "advances" && <><th className="px-4 py-3 font-semibold">Employee</th><th className="px-4 py-3 text-right font-semibold">Amount</th><th className="px-4 py-3 font-semibold">Date</th><th className="px-4 py-3 font-semibold">Deduct</th><th className="px-4 py-3 font-semibold">Note</th><th className="px-4 py-3 font-semibold">Settled</th></>}
+                {tab === "advances" && <><th className="px-4 py-3 font-semibold">Employee</th><th className="px-4 py-3 text-right font-semibold">Amount</th><th className="px-4 py-3 font-semibold">Date</th><th className="px-4 py-3 font-semibold">Deduct</th><th className="px-4 py-3 font-semibold">Note</th><th className="px-4 py-3 font-semibold">Status</th><th className="px-4 py-3" /></>}
               </tr>
             </thead>
             <tbody className="divide-y divide-line dark:divide-white/[0.05]">
               {loading ? (
-                Array.from({ length: 8 }).map((_, i) => <tr key={i}><td colSpan={tab === "employees" ? 7 : 6} className="px-4 py-3"><div className="h-4 animate-pulse rounded bg-panel/70 dark:bg-white/[0.05]" /></td></tr>)
+                Array.from({ length: 8 }).map((_, i) => <tr key={i}><td colSpan={tab === "attendance" ? 6 : 7} className="px-4 py-3"><div className="h-4 animate-pulse rounded bg-panel/70 dark:bg-white/[0.05]" /></td></tr>)
               ) : err ? (
-                <tr><td colSpan={tab === "employees" ? 7 : 6} className="px-4 py-12 text-center text-[13px] text-danger">Couldn&apos;t load: {err}</td></tr>
+                <tr><td colSpan={tab === "attendance" ? 6 : 7} className="px-4 py-12 text-center text-[13px] text-danger">Couldn&apos;t load: {err}</td></tr>
               ) : rows.length === 0 ? (
-                <tr><td colSpan={tab === "employees" ? 7 : 6}><Empty /></td></tr>
+                <tr><td colSpan={tab === "attendance" ? 6 : 7}><Empty /></td></tr>
               ) : (
                 rows.map((r, i) => (
                   <tr key={i} className="text-ink transition hover:bg-panel/50 dark:text-[#e7e2d8] dark:hover:bg-white/[0.03]">
@@ -397,14 +471,35 @@ export default function AttendancePage() {
                       <td className="px-4 py-3">{statusBadge(String(r.status ?? ""))}</td>
                       <td className="px-4 py-3 text-right"><button type="button" onClick={() => editDay(`${r.year}-${pad(r.month)}-${pad(r.day)}`)} className="text-[12px] font-semibold text-muted underline hover:text-ink dark:text-[#a89f93] dark:hover:text-white">Edit day</button></td>
                     </>}
-                    {tab === "advances" && <>
+                    {tab === "advances" && (() => {
+                      const ret = Number(r.amount) < 0;
+                      return <>
                       <td className="px-4 py-3 font-semibold">{empName(r.emp_id)}</td>
-                      <td className="px-4 py-3 text-right font-semibold tabular-nums">{money(r.amount)}</td>
+                      <td className={`px-4 py-3 text-right font-semibold tabular-nums ${ret ? "text-emerald-700 dark:text-success" : ""}`}>
+                        {ret ? `− ${money(-Number(r.amount))}` : money(r.amount)}
+                      </td>
                       <td className="px-4 py-3 text-muted dark:text-[#a89f93]">{String(r.date ?? "—")}</td>
                       <td className="px-4 py-3 text-muted dark:text-[#a89f93]">{MONTHS[Number(r.deduct_month)] ?? r.deduct_month} {String(r.deduct_year ?? "")}</td>
-                      <td className="px-4 py-3 text-muted dark:text-[#a89f93]">{String(r.note || "—")}</td>
-                      <td className="px-4 py-3">{r.settled ? <span className="text-[12px] font-semibold text-success">Yes</span> : <span className="text-[12px] font-semibold text-amber-strong dark:text-amber">No</span>}</td>
-                    </>}
+                      <td className="px-4 py-3 text-muted dark:text-[#a89f93]">{String((ret && r.note === "Advance returned" ? "" : r.note) || "—")}</td>
+                      <td className="px-4 py-3">
+                        {ret ? <span className="text-[12px] font-semibold text-emerald-700 dark:text-success">Returned</span>
+                          : r.settled ? <span className="text-[12px] font-semibold text-success">Settled</span>
+                          : <span className="text-[12px] font-semibold text-amber-strong dark:text-amber">Not settled</span>}
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-3 text-right">
+                        {ret && canManage && !r.settled ? <>
+                          <button onClick={() => openReturnEdit(r)}
+                            className="mr-1 rounded-full border border-line px-2.5 py-1 text-[11.5px] font-semibold hover:bg-panel dark:border-white/15 dark:hover:bg-white/10">
+                            <Pencil size={11} className="mr-1 inline" />Edit
+                          </button>
+                          <button onClick={() => removeReturn(r)} title="Take this return off"
+                            className="rounded-full border border-line px-2 py-1 text-[11.5px] font-semibold text-red-700 transition hover:bg-red-50 dark:border-white/15 dark:hover:bg-white/10">
+                            <Trash2 size={11} />
+                          </button>
+                        </> : null}
+                      </td>
+                      </>;
+                    })()}
                   </tr>
                 ))
               )}
@@ -419,6 +514,13 @@ export default function AttendancePage() {
         all={emps as RosterEmp[]}
         onClose={() => setEditing(null)}
         onDone={async (m) => { setEditing(null); await load("employees"); setMsg(m); }}
+      />
+
+      <AdvanceReturn
+        open={retOpen}
+        edit={retEdit}
+        onClose={() => { setRetOpen(false); setRetEdit(null); }}
+        onDone={async (m) => { setRetOpen(false); setRetEdit(null); setActErr(""); await load("advances"); setMsg(m); }}
       />
 
       {!isSupabaseConfigured && <p className="mt-4 text-center text-[12px] text-hint dark:text-[#8a8175]">Preview build · connect Supabase to load attendance.</p>}

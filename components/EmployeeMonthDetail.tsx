@@ -120,6 +120,10 @@ export default function EmployeeMonthDetail({
   const given = Number(row.given_days ?? 0);
   const cut = Number(row.advance_cut ?? row.advances ?? 0);
   const carried = Number(row.carried ?? 0);
+  /* H296: a return is a row with a minus amount — money given back, which
+     takes that much off the advance (and so puts it back on the pay). */
+  const advGiven = advs.reduce((t, a) => t + Math.max(0, Number(a.amount) || 0), 0);
+  const advBack = advs.reduce((t, a) => t + Math.max(0, -(Number(a.amount) || 0)), 0);
   const nextName = MONTHS[month === 12 ? 1 : month + 1];
   const mayEdit = canManage && !row.is_paid;
 
@@ -293,13 +297,21 @@ export default function EmployeeMonthDetail({
             <div className="overflow-hidden rounded-card border border-line dark:border-white/10">
               <table className="w-full text-[12.5px]">
                 <tbody className="divide-y divide-line dark:divide-white/[0.05]">
-                  {advs.map((a) => (
-                    <tr key={a.id}>
-                      <td className="px-3 py-2 text-muted dark:text-[#a89f93]">{a.date}</td>
-                      <td className="px-3 py-2 font-semibold tabular-nums">{rs(a.amount)}</td>
-                      <td className={`px-3 py-2 ${a.carried_from ? "font-semibold text-ink dark:text-[#e7e2d8]" : "text-muted dark:text-[#a89f93]"}`}>{a.note ?? ""}</td>
-                    </tr>
-                  ))}
+                  {advs.map((a) => {
+                    const back = Number(a.amount) < 0;
+                    return (
+                      <tr key={a.id}>
+                        <td className="px-3 py-2 text-muted dark:text-[#a89f93]">{a.date}</td>
+                        <td className={`whitespace-nowrap px-3 py-2 font-semibold tabular-nums ${back ? "text-emerald-700 dark:text-success" : ""}`}>
+                          {back ? `− ${rs(-Number(a.amount))}` : rs(a.amount)}
+                        </td>
+                        <td className={`px-3 py-2 ${a.carried_from ? "font-semibold text-ink dark:text-[#e7e2d8]" : "text-muted dark:text-[#a89f93]"}`}>
+                          {back && <span className="mr-1.5 font-semibold text-emerald-700 dark:text-success">Returned</span>}
+                          {a.note && !(back && a.note === "Advance returned") ? a.note : ""}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -340,6 +352,11 @@ export default function EmployeeMonthDetail({
               <span>Less advance{row.is_paid && carried > 0 ? ` (${rs(cut)} of ${rs(row.advances)})` : "s"}</span>
               <span className="tabular-nums">− {rs(cut)}</span>
             </div>
+            {advBack > 0 && (
+              <div className="text-[11.5px] text-emerald-700 dark:text-success">
+                {rs(advGiven)} given − {rs(advBack)} given back
+              </div>
+            )}
             <div className="flex justify-between border-t border-line pt-1.5 text-[14px] font-bold text-ink dark:border-white/10 dark:text-[#f4f1ea]">
               <span>Net payable</span><span className="tabular-nums">{rs(row.payable)}</span>
             </div>

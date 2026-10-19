@@ -497,15 +497,22 @@ export default function MyPortal() {
                 </p>
               ) : (
                 <dl className="text-[13px]">
-                  {advs.map((a, i) => (
-                    <div key={i} className="flex items-baseline justify-between gap-4 border-b border-line px-4 py-2.5 dark:border-white/[0.06] sm:px-5">
-                      <dt className="min-w-0">
-                        <span className="text-ink dark:text-[#e7e2d8]">{a.date}</span>
-                        {a.note && <span className="ml-2 text-muted dark:text-[#a89f93]">{a.note}</span>}
-                      </dt>
-                      <dd className="shrink-0 font-semibold tabular-nums">{rs(a.amount)}</dd>
-                    </div>
-                  ))}
+                  {advs.map((a, i) => {
+                    /* H296: a minus row is money you gave back — it comes off the advance. */
+                    const back = Number(a.amount) < 0;
+                    return (
+                      <div key={i} className="flex items-baseline justify-between gap-4 border-b border-line px-4 py-2.5 dark:border-white/[0.06] sm:px-5">
+                        <dt className="min-w-0">
+                          <span className="text-ink dark:text-[#e7e2d8]">{a.date}</span>
+                          {back && <span className="ml-2 font-semibold text-emerald-700">You gave back</span>}
+                          {a.note && !(back && a.note === "Advance returned") && <span className="ml-2 text-muted dark:text-[#a89f93]">{a.note}</span>}
+                        </dt>
+                        <dd className={`shrink-0 font-semibold tabular-nums ${back ? "text-emerald-700" : ""}`}>
+                          {back ? `− ${rs(-Number(a.amount))}` : rs(a.amount)}
+                        </dd>
+                      </div>
+                    );
+                  })}
                   <div className="flex items-baseline justify-between gap-4 bg-panel px-4 py-3 dark:bg-white/[0.04] sm:px-5">
                     <dt className="font-bold text-ink dark:text-[#f4f1ea]">Deducted this month</dt>
                     <dd className="shrink-0 font-extrabold tabular-nums text-amber-700">− {rs(advCut)}</dd>
