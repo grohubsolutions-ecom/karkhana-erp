@@ -38,7 +38,7 @@
  *     level and the Tax column read 0.00. From INV-20250026 (OwnEx's new
  *     system, Oct 2026) fuel is on every row. See parseOwnExInvoice.
  */
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Upload, Loader2, CheckCircle2, AlertTriangle, ShieldCheck } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { parseCsv, matchHeader, toNum } from "@/lib/csv";
@@ -462,16 +462,160 @@ async function readPdf(file: File): Promise<Parsed> {
 }
 
 /* ======================================================================== */
-/* `shopify` marks the Shopify follow-up of an import. It is reported on its own
-   line and never counted as the settlement being refused — see run(). */
-type Result = { ref: string; ok: boolean; report: Record<string, unknown>; shopify?: boolean };
+type Result = { ref: string; ok: boolean; report: Record<string, unknown> };
 
-/* Parcels per shopify-writeback call. One order costs about 1.5–2 s there
-   (the write, the tag, the audit row, and a 550 ms pause for Shopify's rate
-   limit), and the function is cut off at 150 s. All 122 parcels of
-   INV-20250026 in one call ran 3 minutes: the browser got a 504 after 150 s,
-   and 16 orders were never reached. 30 a call comes back in about a minute. */
+/* Parcels per shopify-writeback call. One order costs about 1.9 s there (the
+   write, the tag, the audit row, and a 550 ms pause for Shopify's rate limit),
+   and the function is cut off at 150 s. All 122 parcels of INV-20250026 in one
+   call ran 3 minutes: the browser got a 504 after 150 s, and 16 orders were
+   never reached. 30 a call comes back in about a minute. */
 const SHOPIFY_CHUNK = 30;
+/* The first "mark delivered" batch per store is small. A store whose Shopify
+   app lacks write_fulfillments refuses every order identically — TopShop
+   answered 56 of 56 on INV-20250027, 3 minutes spent learning one fact. */
+const SHOPIFY_PROBE = 5;
+
+/** One settlement's Shopify follow-up, shown on its own line. */
+type ShopLine = { ref: string; text: string; ok: boolean; running: boolean };
+
+/* SHOPIFY RUNS IN THE BACKGROUND.
+   INV-20250027 imported in about 3 seconds and then held this window for
+   6½ minutes: 104 orders marked paid at 1.9 s each, then 106 marked
+   delivered at 1.7 s each, one after the other — and 56 of those deliveries
+   were TopShop orders its Shopify app is not allowed to touch.
+
+   Now:
+     · the settlement is saved and shown as imported straight away;
+     · Shopify is queued and worked here while the app stays open — the
+       window can be closed, and the Finance page used;
+     · the stores run side by side — Shopify limits each shop separately, so
+       Little Minors and TopShop do not wait for one another — and in each
+       store "paid" and "delivered" run together, one order at a time each, at
+       the pace shopify-writeback keeps;
+     · a store that refuses "mark delivered" for want of permission is
+       stopped after one small batch and reported, not tried order by order.
+   Settlements queue behind one another, so a 95-CPR PostEx file does not
+   fire 95 jobs at three shops at once. Anything left over is finished by
+   Send again on the settlement — the function skips what it already did.
+
+   It lives here, outside the component, because the component only exists
+   while the CPR tab is open: switching to Payments would otherwise drop the
+   progress (and the leave-page warning) while the work carried on unseen. */
+const shopStore = {
+  lines: [] as ShopLine[],
+  queue: Promise.resolve() as Promise<void>,
+  subs: new Set<() => void>(),
+};
+function warnBeforeLeaving(e: BeforeUnloadEvent) { e.preventDefault(); e.returnValue = ""; }
+function setShopLines(f: (prev: ShopLine[]) => ShopLine[]) {
+  const was = shopStore.lines.some((l) => l.running);
+  shopStore.lines = f(shopStore.lines);
+  const now = shopStore.lines.some((l) => l.running);
+  if (typeof window !== "undefined" && was !== now) {
+    if (now) window.addEventListener("beforeunload", warnBeforeLeaving);
+    else window.removeEventListener("beforeunload", warnBeforeLeaving);
+  }
+  shopStore.subs.forEach((fn) => fn());
+}
+
+function queueShopify(cprRef: string, tracking: string[]) {
+  setShopLines((prev) => [...prev.filter((l) => l.ref !== cprRef),
+    { ref: cprRef, text: "Shopify: waiting to start…", ok: true, running: true }]);
+  shopStore.queue = shopStore.queue
+    .then(() => pushShopify(cprRef, tracking))
+    .catch((e) => setShopLines((prev) => [...prev.filter((l) => l.ref !== cprRef),
+      { ref: cprRef, ok: false, running: false,
+        text: `Shopify stopped: ${e instanceof Error ? e.message : String(e)}. The import is saved — press Send again on the settlement.` }]));
+}
+
+async function pushShopify(cprRef: string, tracking: string[]) {
+  if (!supabase) return;
+  const sb = supabase;
+  const put = (text: string, ok: boolean, running: boolean) =>
+    setShopLines((prev) => [...prev.filter((l) => l.ref !== cprRef), { ref: cprRef, text, ok, running }]);
+
+  // Which shop each parcel belongs to. Parcels we do not hold are left out —
+  // shopify-writeback could not find their order either.
+  const byStore = new Map<string, string[]>();
+  for (let k = 0; k < tracking.length; k += 300) {
+    const { data, error } = await sb.from("online_logistics")
+      .select("tracking_id,store_code").in("tracking_id", tracking.slice(k, k + 300));
+    if (error) throw new Error(error.message);
+    for (const r of (data ?? []) as { tracking_id: string; store_code: string | null }[]) {
+      const st = r.store_code || "?";
+      byStore.set(st, [...(byStore.get(st) ?? []), r.tracking_id]);
+    }
+  }
+  const total = 2 * [...byStore.values()].reduce((t, l) => t + l.length, 0);
+  if (!total) { put("Shopify: none of these parcels are in our records — nothing to update.", true, false); return; }
+
+  type Tally = { done: number; skipped: number; failed: number; lost: number; blocked: number; why: string[] };
+  const mk = (): Tally => ({ done: 0, skipped: 0, failed: 0, lost: 0, blocked: 0, why: [] });
+  const tally = { paid: mk(), deliver: mk() };
+  const refused = new Set<string>();
+  let handled = 0;
+  const tick = () => put(`Shopify: updating in the background — ${handled} of ${total}. ` +
+    "You can close this window; keep the app open until it finishes.", true, true);
+  tick();
+
+  /* Every store, and within a store "paid" and "delivered", run side by side —
+     at most two calls per shop at a time, well inside its rate limit. They are
+     different things in Shopify (a payment, a fulfillment event), and both add
+     the same tags, so working one order from both sides cannot clash; the
+     delivered pass still starts from the far end so they rarely meet. */
+  await Promise.all([...byStore.entries()].flatMap(([store, all]) => (["paid", "deliver"] as const).map(async (action) => {
+    const list = action === "deliver" ? [...all].reverse() : all;
+    {
+      const t = tally[action];
+      for (let k = 0; k < list.length;) {
+        const size = action === "deliver" && k === 0 ? SHOPIFY_PROBE : SHOPIFY_CHUNK;
+        const part = list.slice(k, k + size);
+        k += part.length;
+        const { data: sd, error: se } = await sb.functions.invoke("shopify-writeback", {
+          body: { action, tracking: part, dry_run: false, max: 200 },
+        });
+        handled += part.length;
+        if (se) {
+          t.lost += part.length;
+          if (!t.why.includes(se.message)) t.why.push(se.message);
+        } else {
+          const r = (sd ?? {}) as { closed?: number; skipped?: number; failed?: number;
+                                     sample?: { failed?: string }[] };
+          t.done += r.closed ?? 0; t.skipped += r.skipped ?? 0; t.failed += r.failed ?? 0;
+          const why = (r.sample?.find((x) => x.failed)?.failed ?? "").replace(/[.\s]+$/, "");
+          if (why && !t.why.includes(why) && !/access denied/i.test(why)) t.why.push(why);
+          if (action === "deliver" && !(r.closed ?? 0) && /access denied/i.test(why)) {
+            /* A missing permission, not a failure a retry could fix — counted
+               as "not tried", so Send again is not suggested for it. */
+            refused.add(store);
+            t.failed -= r.failed ?? 0;
+            t.blocked += (r.failed ?? 0) + (list.length - k);
+            handled += list.length - k;
+            k = list.length;
+          }
+        }
+        tick();
+      }
+    }
+  })));
+
+  const line = (label: string, t: Tally) =>
+    `${label} ${t.done}` +
+    (t.skipped ? ` · ${t.skipped} already done or not in Shopify` : "") +
+    (t.failed ? ` · ${t.failed} failed` : "") +
+    (t.lost ? ` · ${t.lost} not reached` : "") +
+    (t.blocked ? ` · ${t.blocked} not tried` : "");
+  const notes = [...tally.paid.why, ...tally.deliver.why];
+  if (refused.size) notes.push(`${[...refused].join(", ")}: the Shopify app is not allowed to mark deliveries ` +
+    "(needs the write_fulfillments permission)");
+  const bad = tally.paid.failed + tally.paid.lost + tally.deliver.failed + tally.deliver.lost + tally.deliver.blocked;
+  put(`Shopify: ${line("marked paid", tally.paid)}; ${line("marked delivered", tally.deliver)}.` +
+      (notes.length ? ` ${notes.join(". ")}.` : "") +
+      (tally.paid.failed + tally.paid.lost + tally.deliver.failed + tally.deliver.lost
+        ? " The import is saved — press Send again on the settlement to retry." : ""),
+      bad === 0, false);
+}
+
 
 export default function CprImport({ onDone }: { onDone?: () => void }) {
   const fileRef = useRef<HTMLInputElement>(null);
@@ -488,6 +632,15 @@ export default function CprImport({ onDone }: { onDone?: () => void }) {
   const [progress, setProgress] = useState("");
   const [checked, setChecked] = useState(false);
   const [committed, setCommitted] = useState(false);
+
+  // The Shopify follow-up of every import this session — see shopStore.
+  const [shopLines, setShopLinesView] = useState<ShopLine[]>(shopStore.lines);
+  useEffect(() => {
+    const fn = () => setShopLinesView(shopStore.lines);
+    shopStore.subs.add(fn); fn();
+    return () => { shopStore.subs.delete(fn); };
+  }, []);
+  const shopRunning = shopLines.some((l) => l.running);
 
   const all = (parsed?.batches ?? []).filter((b) => b.ref !== "__dupes__");
   const dupeNote = (parsed?.batches ?? []).find((b) => b.ref === "__dupes__")?.problem;
@@ -588,60 +741,21 @@ export default function CprImport({ onDone }: { onDone?: () => void }) {
          Cancelling a return is NOT done here. That decision stays with a person
          — see the panel on the settlement, which lists what the agents missed
          and waits to be told. */
-      /* IN BATCHES, AND REPORTED APART FROM THE IMPORT.
-         INV-20250026 imported cleanly and still showed "0 of 1 imported · 1
-         refused": the Shopify step timed out, its error went into this list
-         under the SAME settlement number, and the one-line-per-settlement view
-         below kept the last entry — the timeout — in place of the import.
-         Now the parcels go over in batches of SHOPIFY_CHUNK, the function's own
-         counts are added up, and the outcome is one separate Shopify line.
-         The function skips what it already did, so "Send again" on the
-         settlement finishes anything left over. */
+      /* SHOPIFY IS QUEUED, NOT AWAITED. The settlement is saved the moment the
+         call above returns; marking the orders paid and delivered in Shopify
+         carries on in the background (see pushShopify) and reports on its own
+         line, so the import no longer holds this window for 5–7 minutes. */
       if (!dry && !error && (data as { ok?: boolean })?.ok === true && deliveredNums.length) {
-        type Tally = { done: number; skipped: number; failed: number; lost: number; why: string };
-        const tally: Record<"paid" | "deliver", Tally> = {
-          paid:    { done: 0, skipped: 0, failed: 0, lost: 0, why: "" },
-          deliver: { done: 0, skipped: 0, failed: 0, lost: 0, why: "" },
-        };
-        const n = deliveredNums.length;
-        for (const action of ["paid", "deliver"] as const) {
-          const t = tally[action];
-          for (let k = 0; k < n; k += SHOPIFY_CHUNK) {
-            setProgress(`Shopify · ${b.ref || "this settlement"} · ${action === "paid" ? "marking paid" : "marking delivered"} ${Math.min(k + SHOPIFY_CHUNK, n)} of ${n}…`);
-            const part = deliveredNums.slice(k, k + SHOPIFY_CHUNK);
-            const { data: sd, error: se } = await supabase.functions.invoke("shopify-writeback", {
-              body: { action, tracking: part, dry_run: false, max: 200 },
-            });
-            if (se) { t.lost += part.length; if (!t.why) t.why = se.message; continue; }
-            const r = (sd ?? {}) as { closed?: number; skipped?: number; failed?: number;
-                                       sample?: { failed?: string }[] };
-            t.done += r.closed ?? 0; t.skipped += r.skipped ?? 0; t.failed += r.failed ?? 0;
-            if (!t.why) t.why = r.sample?.find((s) => s.failed)?.failed ?? "";
-          }
-        }
-        const line = (label: string, t: Tally) =>
-          `${label} ${t.done}` +
-          (t.skipped ? ` · ${t.skipped} already done or not in Shopify` : "") +
-          (t.failed ? ` · ${t.failed} failed` : "") +
-          (t.lost ? ` · ${t.lost} not reached` : "");
-        const bad = tally.paid.failed + tally.paid.lost + tally.deliver.failed + tally.deliver.lost;
-        const why = [tally.paid.why, tally.deliver.why].filter(Boolean)
-          .map((w) => w.replace(/[.\s]+$/, ""))
-          .filter((w, i, all) => all.indexOf(w) === i).join(" — ");
-        acc.push({ ref: b.ref, ok: bad === 0, shopify: true, report: {
-          shopify: `Shopify: ${line("marked paid", tally.paid)}; ${line("marked delivered", tally.deliver)}.` +
-                   (bad ? ` ${why ? why + ". " : ""}The import itself is saved — press Send again on the settlement to retry.` : ""),
-        } });
-        setResults([...acc]);
+        queueShopify(b.ref, deliveredNums);
       }
     }
     setBusy(false); setProgress("");
     if (dry) setChecked(acc.every((r) => r.ok));
-    else if (acc.some((r) => r.ok && !r.shopify)) { setCommitted(true); onDone?.(); }
+    else if (acc.some((r) => r.ok)) { setCommitted(true); onDone?.(); }
   }
 
   const passed = results.length > 0 && results.every((r) => r.ok);
-  const failed = results.filter((r) => !r.ok && !r.shopify);
+  const failed = results.filter((r) => !r.ok);
   const guardReady = selfDeclaring || (!!ref.trim() && !!dCount && !!dTotal);
 
   return (
@@ -652,6 +766,14 @@ export default function CprImport({ onDone }: { onDone?: () => void }) {
         {busy ? <Loader2 size={15} className="animate-spin" /> : <Upload size={15} />}
         Import settlement
       </button>
+      {/* Shopify still being updated after the window was closed — one tap
+          brings the progress back. */}
+      {shopRunning && !open && (
+        <button type="button" onClick={() => setOpen(true)}
+                className="inline-flex items-center gap-1.5 rounded-full border border-line px-3 py-1.5 text-[12px] font-semibold text-muted transition hover:bg-panel dark:border-white/15 dark:text-[#a89f93]">
+          <Loader2 size={13} className="animate-spin" /> Shopify updating…
+        </button>
+      )}
 
       <Modal open={open} onClose={() => !busy && setOpen(false)} wide title="Import courier settlement">
         {err && (
@@ -775,13 +897,8 @@ export default function CprImport({ onDone }: { onDone?: () => void }) {
                  pushed into this list — so importing one invoice successfully
                  read "1 of 2 passed · 1 refused", which looks like half the file
                  was rejected. Nothing had been. Keeping only the latest outcome
-                 per settlement makes the count mean what it says.
-                 The Shopify follow-up is kept OUT of that map: sharing the
-                 settlement's number, it used to replace the import's own line,
-                 so a Shopify timeout read as the settlement being refused. */
-              const latest = [...new Map(results.filter((r) => !r.shopify)
-                .map((r) => [r.ref || "—", r])).values()];
-              const shop = results.filter((r) => r.shopify);
+                 per settlement makes the count mean what it says. */
+              const latest = [...new Map(results.map((r) => [r.ref || "—", r])).values()];
               const bad = latest.filter((r) => !r.ok);
               return (
               <div className="mt-3">
@@ -803,19 +920,25 @@ export default function CprImport({ onDone }: { onDone?: () => void }) {
                     </div>
                   ))}
                 </div>
-                {shop.map((r, i) => (
-                  <div key={`shop-${i}`}
-                       className={`mt-2 flex items-start gap-2 rounded-card border px-2.5 py-1.5 text-[12px] ${
-                         r.ok ? "border-emerald-200 bg-emerald-50 text-emerald-900"
-                              : "border-amber-300 bg-amber-50 text-amber-900"}`}>
-                    {r.ok ? <CheckCircle2 size={13} className="mt-0.5 shrink-0 text-emerald-600" />
-                          : <AlertTriangle size={13} className="mt-0.5 shrink-0 text-amber-600" />}
-                    <span><span className="font-mono">{r.ref}</span> · {String(r.report.shopify ?? "")}</span>
-                  </div>
-                ))}
               </div>
               );
             })()}
+
+            {/* The Shopify follow-up, one line per settlement, apart from the
+                import's own result: sharing the settlement's number, it once
+                replaced that result and a Shopify timeout read as "refused". */}
+            {shopLines.map((l) => (
+              <div key={l.ref}
+                   className={`mt-2 flex items-start gap-2 rounded-card border px-2.5 py-1.5 text-[12px] ${
+                     l.running ? "border-line bg-panel text-ink dark:border-white/10 dark:bg-white/[0.04] dark:text-[#f4f1ea]"
+                     : l.ok ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+                            : "border-amber-300 bg-amber-50 text-amber-900"}`}>
+                {l.running ? <Loader2 size={13} className="mt-0.5 shrink-0 animate-spin" />
+                 : l.ok ? <CheckCircle2 size={13} className="mt-0.5 shrink-0 text-emerald-600" />
+                        : <AlertTriangle size={13} className="mt-0.5 shrink-0 text-amber-600" />}
+                <span><span className="font-mono">{l.ref}</span> · {l.text}</span>
+              </div>
+            ))}
 
             {/* Wraps on a phone: with justify-end the overflow went off the LEFT
                 edge, where it could not be scrolled to, hiding Close. */}
