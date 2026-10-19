@@ -2,8 +2,13 @@
 import { X } from "lucide-react";
 import { useEffect } from "react";
 
-export default function Modal({ open, onClose, title, subtitle, children, wide }:
-  { open: boolean; onClose: () => void; title: string; subtitle?: string; children: React.ReactNode; wide?: boolean }) {
+/** `wide` and `xwide` are two steps up from the default width. `xwide` exists
+ *  for a modal showing a table that has to be read across — the factory day
+ *  sheet preview turns it on only while the parsed lines are on screen, and
+ *  back off for the result, so the box is wide exactly when there is something
+ *  wide in it. */
+export default function Modal({ open, onClose, title, subtitle, children, wide, xwide }:
+  { open: boolean; onClose: () => void; title: string; subtitle?: string; children: React.ReactNode; wide?: boolean; xwide?: boolean }) {
   useEffect(() => {
     const esc = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     if (open) window.addEventListener("keydown", esc);
@@ -18,7 +23,7 @@ export default function Modal({ open, onClose, title, subtitle, children, wide }
           than guessing which input on the page it means. */}
       <div onClick={(e) => e.stopPropagation()}
         role="dialog" aria-modal="true" aria-label={title}
-        className={`max-h-[92dvh] w-full overflow-y-auto rounded-t-card border border-line bg-surface p-5 shadow-xl sm:rounded-card dark:border-white/[0.08] dark:bg-[#201c17] ${wide ? "sm:max-w-3xl" : "sm:max-w-lg"}`}>
+        className={`max-h-[92dvh] w-full overflow-y-auto rounded-t-card border border-line bg-surface p-5 shadow-xl sm:rounded-card dark:border-white/[0.08] dark:bg-[#201c17] ${xwide ? "sm:max-w-6xl" : wide ? "sm:max-w-3xl" : "sm:max-w-lg"}`}>
         <div className="mb-4 flex items-start justify-between gap-3">
           <div>
             <h3 className="text-[17px] font-extrabold tracking-tight text-ink dark:text-[#f4f1ea]">{title}</h3>
@@ -32,10 +37,16 @@ export default function Modal({ open, onClose, title, subtitle, children, wide }
   );
 }
 
-export function Field({ label, children }: { label: string; children: React.ReactNode }) {
+/** `hint` is the one-line "what does this field mean" that sits under the
+ *  label, before the control. Optional: most fields do not need one, and a
+ *  field that explains itself should not have one. */
+export function Field({ label, children, hint }: { label: string; children: React.ReactNode; hint?: string }) {
   return (
     <label className="block text-[12.5px] font-semibold text-ink dark:text-[#e7e2d8]">
       {label}
+      {hint && (
+        <span className="mt-0.5 block text-[11.5px] font-normal text-hint dark:text-[#8a8175]">{hint}</span>
+      )}
       <div className="mt-1.5">{children}</div>
     </label>
   );
