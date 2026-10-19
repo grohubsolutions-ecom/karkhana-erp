@@ -37,24 +37,17 @@
  *   leaver in a payroll total is a wrong number. Here, somebody who left last
  *   month may still owe an advance, and a person you cannot find is a person
  *   whose record gets typed in a second time.
- *
- * ON A PHONE (Oct 2026) — nothing below 768px reaches the computer screen.
- *   The table is nine columns and 1,080px wide, so on a phone each person is a
- *   card: the name as the title, net to pay as the one big figure, and the
- *   number turned into a Call and a WhatsApp button, because on a phone a
- *   number is not something you read — it is the next thing you do.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Users, UserPlus, Pencil, Wallet, Store, Scale, Phone, MessageCircle } from "lucide-react";
+import { Users, UserPlus, UserMinus, Pencil, Wallet, Store, Scale, Trash2 } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import Modal, { Field, inputCls, btnPrimary, btnGhost } from "@/components/Modal";
 import {
   Shell, PageHeader, StatCards, DataTable, Pill, Select, PreviewNote, SourceNote,
-  useIsPhone, useEmployees, isHeadOffice, isHourly, attHours, money, num, text,
+  useEmployees, isHeadOffice, isHourly, attHours, money, num, text,
   monthKey, monthBounds, monthLabel, fetchAll,
   type Employee, type Col, type Row,
 } from "@/components/retail/kit";
-import { useShopScope } from "@/lib/retailShop";
 import { EmployeeStatement, balancesByEmployee } from "@/components/retail/LedgerScreen";
 
 type Scope = "shops" | "ho";
@@ -67,32 +60,16 @@ const BLANK = {
 /** Hours to "7h 30m", so a figure that pays money is readable at a glance. */
 const hm = (h: number) => `${Math.floor(h)}h ${Math.round((h - Math.floor(h)) * 60)}m`;
 
-/** THE NUMBER, THE WAY WHATSAPP INSISTS ON HAVING IT.
- *
- *  wa.me will not open a chat on a local number: it wants the country code, no
- *  plus and no leading zero. Staff numbers are typed into this screen the way
- *  they are said out loud — "0301-234 5678", "0321 4567890" — so the spaces,
- *  the dashes and that first 0 come off and 92 goes on. A number already stored
- *  internationally (+92…, 0092…) is left alone rather than given a second 92.
- *
- *  `tel:` deliberately does NOT use this. The dialler understands a local
- *  number, and the phone's own contacts match on the local form, so rewriting
- *  it there would lose the name the shop has saved for the person. */
-function waNumber(raw: string) {
-  const d = String(raw).replace(/\D/g, "").replace(/^00/, "");
-  return d.startsWith("92") ? d : "92" + d.replace(/^0+/, "");
-}
-
-/** The buttons along the bottom of a phone card. 44px because they are the
- *  reason the card exists and two of them place a call. */
-const cardBtn = "flex min-h-[44px] min-w-0 items-center justify-center gap-1.5 rounded-full border border-line bg-surface px-2 text-[13px] font-semibold text-ink transition active:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white";
-
 export default function EmployeesScreen({ scope }: { scope: Scope }) {
-  const phone = useIsPhone();
   const { allEmployees, branches, reloadEmployees } = useEmployees(scope);
   const [q, setQ] = useState("");
   const [showInactive, setShowInactive] = useState(false);
   const [editing, setEditing] = useState<Employee | null>(null);
+  /* What this person would take with them. Counted before anything is offered,
+     because the two numbers decide which button they get. */
+  const [history, setHistory] = useState<{ ledger: number; attendance: number; salary: number; wages: number } | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [confirmDel, setConfirmDel] = useState(false);
   const [form, setForm] = useState({ ...BLANK });
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -111,17 +88,6 @@ export default function EmployeesScreen({ scope }: { scope: Scope }) {
     () => branches.filter((b) => (scope === "ho" ? isHeadOffice(b) : !isHeadOffice(b))),
     [branches, scope]
   );
-
-  /* THE SHOP, from the left menu — Head Office excepted, which is not a shop.
-     It narrows the LIST only. The form's branch dropdown keeps the full
-     `pickable`, because moving somebody from Top Shop to FC DHA is a thing
-     that happens and a form that could not express it would send people back
-     to the database. */
-  const shop = useShopScope(branches);
-  const listed = useMemo(() => {
-    if (scope === "ho" || !shop.ids) return null;
-    return new Set(shop.ids);
-  }, [scope, shop.ids]);
   const branchName = useCallback(
     (id: unknown) => branches.find((b) => b.id === Number(id))?.name ?? "—",
     [branches]
@@ -141,25 +107,15 @@ export default function EmployeesScreen({ scope }: { scope: Scope }) {
     if (ids.length === 0) { setLedger([]); setAtt([]); setLoading(false); return; }
     setLoading(true);
     const [from, to] = monthBounds(month);
-    /* BOTH ARE ORDERED ON id, WHICH IS WHAT MAKES THE PAGING SOUND.
-       fetchAll pages with .range() — LIMIT/OFFSET, one request per page — and a
-       query with no total order lets Postgres return the rows in a different
-       order each time, so a row can come back on two pages or on none. Every
-       figure these two feed is a SUM: a duplicated advance makes somebody look
-       like they owe money they do not, and a dropped one hides money they do.
-       Neither read had an ORDER BY to preserve and neither feeds an on-screen
-       order — both are reduced to per-person totals — so `id` alone is the whole
-       order, and nothing about this screen looks different. */
     const [led, atn] = await Promise.all([
       fetchAll<Row>((a, b) =>
         supabase!.from("retail_employee_ledger")
           .select("employee_id,advance,purchase_credit,paid")
-          .in("employee_id", ids).order("id", { ascending: true }).range(a, b)),
+          .in("employee_id", ids).range(a, b)),
       fetchAll<Row>((a, b) =>
         supabase!.from("retail_attendance")
           .select("employee_id,att_date,time_in,time_out")
-          .in("employee_id", ids).gte("att_date", from).lte("att_date", to)
-          .order("id", { ascending: true }).range(a, b)),
+          .in("employee_id", ids).gte("att_date", from).lte("att_date", to).range(a, b)),
     ]);
     if (led.error || atn.error) setErr(led.error || atn.error);
     setLedger(led.rows);
@@ -195,10 +151,9 @@ export default function EmployeesScreen({ scope }: { scope: Scope }) {
   const rows = useMemo(() => {
     const needle = q.trim().toLowerCase();
     return allEmployees
-      .filter((e) => !listed || listed.has(Number(e.branch_id)))
       .filter((e) => showInactive || e.active !== false)
       .filter((e) => !needle || e.name.toLowerCase().includes(needle) || (e.designation ?? "").toLowerCase().includes(needle));
-  }, [allEmployees, q, showInactive, listed]);
+  }, [allEmployees, q, showInactive]);
 
   const totals = useMemo(() => {
     const sal = rows.reduce((t, e) => t + earned(e), 0);
@@ -219,11 +174,14 @@ export default function EmployeesScreen({ scope }: { scope: Scope }) {
 
   function startAdd() {
     setEditing(null);
+    setHistory(null); setConfirmDel(false);
     setForm({ ...BLANK, branch_id: pickable[0] ? String(pickable[0].id) : "" });
     setErr(""); setOpen(true);
   }
   function startEdit(e: Employee) {
     setEditing(e);
+    setHistory(null); setConfirmDel(false);
+    loadHistory(e);
     setForm({
       name: e.name ?? "", branch_id: e.branch_id == null ? "" : String(e.branch_id),
       designation: e.designation ?? "", phone: e.phone ?? "",
@@ -233,6 +191,63 @@ export default function EmployeesScreen({ scope }: { scope: Scope }) {
       active: e.active !== false,
     });
     setErr(""); setOpen(true);
+  }
+
+  /** WHAT WOULD BE LOST. Four counts, because the answer governs whether a
+   *  hard delete is offered at all:
+   *
+   *    retail_attendance   has a foreign key ON DELETE CASCADE, so deleting
+   *                        the person deletes every attendance day they ever
+   *                        had, silently and immediately.
+   *    retail_employee_ledger, retail_salary_payments, retail_wage_payments
+   *                        carry employee_id but have NO foreign key. Deleting
+   *                        the person does not touch those rows — it orphans
+   *                        them. They stay in the table, pointing at an id
+   *                        that no longer exists, invisible on every screen
+   *                        that joins through employees. For SONIA that is 38
+   *                        ledger entries of real advances.
+   *
+   *  So history is counted first and a person who has any is ENDED, not
+   *  deleted. Ending is what this app already means by a leaver: the rows stay
+   *  readable, the person drops out of payroll and the pickers. */
+  const loadHistory = useCallback(async (e: Employee) => {
+    if (!supabase) { setHistory(null); return; }
+    setChecking(true);
+    const one = async (table: string) => {
+      const { count } = await supabase!.from(table)
+        .select("id", { count: "exact", head: true }).eq("employee_id", e.id);
+      return count ?? 0;
+    };
+    const [ledger, attendance, salary, wages] = await Promise.all([
+      one("retail_employee_ledger"), one("retail_attendance"),
+      one("retail_salary_payments"), one("retail_wage_payments"),
+    ]);
+    setHistory({ ledger, attendance, salary, wages });
+    setChecking(false);
+  }, []);
+
+  const histTotal = history ? history.ledger + history.attendance + history.salary + history.wages : 0;
+
+  /** End, or bring back. The one-click action for anybody with a past. */
+  async function setActive(e: Employee, active: boolean) {
+    if (!supabase) { setErr("Not connected."); return; }
+    setSaving(true); setErr("");
+    const { error } = await supabase.from("retail_employees").update({ active }).eq("id", e.id);
+    setSaving(false);
+    if (error) { setErr(error.message); return; }
+    setOpen(false); reloadEmployees();
+  }
+
+  /** The real delete, offered only to a record with no history behind it —
+   *  somebody added by mistake a minute ago. */
+  async function hardDelete(e: Employee) {
+    if (!supabase) { setErr("Not connected."); return; }
+    if (histTotal > 0) { setErr("This person has history — end them instead."); return; }
+    setSaving(true); setErr("");
+    const { error } = await supabase.from("retail_employees").delete().eq("id", e.id);
+    setSaving(false);
+    if (error) { setErr(error.message); return; }
+    setConfirmDel(false); setOpen(false); reloadEmployees();
   }
 
   async function save() {
@@ -297,72 +312,6 @@ export default function EmployeesScreen({ scope }: { scope: Scope }) {
       ) },
   ];
 
-  /* ── THE PHONE CARD ──────────────────────────────────────────────────────
-   * The automatic card would get the title and the lead figure right and then
-   * have nowhere to put the two buttons or the phone number — a `tel:` link is
-   * not a labelled pair — so this screen hands DataTable its own card.
-   *
-   * What a shop manager wants off this screen on a phone, in order: whose
-   * record is this, what do I hand them, do they owe anything, and can I ring
-   * them. So: name, net to pay as the one big figure, the pay type and any
-   * advance as pills, and four full-size buttons.
-   *
-   * Hours are kept for hourly staff ("7h 30m this month") because that figure
-   * IS their wage — the rate alone does not say what they earned.
-   */
-  const empCard = (e: Employee) => {
-    const o = owed(e);
-    const ph = (e.phone ?? "").trim();
-    return (
-      <div className="rounded-card border border-line bg-surface p-3.5 dark:border-white/[0.06] dark:bg-[#201c17]">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0 flex-1">
-            <div className="truncate text-[15.5px] font-extrabold text-ink dark:text-[#f4f1ea]">{e.name}</div>
-            <div className="mt-0.5 truncate text-[12.5px] text-muted dark:text-[#a89f93]">
-              {text(e.designation)} · {branchName(e.branch_id)}
-            </div>
-          </div>
-          <div className="flex-none text-right">
-            <div className="text-[11px] uppercase tracking-wide text-hint dark:text-[#8a8175]">Net to pay</div>
-            <div className="text-[16px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">{money(earned(e) - o)}</div>
-          </div>
-        </div>
-
-        <div className="mt-2 flex flex-wrap items-center gap-1.5">
-          {e.active === false && <Pill>Left</Pill>}
-          {isHourly(e)
-            ? <Pill tone="warn">{e.hourly_rate == null ? "Hourly" : `${money(e.hourly_rate)}/hr`}</Pill>
-            : <Pill tone="info">{money(e.monthly_salary)}/month</Pill>}
-          {isHourly(e) && <span className="text-[12px] text-muted dark:text-[#a89f93]">{hm(hours[e.id] ?? 0)} this month</span>}
-          {o > 0.001 && <Pill tone="bad">{money(o)} owed</Pill>}
-        </div>
-
-        <div className="mt-3 grid grid-cols-2 gap-2 border-t border-line pt-3 dark:border-white/[0.06]">
-          {ph ? (
-            <>
-              {/* The raw number for the dialler, the 92… form for wa.me. The
-                  Call button is labelled with the number itself, so the card
-                  still SHOWS what the table's Phone column showed and the thing
-                  you read is the thing you press. */}
-              <a href={`tel:${ph}`} className={cardBtn}>
-                <Phone size={14} className="flex-none" /> <span className="truncate">{ph}</span>
-              </a>
-              <a href={`https://wa.me/${waNumber(ph)}`} target="_blank" rel="noopener noreferrer" className={cardBtn}>
-                <MessageCircle size={14} className="flex-none" /> WhatsApp
-              </a>
-            </>
-          ) : (
-            <p className="col-span-2 text-center text-[12px] text-hint dark:text-[#8a8175]">
-              No phone number on file — add one with Edit and this becomes a call button.
-            </p>
-          )}
-          <button onClick={() => setAccountFor(e)} className={cardBtn}>Account</button>
-          <button onClick={() => startEdit(e)} className={cardBtn}><Pencil size={14} /> Edit</button>
-        </div>
-      </div>
-    );
-  };
-
   return (
     <Shell>
       <PageHeader
@@ -378,9 +327,7 @@ export default function EmployeesScreen({ scope }: { scope: Scope }) {
       <div className="mt-5 flex flex-wrap items-center gap-2">
         <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search name or designation"
           className="min-w-[200px] flex-1 rounded-full border border-line bg-surface px-4 py-2 text-[13px] text-ink outline-none transition focus:border-ink/30 dark:border-white/10 dark:bg-white/[0.06] dark:text-white sm:max-w-xs" />
-        {/* Full width once it has wrapped onto its own line, rather than a
-            short pill floating at the left edge. */}
-        <Select value={showInactive ? "all" : "active"} onChange={(v) => setShowInactive(v === "all")} className="max-md:w-full">
+        <Select value={showInactive ? "all" : "active"} onChange={(v) => setShowInactive(v === "all")}>
           <option value="active">Active only</option>
           <option value="all">Including left</option>
         </Select>
@@ -389,23 +336,8 @@ export default function EmployeesScreen({ scope }: { scope: Scope }) {
       {err && <p className="mt-4 text-[12.5px] font-semibold text-danger">{err}</p>}
 
       <DataTable cols={cols} rows={rows} loading={loading} minWidth={1080}
-        card={empCard}
         empty={`No ${scope === "ho" ? "head office" : "shop"} employees yet — add the first one above.`}
-        footer={phone ? (
-          /* The nine-column total row has four cells of its own; squeezed into
-             390px it wraps into something nobody can read. Same three figures,
-             stacked, with the one that gets handed over biggest. */
-          <tr className="text-ink dark:text-[#f4f1ea]">
-            <td className="px-3.5 py-3">
-              <div className="text-[12.5px] font-bold">{rows.length} staff · salary {money(totals.sal)}</div>
-              <div className="text-[11.5px] font-semibold text-danger">{money(totals.ow)} advance owed</div>
-            </td>
-            <td className="px-3.5 py-3 text-right">
-              <div className="text-[11px] uppercase tracking-wide text-hint dark:text-[#8a8175]">Net to pay</div>
-              <div className="text-[16px] font-extrabold tabular-nums">{money(totals.net)}</div>
-            </td>
-          </tr>
-        ) : (
+        footer={
           <tr className="text-ink dark:text-[#f4f1ea]">
             {/* The salary total is written into the label rather than under
                 "Rate": adding up hourly rates and monthly salaries in one
@@ -417,7 +349,7 @@ export default function EmployeesScreen({ scope }: { scope: Scope }) {
             <td className="px-4 py-3 text-right font-bold tabular-nums">{money(totals.net)}</td>
             <td className="px-4 py-3" />
           </tr>
-        )} />
+        } />
 
       <SourceNote>
         Pay type decides how a month is valued. <strong>Monthly</strong> pays the full salary, flat — days
@@ -432,18 +364,9 @@ export default function EmployeesScreen({ scope }: { scope: Scope }) {
       <Modal open={open} onClose={() => setOpen(false)}
         title={editing ? `Edit ${editing.name}` : "Add employee"}
         subtitle={editing ? "Changes apply from now on — months already paid are not recalculated." : undefined}>
-        {/* ONE COLUMN ON A PHONE.
-            Six fields in three pairs is right at 512px and wrong at 390px:
-            "Designation" and "Monthly salary" both lose their labels to an
-            ellipsis, and a half-width select is a 170px target. `md:` leaves
-            every width above 767.98px exactly as it was.
-
-            inputMode is the other half of it. These are the money fields, and
-            on a phone the difference between the letter keyboard and the
-            numeric keypad is the difference between four taps and twelve. */}
         <div className="space-y-3.5">
           <Field label="Name"><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className={inputCls} autoFocus /></Field>
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+          <div className="grid grid-cols-2 gap-3">
             <Field label={scope === "ho" ? "Office" : "Branch"}>
               <select value={form.branch_id} onChange={(e) => setForm({ ...form, branch_id: e.target.value })} className={inputCls}>
                 <option value="">—</option>
@@ -452,16 +375,8 @@ export default function EmployeesScreen({ scope }: { scope: Scope }) {
             </Field>
             <Field label="Designation"><input value={form.designation} onChange={(e) => setForm({ ...form, designation: e.target.value })} className={inputCls} /></Field>
           </div>
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-            <Field label="Phone">
-              {/* The keypad with + and * on it, and the field the browser will
-                  offer a saved number to. This number becomes the Call and
-                  WhatsApp buttons on the card, so a typo here costs a call.
-                  No placeholder: it would show on the computer too, and the rule
-                  is that the computer screen does not change. */}
-              <input value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })}
-                type="tel" inputMode="tel" autoComplete="tel" className={inputCls} />
-            </Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Phone"><input value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} className={inputCls} /></Field>
             <Field label="Pay type">
               <select value={form.pay_type} onChange={(e) => setForm({ ...form, pay_type: e.target.value })} className={inputCls}>
                 <option value="monthly">Monthly — full salary</option>
@@ -469,22 +384,82 @@ export default function EmployeesScreen({ scope }: { scope: Scope }) {
               </select>
             </Field>
           </div>
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-            <Field label="Monthly salary"><input type="number" inputMode="decimal" value={form.monthly_salary} onChange={(e) => setForm({ ...form, monthly_salary: e.target.value })} className={inputCls} /></Field>
-            {/* decimal, not numeric: an hourly rate is routinely 187.5. */}
-            <Field label="Hourly rate"><input type="number" inputMode="decimal" value={form.hourly_rate} onChange={(e) => setForm({ ...form, hourly_rate: e.target.value })} className={inputCls} placeholder="—" disabled={form.pay_type !== "hourly"} /></Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Monthly salary"><input type="number" value={form.monthly_salary} onChange={(e) => setForm({ ...form, monthly_salary: e.target.value })} className={inputCls} /></Field>
+            <Field label="Hourly rate"><input type="number" value={form.hourly_rate} onChange={(e) => setForm({ ...form, hourly_rate: e.target.value })} className={inputCls} placeholder="—" disabled={form.pay_type !== "hourly"} /></Field>
           </div>
           <label className="flex items-center gap-2.5 text-[13px] font-semibold text-ink dark:text-[#e7e2d8]">
             <input type="checkbox" checked={form.active} onChange={(e) => setForm({ ...form, active: e.target.checked })} className="h-4 w-4 accent-[#141414] dark:accent-white" />
             Still working here
           </label>
           {err && <p className="text-[12.5px] font-semibold text-danger">{err}</p>}
-          {/* Full width and stacked on a phone, with Save at the bottom where
-              the thumb is. Cancel sitting beside it at half width is how a
-              filled-in form gets thrown away by accident. */}
-          <div className="flex justify-end gap-2 pt-1 max-md:flex-col">
-            <button onClick={() => setOpen(false)} className={`${btnGhost} max-md:w-full`}>Cancel</button>
-            <button onClick={save} disabled={saving} className={`${btnPrimary} max-md:w-full`}>{saving ? "Saving…" : editing ? "Save changes" : "Add employee"}</button>
+
+          {/* ── REMOVING SOMEBODY ──────────────────────────────────────────
+              Which button appears is decided by what they would take with
+              them, not by a preference. Attendance cascades on delete and the
+              ledger does not even have a foreign key, so deleting a person
+              with a past destroys their attendance and leaves their advances
+              behind as rows belonging to nobody. Anybody with history is
+              therefore ended, which is what a leaver already means here: the
+              rows stay readable and they drop out of payroll and the pickers.
+              A hard delete is offered only where there is genuinely nothing
+              to lose. */}
+          {editing && (
+            <div className="rounded-xl2 border border-line bg-panel/50 p-3.5 dark:border-white/[0.06] dark:bg-white/[0.03]">
+              {checking ? (
+                <p className="text-[12.5px] text-muted dark:text-[#a89f93]">Checking what {editing.name} has on record…</p>
+              ) : history && histTotal > 0 ? (
+                <>
+                  <p className="text-[12.5px] leading-relaxed text-muted dark:text-[#a89f93]">
+                    <strong className="text-ink dark:text-[#e7e2d8]">{editing.name}</strong> has{" "}
+                    {[history.ledger && `${history.ledger} ledger entr${history.ledger === 1 ? "y" : "ies"}`,
+                      history.attendance && `${history.attendance} attendance day${history.attendance === 1 ? "" : "s"}`,
+                      history.salary && `${history.salary} salary payment${history.salary === 1 ? "" : "s"}`,
+                      history.wages && `${history.wages} wage payment${history.wages === 1 ? "" : "s"}`,
+                    ].filter(Boolean).join(", ")}. Deleting the record would wipe the attendance and leave
+                    the rest with nobody attached, so it is not offered — <strong>end</strong> them instead and
+                    the history stays readable.
+                  </p>
+                  <div className="mt-2.5 flex flex-wrap gap-2">
+                    {editing.active === false ? (
+                      <button onClick={() => setActive(editing, true)} disabled={saving}
+                        className={`${btnGhost} !text-success`}>Bring back to the payroll</button>
+                    ) : (
+                      <button onClick={() => setActive(editing, false)} disabled={saving}
+                        className={`${btnGhost} !text-danger`}><UserMinus size={14} /> End {editing.name}</button>
+                    )}
+                  </div>
+                </>
+              ) : history ? (
+                <>
+                  <p className="text-[12.5px] leading-relaxed text-muted dark:text-[#a89f93]">
+                    Nothing is recorded against <strong className="text-ink dark:text-[#e7e2d8]">{editing.name}</strong> —
+                    no ledger, attendance, salary or wages — so this record can be removed outright.
+                  </p>
+                  <div className="mt-2.5 flex flex-wrap items-center gap-2">
+                    {confirmDel ? (
+                      <>
+                        <span className="text-[12.5px] font-semibold text-danger">Delete for good?</span>
+                        <button onClick={() => hardDelete(editing)} disabled={saving}
+                          className="rounded-full bg-danger px-3.5 py-1.5 text-[12.5px] font-semibold text-white transition hover:opacity-90 disabled:opacity-50">
+                          {saving ? "Deleting…" : "Yes, delete"}
+                        </button>
+                        <button onClick={() => setConfirmDel(false)} className={btnGhost}>Keep</button>
+                      </>
+                    ) : (
+                      <button onClick={() => setConfirmDel(true)} className={`${btnGhost} !text-danger`}>
+                        <Trash2 size={14} /> Delete this record
+                      </button>
+                    )}
+                  </div>
+                </>
+              ) : null}
+            </div>
+          )}
+
+          <div className="flex justify-end gap-2 pt-1">
+            <button onClick={() => setOpen(false)} className={btnGhost}>Cancel</button>
+            <button onClick={save} disabled={saving} className={btnPrimary}>{saving ? "Saving…" : editing ? "Save changes" : "Add employee"}</button>
           </div>
           {!isSupabaseConfigured && <p className="text-center text-[12px] text-hint">Preview build — nothing will be saved.</p>}
         </div>

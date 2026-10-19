@@ -51,40 +51,18 @@
  * SCOPE
  *   One branch at a time, always. A running balance across two shops is not a
  *   running balance of anything.
- *
- * ON A PHONE  (Oct 2026 — none of it reaches the computer site)
- *   This is the screen that gets opened on a phone more than any other, by
- *   somebody standing at the till at closing time doing three things: find
- *   today, type what is in the drawer, read the difference. Sixteen columns
- *   across 1,180px is not a grid at 390px, so below 768px each day is a card
- *   instead — see DayCard. The date is its title, the cash difference is its one
- *   big figure, a coloured left edge says counted-and-clear / counted-and-out /
- *   not-counted before anything is read, and the count box is on the card beside
- *   an "Edit day" button rather than a tap deeper inside the editor. Every figure
- *   stays tappable, as on the computer, because a total nobody can explain is a
- *   total nobody trusts — each one inside a 44px box that is GROWN INTO ITS LINE,
- *   never hung outside its slot on a negative margin, because the slot a pair
- *   sits in is `overflow: hidden` and would clip the half that hangs out. See
- *   `fig` in DayCard; it is the one thing on this card that is easy to get wrong
- *   twice.
- *
- *   The table, its sticky head, its column highlight and its totals row are
- *   byte-for-byte what they were from 768px up; the two layouts are separate
- *   branches and neither renders at the other's width.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Wallet, Banknote, CreditCard, Receipt, Smartphone, Landmark, Coins, HandCoins,
+  Wallet, Banknote, CreditCard, Receipt, Smartphone, Landmark, Coins, HandCoins, Trash2,
 } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import Modal, { Field, inputCls, btnPrimary, btnGhost } from "@/components/Modal";
 import {
   Shell, PageHeader, StatCards, DataTable, Pill, Select, PreviewNote, SourceNote,
-  CardList, RowCard, useIsPhone,
-  useBranches, money, moneyOrDash, num, text, today, iso, fetchAll, fetchKeyset, Diff,
+  useBranches, money, moneyOrDash, num, text, today, iso, fetchAll, Diff,
   type Row, type Col,
 } from "@/components/retail/kit";
-import { useScopedBranchId } from "@/lib/retailShop";
 
 /* ── what each number is, in words ───────────────────────────────────────────
  * Ported from CB_FIELDS. A total nobody can explain is a total nobody trusts,
@@ -135,7 +113,7 @@ type Book = {
   updated_at?: string | null;
 };
 
-type SaleLine = { id?: number; sale_date: string; sales: number | null; sales_amount: number | null; payment_method: string | null; quantity: number | null };
+type SaleLine = { sale_date: string; sales: number | null; sales_amount: number | null; payment_method: string | null; quantity: number | null };
 type ExpLine = { expense_date: string; amount: number | null; txn_type: string | null; category: string | null };
 
 /** What Nimbus reported for a day, before any manual override. */
@@ -271,14 +249,7 @@ const TD = "px-2.5 py-2 text-right tabular-nums whitespace-nowrap";
 
 export default function CashBookPage() {
   const { branches } = useBranches();
-  const phone = useIsPhone();
-  /* THE SHOP, shared with the left menu. A cash book is one shop's cash
-     drawer, so this screen takes the shop's single branch — and when the shop
-     is Top Shop (six drawers, no combined answer) the dropdown narrows to its
-     six and opens on the first. */
-  const { id: bidStr, list: pickable, shop } = useScopedBranchId(branches);
-  const bid = bidStr ? Number(bidStr) : null;
-  const setBid = shop.set;
+  const [bid, setBid] = useState<number | null>(null);
 
   const [days, setDays] = useState<Day[]>([]);
   const [basePrev, setBasePrev] = useState(0);
@@ -291,11 +262,15 @@ export default function CashBookPage() {
   const [dayRow, setDayRow] = useState<CBRow | null>(null);
   const [hiCol, setHiCol] = useState<number | null>(null);
 
-  /* Landing on the first shop is now useScopedBranchId's job, and it also
-     stops this sitting on a shop that has gone from the list. Inactive shops
-     stay pickable: a closed branch still has a cash book worth reading back. */
-  const chains = useMemo(
-    () => [...new Set(pickable.map((b) => b.chain ?? "").filter(Boolean))], [pickable]);
+  /* Land on a shop as soon as there is one, and never sit on a shop that has
+     gone from the list. Inactive shops are kept: a closed branch still has a
+     cash book worth reading back. */
+  useEffect(() => {
+    if (!branches.length) return;
+    setBid((cur) => (cur && branches.some((b) => b.id === cur) ? cur : branches[0].id));
+  }, [branches]);
+
+  const chains = useMemo(() => [...new Set(branches.map((b) => b.chain ?? "").filter(Boolean))], [branches]);
 
   const load = useCallback(async () => {
     if (!isSupabaseConfigured || !supabase || !bid) { setLoading(false); return; }
@@ -331,15 +306,11 @@ export default function CashBookPage() {
        lines here is a wrong cash position that looks entirely plausible, so
        this pages. Ordered by id because an unordered .range() may repeat or
        skip rows across pages. */
-    /* Keyset rather than OFFSET: see fetchKeyset in the kit. One shop over 399
-       days is small enough today (measured 10 ms a page) but it grows every day,
-       and OFFSET paging grows with the square of the table — this one stays
-       flat. `id` is selected because it is the cursor. */
-    const { rows: sales, error: salesErr } = await fetchKeyset<SaleLine>((afterId) =>
+    const { rows: sales, error: salesErr } = await fetchAll<SaleLine>((f, t) =>
       supabase!.from("retail_sale_lines")
-        .select("id,sale_date,sales,sales_amount,payment_method,quantity")
+        .select("sale_date,sales,sales_amount,payment_method,quantity")
         .eq("branch_id", bid).gte("sale_date", from).lte("sale_date", to)
-        .gt("id", afterId).order("id", { ascending: true }).limit(1000)
+        .order("id", { ascending: true }).range(f, t)
     );
 
     /* A partial load is not shown. Half a chain reads exactly like a whole one
@@ -403,10 +374,6 @@ export default function CashBookPage() {
     return rows.filter((r) => !(r.ds > t && !r.bk && !r.gross && !r.net)).slice().reverse();
   }, [rows]);
 
-  /* Worked out once rather than per card: the phone list marks today by name, and
-     it can be four hundred cards long. */
-  const todayDs = today();
-
   const T = useMemo(() => shown.reduce((t, r) => ({
     gross: t.gross + r.gross,
     cash: t.cash + r.cash + r.splitCash,
@@ -419,28 +386,16 @@ export default function CashBookPage() {
     party: t.party + r.party,
   }), { gross: 0, cash: 0, card: 0, credit: 0, jazz: 0, ho: 0, exp: 0, misc: 0, party: 0 }), [shown]);
 
-  const stats = useMemo(() => {
-    const s = {
-      gross: { label: "Gross sale", value: money(T.gross), Icon: Wallet },
-      cash: { label: "Cash sale", value: money(T.cash), Icon: Banknote },
-      card: { label: "Card sale", value: money(T.card), Icon: CreditCard },
-      credit: { label: "Credit (udhaar)", value: money(T.credit), Icon: HandCoins },
-      jazz: { label: "JazzCash", value: money(T.jazz), Icon: Smartphone },
-      exp: { label: "Expenses", value: money(T.exp), Icon: Receipt },
-      misc: { label: "Misc income", value: money(T.misc), Icon: Coins },
-      ho: { label: "HO payment", value: money(T.ho), Icon: Landmark },
-    };
-    /* StatCards is two columns on a phone, so eight of these is four rows — about
-       440px of window totals between the top of the screen and today's card, and
-       this window can be 399 days long, which is not what somebody at the till
-       came for. Four below 768px: the one everybody asks for first and the three
-       largest movements. The four left out are on every day's card, which is
-       where a figure for one day belongs anyway. All eight on a computer, in the
-       order they have always been, where they are a single row. */
-    return phone
-      ? [s.gross, s.cash, s.exp, s.ho]
-      : [s.gross, s.cash, s.card, s.credit, s.jazz, s.exp, s.misc, s.ho];
-  }, [T, phone]);
+  const stats = [
+    { label: "Gross sale", value: money(T.gross), Icon: Wallet },
+    { label: "Cash sale", value: money(T.cash), Icon: Banknote },
+    { label: "Card sale", value: money(T.card), Icon: CreditCard },
+    { label: "Credit (udhaar)", value: money(T.credit), Icon: HandCoins },
+    { label: "JazzCash", value: money(T.jazz), Icon: Smartphone },
+    { label: "Expenses", value: money(T.exp), Icon: Receipt },
+    { label: "Misc income", value: money(T.misc), Icon: Coins },
+    { label: "HO payment", value: money(T.ho), Icon: Landmark },
+  ];
 
   /* ── inline physical cash ───────────────────────────────────────────────
    * Optimistic: local state first so the carry repaints instantly, then the
@@ -472,7 +427,7 @@ export default function CashBookPage() {
   /* A saved day replaces that day's book row in place. Everything the editor
      can change lives on that row, so the local chain is complete afterwards and
      there is nothing to refetch. */
-  const applySavedDay = useCallback((ds: string, bk: Book) => {
+  const applySavedDay = useCallback((ds: string, bk: Book | null) => {
     setDays((ds0) => ds0.map((d) => (d.ds === ds ? { ...d, bk } : d)));
   }, []);
 
@@ -496,51 +451,26 @@ export default function CashBookPage() {
         {/* One branch at a time — a running balance across two shops is not a
             running balance of anything. Grouped by chain when there is more
             than one chain to group. */}
-        {/* `max-md:py-2.5` only: the phone CSS forces every select to 16px to stop
-            iOS zooming the page, and 16px in a py-2 pill is a 35px control — under
-            the department's 40px floor for a thumb. Inert from 768px up. */}
-        <Select className="max-md:py-2.5" value={bidStr} onChange={setBid}>
+        <Select value={bid ? String(bid) : ""} onChange={(v) => setBid(v ? Number(v) : null)}>
           {chains.length > 1
             ? chains.map((ch) => (
                 <optgroup key={ch} label={ch}>
-                  {pickable.filter((b) => (b.chain ?? "") === ch).map((b) => <option key={b.id} value={String(b.id)}>{b.name}</option>)}
+                  {branches.filter((b) => (b.chain ?? "") === ch).map((b) => <option key={b.id} value={String(b.id)}>{b.name}</option>)}
                 </optgroup>
               ))
-            : pickable.map((b) => <option key={b.id} value={String(b.id)}>{b.name}</option>)}
+            : branches.map((b) => <option key={b.id} value={String(b.id)}>{b.name}</option>)}
         </Select>
       </PageHeader>
 
-      {/* TWO VERSIONS, ON PURPOSE. The computer copy is unchanged, down to the
-          sentence explaining why the range is computed rather than chosen. The
-          phone copy is shorter because the note is the first thing on a 390px
-          screen and ninety words of 12px text pushes today's card off it — and
-          because two of its sentences are about things a phone does not have:
-          there are no column headings to tap, and the number is tapped on a card
-          rather than in a row. The *why* of the computed range stays in the
-          header comment above, where the next person to touch this will read it. */}
       <SourceNote>
-        {phone ? (
-          <>
-            Type the <strong>physical cash</strong> into the day — the day it is counted becomes the new
-            anchor and every day below it re-opens from there. <strong>Edit day</strong> opens everything
-            else; tap any <strong>figure</strong> to see what it is made of. Newest day first.
-            {!loading && (
-              <> {" "}<strong>{window_[0]}</strong> to <strong>{window_[1]}</strong>, opening at{" "}
-              <strong>{money(basePrev)}</strong> — the last count before this window.</>
-            )}
-          </>
-        ) : (
-          <>
-            Sales fill in from the Nimbus imports. Type the <strong>physical cash</strong> straight into its box —
-            the day it is counted becomes the new anchor and every day below it re-opens from there.
-            Tap the <strong>date</strong> to edit anything else on that day, or tap any <strong>number</strong> to
-            see what it is made of. Tap a column heading to pick that column out. Newest day first.
-            {!loading && (
-              <> {" "}Showing <strong>{window_[0]}</strong> to <strong>{window_[1]}</strong>, opening at{" "}
-              <strong>{money(basePrev)}</strong> — the last count before this window. The range is worked out, not
-              chosen: a hand-picked start date would open day one at zero and quietly falsify every balance under it.</>
-            )}
-          </>
+        Sales fill in from the Nimbus imports. Type the <strong>physical cash</strong> straight into its box —
+        the day it is counted becomes the new anchor and every day below it re-opens from there.
+        Tap the <strong>date</strong> to edit anything else on that day, or tap any <strong>number</strong> to
+        see what it is made of. Tap a column heading to pick that column out. Newest day first.
+        {!loading && (
+          <> {" "}Showing <strong>{window_[0]}</strong> to <strong>{window_[1]}</strong>, opening at{" "}
+          <strong>{money(basePrev)}</strong> — the last count before this window. The range is worked out, not
+          chosen: a hand-picked start date would open day one at zero and quietly falsify every balance under it.</>
         )}
       </SourceNote>
 
@@ -554,34 +484,7 @@ export default function CashBookPage() {
         </div>
       )}
 
-      {/* THE LIST, TWICE: cards below 768px, the grid above it. Two branches
-          rather than one responsive layout, because the grid is the thing six
-          shops have read for years — its sticky head, its column highlight, its
-          inline count box and its totals row — and the surest way not to change
-          it is not to touch it. Neither branch renders at the other's width.
-
-          No totals card under the phone list: the window can be 399 days, so the
-          foot of it is somewhere nobody will ever scroll to. The figures that
-          were in the totals row are in StatCards at the top instead. */}
-      {bid && phone && (
-        <CardList
-          rows={shown}
-          loading={loading}
-          empty="No trading days yet for this shop — the book fills once sales are imported."
-          render={(r) => (
-            <DayCard
-              key={r.ds}
-              r={r}
-              isToday={r.ds === todayDs}
-              onEdit={() => setDayRow(r)}
-              onField={(t) => setPopup({ r, t })}
-              onPhys={(v) => savePhysical(r.ds, v, r.bk)}
-            />
-          )}
-        />
-      )}
-
-      {bid && !phone && (
+      {bid && (
         <div className="mt-4 overflow-hidden rounded-card border border-line bg-surface dark:border-white/[0.06] dark:bg-[#201c17]">
           <div className="max-h-[70dvh] overflow-auto">
             <table className="w-full min-w-[1180px] text-left text-[12.5px]">
@@ -705,182 +608,11 @@ function PhysInput({ value, onCommit }: { value: number | null; onCommit: (v: nu
   };
   return (
     <input
-      /* `decimal`, not `numeric`: the decimal pad is the same ten digits plus a
-         point, so nothing is lost and a count with paisa in it can still be
-         typed. Both are inert on a computer — a physical keyboard ignores
-         inputMode entirely.
-         `max-md:py-3` because the phone CSS forces every input to 16px (iOS
-         zooms the whole page otherwise) and 16px in a py-1.5 box is a 33px
-         target. The desktop box keeps py-1.5 and its place in the row. */
-      type="number" inputMode="decimal" value={draft} placeholder="count"
-      aria-label="Physical cash counted"
+      type="number" inputMode="numeric" value={draft} placeholder="count"
       onChange={(e) => setDraft(e.target.value)}
       onBlur={commit}
       onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
-      className="w-full min-w-[74px] rounded-xl2 border border-line bg-canvas px-1.5 py-1.5 text-center text-[12.5px] tabular-nums text-ink outline-none transition focus:border-ink/30 max-md:py-3 dark:border-white/10 dark:bg-white/[0.04] dark:text-white"
-    />
-  );
-}
-
-/** The date on a phone card. The grid says "04/10" because it has sixteen columns
- *  to fit into 1,180px; a card has the room to say which day of the week it was,
- *  which is how a shop remembers a day ("the Saturday we shut early"). Built from
- *  local midnight, like every other date on this screen, so the label can never
- *  name a different day than the row it is on. */
-const dayLabel = (ds: string) =>
-  new Date(ds + "T00:00:00").toLocaleDateString("en-GB", { weekday: "short", day: "2-digit", month: "short" });
-
-/* The box every value on a day card sits in — the tappable figures and the one
- * pair that is plain text. 20px of line plus 12px above and below is a 44px tall
- * slot, and it is stated here once so the two kinds of value cannot drift apart:
- * two pairs share a line, and a figure with a 44px box beside a value with a
- * 19.5px one puts the two numbers 12px out of line with each other.
- * `inline-block` and no negative margin anywhere are load-bearing — see `fig`. */
-const FIG_BOX = "inline-block min-h-[44px] py-3 leading-5";
-
-/* ── one day, as a phone card ────────────────────────────────────────────────
- * The grid is sixteen columns and 1,180px wide. At 390px that is not a table, it
- * is eight columns you drag past looking for the one you wanted, and by the time
- * you reach it the row you were reading has scrolled off the side.
- *
- * So below 768px the same day is a card, laid out around the only three things
- * anybody does here: find the day, type what is in the drawer, read the
- * difference.
- *
- *   title  the date — what identifies a day, and "Today" said in words, because
- *          finding today is step one and newest-first is a convention not a label
- *   lead   the cash difference — the single number this screen exists to produce
- *   edge   counted and clear / counted and out / not counted, legible before any
- *          figure is read. Not-counted is amber, not red: nobody has got it wrong
- *          yet, there is just work left to do
- *   count  the physical cash box, ON the card, beside an "Edit day" button.
- *          Burying the screen's whole job one tap deeper to tidy the card up would
- *          be a bad trade
- *   pairs  the rest of the day, each one still tappable for where it came from
- *
- * The card is deliberately given no `onTap`: RowCard renders a <button> when it
- * has one, and an input and ten buttons inside a button is not markup a browser
- * will honour. So the two things a day can do are buttons of their own, in the
- * one row of the card that is not inside a truncating box.
- */
-function DayCard({ r, isToday, onEdit, onField, onPhys }: {
-  r: CBRow; isToday: boolean;
-  onEdit: () => void; onField: (t: FieldKey) => void; onPhys: (v: number | null) => void;
-}) {
-  const tone = r.phys == null ? "warn" : Math.abs(r.diff ?? 0) < 1 ? "good" : "bad";
-
-  /* Every figure explains itself, exactly as it does on the computer. A total
-     nobody can explain is a total nobody trusts, and that is the whole reason
-     these numbers were made tappable in the first place.
-
-     THE TARGET GROWS THE LINE. IT DOES NOT HANG OUTSIDE THE SLOT.
-     These were a 13px number in `py-1`: 27.5px tall, and 9px wide on a figure
-     reading 0. There are around 277 of them on a default view, so a thumb aimed
-     at Cash landed on Closing and got the wrong explanation — and the
-     department's 40px floor is written for `button.rounded-full`, which these are
-     not, so nothing caught them.
-
-     The usual fix — padding plus a matching negative margin, so the box grows
-     while the line does not — cannot work in this slot. RowCard puts every pair's
-     value in a `truncate` box, i.e. `overflow: hidden`, so whatever hangs outside
-     the slot is clipped away and is not hittable; a previous pass on this card
-     was caught by exactly that. So the line grows with the target instead:
-
-       inline-block    padding on a plain inline element does not grow the line it
-                       sits on. An inline-block's margin box does, so the `dd`
-                       grows to 44px with it and the whole target stays inside the
-                       `overflow: hidden`. Nothing here uses a negative margin.
-       leading-5 py-3  20px of line plus 12px above and below = 44px, stated
-                       rather than inherited so the sum cannot drift if the body
-                       line-height ever moves.
-       min-w-[44px]    a figure reading 0 is 9px of text. Without a stated width
-                       it stays a 44×9 sliver.
-
-     SIZE IS NOT ENOUGH — TWO PAIRS SHARE A LINE. `pairs` is a two-column grid, so
-     a target stretched to the width of its slot would leave only the grid's 12px
-     gutter between itself and its neighbour, which is still a mis-tap. This box
-     is left-aligned and no wider than its digits, so the dead space left over in
-     the slot is part of the separation: the narrowest slot on any phone is 124px
-     (320px wide, less the page's 16px gutters, the card's 14px padding and half
-     the 12px grid gap), and the widest figure a shop-day produces is about 62px,
-     which leaves 60-90px between the two boxes at every width. `max-w` keeps the
-     gutter again in reserve for the figure that never comes — a number long
-     enough to fill its slot was already being cut off by the `truncate` above it.
-
-     None of this reaches the computer: DayCard is rendered only from the `phone`
-     branch, so the grid keeps its compact 27.5px cells. */
-  const fig = (t: FieldKey, k: string) => ({
-    k,
-    v: (
-      <button type="button" onClick={() => onField(t)}
-        className={`${FIG_BOX} min-w-[44px] max-w-[calc(100%_-_12px)] underline decoration-dotted underline-offset-2`}>
-        {Math.round(cbVal(r, t)).toLocaleString("en-PK")}
-      </button>
-    ),
-  });
-
-  /* Opening, cash and closing always, because those three and the count are what
-     the difference is made of. The rest only when they are not zero: a pair
-     reading "JazzCash 0" costs a line of a 390px card to say nothing, and on a
-     quiet day eight of them would bury the three that matter. */
-  const pairs = [
-    fig("ob", "Opening"),
-    fig("cash", "Cash"),
-    fig("cb", "Closing"),
-    ...(r.gross ? [fig("gross", "Gross")] : []),
-    ...(r.card - r.splitCash ? [fig("card", "Card")] : []),
-    ...(r.credit ? [fig("credit", "Credit")] : []),
-    ...(r.jazz ? [fig("jazz", "JazzCash")] : []),
-    ...(r.ho ? [fig("ho", "HO")] : []),
-    ...(r.exp ? [fig("exp", "Expenses")] : []),
-    ...(r.misc ? [fig("misc", "Misc")] : []),
-    ...(r.rtn ? [fig("return", "Returns")] : []),
-    /* Party payment has no column on the grid and no popup behind it, but the
-       closing balance subtracts it — so a card that left it out could not explain
-       its own C/B, which is the one thing a card has to be able to do. Plain
-       text, with the name when there is one — and deliberately NOT a button: it
-       has nothing to open. It carries the figures' box so that it lines up with
-       the figure beside it on its line, and nothing more: no width floor, because
-       a 44px target is only wanted where there is something to tap. */
-    ...(r.party ? [{
-      k: r.bk?.party_name ? `Party · ${r.bk.party_name}` : "Party",
-      v: <span className={FIG_BOX}>{Math.round(r.party).toLocaleString("en-PK")}</span>,
-    }] : []),
-  ];
-
-  return (
-    <RowCard
-      tone={tone}
-      /* Plain text, not a tap target. The grid's date cell is the way into the
-         editor because a cell is all a sixteen-column row can spare, but it is a
-         convention you have to be told; on a phone there is room to say "Edit day"
-         in words, and the button sits in the row below where it can be 40px tall
-         without being clipped by the truncation on this line. */
-      title={isToday ? `Today · ${dayLabel(r.ds)}` : dayLabel(r.ds)}
-      /* The note is typed in the editor and then never shown anywhere — the grid
-         has no column for it. A card has the room, and "shop shut at 4, Eid" is
-         the first thing that explains an odd day. */
-      meta={r.bk?.note || undefined}
-      right={r.diff == null
-        ? <span className="text-[12.5px] font-semibold text-muted dark:text-[#a89f93]">not counted</span>
-        : <Diff value={r.diff} />}
-      /* RowCard's `pills` is the row between the header and the figures, which is
-         exactly where the day's two actions belong. It is the slot that is wanted
-         here, not a pill — and kit.tsx is not this screen's file to widen.
-         `rounded-full` on the button is also what the department's phone CSS hangs
-         its 40px minimum on, but it carries its own `py-2` so it is still a target
-         if that rule ever moves. The count box sizes itself (see PhysInput). */
-      pills={
-        <div className="flex w-full items-center gap-2">
-          <span className="flex-none text-[11px] uppercase tracking-wide text-hint dark:text-[#8a8175]">Physical</span>
-          <div className="min-w-0 flex-1"><PhysInput value={r.phys} onCommit={onPhys} /></div>
-          <button type="button" onClick={onEdit} aria-label={`Edit ${dayLabel(r.ds)}`}
-            className="flex-none rounded-full border border-line bg-panel px-4 py-2 text-[12.5px] font-semibold text-ink active:bg-line dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:active:bg-white/[0.12]">
-            Edit day
-          </button>
-        </div>
-      }
-      pairs={pairs}
+      className="w-full min-w-[74px] rounded-xl2 border border-line bg-canvas px-1.5 py-1.5 text-center text-[12.5px] tabular-nums text-ink outline-none transition focus:border-ink/30 dark:border-white/10 dark:bg-white/[0.04] dark:text-white"
     />
   );
 }
@@ -915,11 +647,7 @@ function FieldPopup({ r, t, onClose, onDetail }: { r: CBRow; t: FieldKey; onClos
         </p>
       )}
 
-      {/* Stacked and full width on a phone, and the dialog is a bottom sheet
-          there, so the last thing in it has to clear the home indicator — Modal
-          is shared and cannot add that padding for us. "Show the entries" on top
-          because it is why anybody would keep this open. Unchanged from 768px. */}
-      <div className="mt-5 flex flex-wrap justify-end gap-2 max-md:flex-col max-md:pb-[env(safe-area-inset-bottom)] max-md:[&>button]:w-full">
+      <div className="mt-5 flex flex-wrap justify-end gap-2">
         {f.detail && <button onClick={onDetail} className={btnPrimary}>Show the entries</button>}
         <button onClick={onClose} className={btnGhost}>Close</button>
       </div>
@@ -1070,19 +798,9 @@ function DetailModal({ bid, ds, t, r, onClose }: { bid: number; ds: string; t: F
   const hasQty = t === "disc" || t === "return";
   const [h1, h2] = HEADS[t] ?? ["Details"];
 
-  /* DataTable lays these out as cards below 768px and works the card out from the
-     columns, which lands right on its own for six of the eight drill-downs: the
-     receipt number is the title, how it was paid or who owes it is the line under,
-     and the amount is the big figure on the right.
-     Discounts and returns are the two where it guesses wrong. There the receipt is
-     what you check the line against afterwards and the ITEM is what you are
-     actually looking at ("which frock was given back"), so those two swap over. */
-  const idPhone = hasQty ? ("meta" as const) : undefined;
-  const itemPhone = hasQty ? ("title" as const) : undefined;
-
   const cols: Col<DetailRow>[] = [
-    { head: h1, bold: true, phone: idPhone, cell: (x) => text(x.a) },
-    ...(h2 ? [{ head: h2, muted: true, phone: itemPhone, cell: (x: DetailRow) => text(x.b) } as Col<DetailRow>] : []),
+    { head: h1, bold: true, cell: (x) => text(x.a) },
+    ...(h2 ? [{ head: h2, muted: true, cell: (x: DetailRow) => text(x.b) } as Col<DetailRow>] : []),
     ...(hasQty ? [{ head: "Qty", right: true, cell: (x: DetailRow) => Math.round(num(x.qty)).toLocaleString("en-PK") } as Col<DetailRow>] : []),
     { head: "Amount", right: true, bold: true, cell: (x) => <span className={num(x.amt) < 0 ? "text-danger" : ""}>{money(x.amt)}</span> },
   ];
@@ -1106,9 +824,7 @@ function DetailModal({ bid, ds, t, r, onClose }: { bid: number; ds: string; t: F
           </tr>
         }
       />
-      {/* Full width and clear of the home indicator on a phone, where this is a
-          bottom sheet. Unchanged from 768px up. */}
-      <div className="mt-4 flex justify-end max-md:pb-[env(safe-area-inset-bottom)] max-md:[&>button]:w-full"><button onClick={onClose} className={btnGhost}>Close</button></div>
+      <div className="mt-4 flex justify-end"><button onClick={onClose} className={btnGhost}>Close</button></div>
     </Modal>
   );
 }
@@ -1116,7 +832,7 @@ function DetailModal({ bid, ds, t, r, onClose }: { bid: number; ds: string; t: F
 /* ── the day editor ──────────────────────────────────────────────────────────
  * Everything on one day that a person is allowed to type.
  */
-function DayModal({ bid, r, onClose, onSaved }: { bid: number; r: CBRow; onClose: () => void; onSaved: (bk: Book) => void }) {
+function DayModal({ bid, r, onClose, onSaved }: { bid: number; r: CBRow; onClose: () => void; onSaved: (bk: Book | null) => void }) {
   const bk = r.bk ?? {};
 
   /* THE ONE THAT COST MONEY. `hoAuto` is the part of the HO column that came
@@ -1143,6 +859,7 @@ function DayModal({ bid, r, onClose, onSaved }: { bid: number; r: CBRow; onClose
     note: bk.note ?? "",
   });
   const [saving, setSaving] = useState(false);
+  const [confirmWipe, setConfirmWipe] = useState(false);
   const [err, setErr] = useState("");
   const set = (k: keyof typeof f, v: string) => setF((o) => ({ ...o, [k]: v }));
 
@@ -1193,57 +910,56 @@ function DayModal({ bid, r, onClose, onSaved }: { bid: number; r: CBRow; onClose
     onSaved((data as Book) ?? rec);
   }
 
+  /* CLEARING A DAY. The cash book is one row per shop per day, so there is
+     nothing else pointing at it and a delete is just a delete — unlike an
+     employee, whose ledger would be left behind. What it removes is the typed
+     half of the day: the opening balance, the counted cash, the payments and
+     the note. The sales underneath come from the imported sale lines and are
+     untouched, so the row reappears as an uncounted day rather than vanishing.
+     Worth saying plainly on the button, because "delete" next to a day of
+     takings reads as if it would remove the takings. */
+  async function wipe() {
+    if (!supabase || !r.bk?.id) return;
+    setSaving(true); setErr("");
+    const { error } = await supabase.from("retail_daily_book")
+      .delete().eq("branch_id", bid).eq("book_date", r.ds);
+    setSaving(false);
+    if (error) { setErr(error.message); return; }
+    onSaved(null);
+  }
+
   const roCls = `${inputCls} ${ov ? "" : "opacity-60"}`;
 
   return (
     <Modal open onClose={onClose} wide title={`Cash book — ${r.ds}`} subtitle="Sales fill in from Nimbus unless you override them.">
-      {/* FIFTEEN MONEY BOXES, ONE PER ROW ON A PHONE.
-          Two columns at 390px is a 165px box under a label like "Split cash
-          (worked out from the above)" wrapped onto three lines, and the labels on
-          this dialog are long because every one of them is load-bearing. One per
-          row below 768px; the columns from 768px up are the ones that were always
-          there (`md:grid-cols-3` lands on exactly what `sm:grid-cols-3` did at
-          every width a computer is).
-
-          `inputMode="decimal"` on every one of them. type="number" gets a phone
-          most of the way, but the decimal pad is what somebody counting a drawer
-          wants: ten big digits and a point, instead of a QWERTY keyboard with a
-          number row above it. It is the single biggest difference on this screen
-          and it costs nothing — inputMode is inert where there is a real
-          keyboard, so a computer never sees it. */}
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-        <Field label="Opening balance"><input className={inputCls} type="number" inputMode="decimal" value={f.ob} onChange={(e) => set("ob", e.target.value)} /></Field>
-        <Field label="Physical cash counted"><input className={inputCls} type="number" inputMode="decimal" value={f.phys} onChange={(e) => set("phys", e.target.value)} placeholder="not counted" /></Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Opening balance"><input className={inputCls} type="number" value={f.ob} onChange={(e) => set("ob", e.target.value)} /></Field>
+        <Field label="Physical cash counted"><input className={inputCls} type="number" value={f.phys} onChange={(e) => set("phys", e.target.value)} placeholder="not counted" /></Field>
       </div>
 
-      {/* THE SWITCH THAT CHANGES WHAT EVERY FIGURE BELOW MEANS. On a phone it was
-          a 16px box and a 12.5px line of text wedged between two field grids —
-          the easiest thing on this dialog to skim past and the most expensive to
-          have wrong, since it decides whether the typed sales or Nimbus's win. A
-          row you can see and hit below 768px; the same line of text above it. */}
-      <label className="mt-3 flex items-center gap-2 text-[12.5px] font-semibold text-ink max-md:min-h-[44px] max-md:gap-3 max-md:rounded-xl2 max-md:border max-md:border-line max-md:bg-canvas max-md:px-3.5 max-md:py-3 dark:text-[#e7e2d8] max-md:dark:border-white/10 max-md:dark:bg-white/[0.04]">
-        <input type="checkbox" checked={ov} onChange={(e) => setOv(e.target.checked)} className="h-4 w-4 flex-none accent-[#141414] max-md:h-5 max-md:w-5 dark:accent-white" />
+      <label className="mt-3 flex items-center gap-2 text-[12.5px] font-semibold text-ink dark:text-[#e7e2d8]">
+        <input type="checkbox" checked={ov} onChange={(e) => setOv(e.target.checked)} className="h-4 w-4 accent-[#141414] dark:accent-white" />
         Override sales (otherwise auto from Nimbus)
       </label>
 
-      <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-3">
-        <Field label="Gross sale"><input className={roCls} type="number" inputMode="decimal" readOnly={!ov} value={f.gross} onChange={(e) => set("gross", e.target.value)} /></Field>
-        <Field label="Net sale"><input className={roCls} type="number" inputMode="decimal" readOnly={!ov} value={f.net} onChange={(e) => set("net", e.target.value)} /></Field>
-        <Field label="Cash sale"><input className={roCls} type="number" inputMode="decimal" readOnly={!ov} value={f.cash} onChange={(e) => set("cash", e.target.value)} /></Field>
-        <Field label="Card sale"><input className={roCls} type="number" inputMode="decimal" readOnly={!ov} value={f.card} onChange={(e) => set("card", e.target.value)} /></Field>
-        <Field label="JazzCash sale"><input className={roCls} type="number" inputMode="decimal" readOnly={!ov} value={f.jazz} onChange={(e) => set("jazz", e.target.value)} /></Field>
-        <Field label="Credit (udhaar) sale"><input className={roCls} type="number" inputMode="decimal" readOnly={!ov} value={f.credit} onChange={(e) => set("credit", e.target.value)} /></Field>
+      <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3">
+        <Field label="Gross sale"><input className={roCls} type="number" readOnly={!ov} value={f.gross} onChange={(e) => set("gross", e.target.value)} /></Field>
+        <Field label="Net sale"><input className={roCls} type="number" readOnly={!ov} value={f.net} onChange={(e) => set("net", e.target.value)} /></Field>
+        <Field label="Cash sale"><input className={roCls} type="number" readOnly={!ov} value={f.cash} onChange={(e) => set("cash", e.target.value)} /></Field>
+        <Field label="Card sale"><input className={roCls} type="number" readOnly={!ov} value={f.card} onChange={(e) => set("card", e.target.value)} /></Field>
+        <Field label="JazzCash sale"><input className={roCls} type="number" readOnly={!ov} value={f.jazz} onChange={(e) => set("jazz", e.target.value)} /></Field>
+        <Field label="Credit (udhaar) sale"><input className={roCls} type="number" readOnly={!ov} value={f.credit} onChange={(e) => set("credit", e.target.value)} /></Field>
 
-        <Field label="Nimbus expected cash (EOD)"><input className={inputCls} type="number" inputMode="decimal" value={f.nimexp} onChange={(e) => fromNimbusExpected(e.target.value)} placeholder="0" /></Field>
-        <Field label="Split cash (worked out from the above)"><input className={inputCls} type="number" inputMode="decimal" value={f.splitCash} onChange={(e) => set("splitCash", e.target.value)} placeholder="0" /></Field>
+        <Field label="Nimbus expected cash (EOD)"><input className={inputCls} type="number" value={f.nimexp} onChange={(e) => fromNimbusExpected(e.target.value)} placeholder="0" /></Field>
+        <Field label="Split cash (worked out from the above)"><input className={inputCls} type="number" value={f.splitCash} onChange={(e) => set("splitCash", e.target.value)} placeholder="0" /></Field>
         <Field label={hoAuto > 0 ? `HO payment typed here (+ ${money(hoAuto)} already in from the import)` : "HO payment typed here"}>
-          <input className={inputCls} type="number" inputMode="decimal" value={f.ho} onChange={(e) => set("ho", e.target.value)} placeholder="0" />
+          <input className={inputCls} type="number" value={f.ho} onChange={(e) => set("ho", e.target.value)} placeholder="0" />
         </Field>
 
-        <Field label="Party payment"><input className={inputCls} type="number" inputMode="decimal" value={f.party} onChange={(e) => set("party", e.target.value)} placeholder="0" /></Field>
+        <Field label="Party payment"><input className={inputCls} type="number" value={f.party} onChange={(e) => set("party", e.target.value)} placeholder="0" /></Field>
         <Field label="Party name"><input className={inputCls} value={f.pname} onChange={(e) => set("pname", e.target.value)} /></Field>
-        <Field label="RTS"><input className={inputCls} type="number" inputMode="decimal" value={f.rts} onChange={(e) => set("rts", e.target.value)} placeholder="0" /></Field>
-        <Field label="Return / refund"><input className={inputCls} type="number" inputMode="decimal" value={f.ret} onChange={(e) => set("ret", e.target.value)} placeholder="0" /></Field>
+        <Field label="RTS"><input className={inputCls} type="number" value={f.rts} onChange={(e) => set("rts", e.target.value)} placeholder="0" /></Field>
+        <Field label="Return / refund"><input className={inputCls} type="number" value={f.ret} onChange={(e) => set("ret", e.target.value)} placeholder="0" /></Field>
       </div>
 
       <div className="mt-3"><Field label="Note"><input className={inputCls} value={f.note} onChange={(e) => set("note", e.target.value)} placeholder="anything worth remembering about this day" /></Field></div>
@@ -1277,29 +993,29 @@ function DayModal({ bid, r, onClose, onSaved }: { bid: number; r: CBRow; onClose
 
       {err && <p className="mt-3 text-[12.5px] font-semibold text-danger">{err}</p>}
 
-      {/* SAVE, WITHOUT HUNTING FOR IT.
-          Fifteen boxes one per row is about 1,200px of dialog on a phone, so a
-          footer at the end of it is three flicks away from whichever field is
-          being typed in. Below 768px the row sticks to the bottom of the dialog's
-          own scroller instead, and carries the closing balance and the difference
-          with it — which is what the day was opened to find out, now readable
-          while the count is still being typed rather than after scrolling back
-          down to look. The negative margins let the bar span the dialog's padding
-          and sit flush, and the padding it puts back clears the home indicator,
-          which the shared Modal cannot do for us.
-
-          Above 767.98px: the same right-aligned Cancel and Save it always was.
-          The summary line is `hidden` there and a display:none child draws no gap. */}
-      <div className="mt-5 flex justify-end gap-2 max-md:sticky max-md:bottom-0 max-md:-mx-5 max-md:-mb-5 max-md:flex-wrap max-md:border-t max-md:border-line max-md:bg-surface max-md:px-5 max-md:pt-3 max-md:pb-[max(0.75rem,env(safe-area-inset-bottom))] max-md:dark:border-white/[0.08] max-md:dark:bg-[#201c17]">
-        <div className="hidden w-full items-center justify-between gap-3 text-[12.5px] max-md:flex">
-          <span className="text-muted dark:text-[#a89f93]">Closing <strong className="tabular-nums text-ink dark:text-[#f4f1ea]">{money(calc.cb)}</strong></span>
-          <span className="flex items-center gap-2 font-semibold text-ink dark:text-[#e7e2d8]">
-            Difference{" "}
-            {calc.diff == null ? <Pill tone="neutral">{moneyOrDash(null)}</Pill> : <Diff value={calc.diff} />}
-          </span>
-        </div>
-        <button onClick={onClose} className={`${btnGhost} max-md:flex-1`}>Cancel</button>
-        <button onClick={save} disabled={saving} className={`${btnPrimary} max-md:flex-[2]`}>{saving ? "Saving…" : "Save day"}</button>
+      <div className="mt-5 flex flex-wrap items-center justify-end gap-2">
+        {/* Only where something was actually typed — there is nothing to clear
+            on a day that has only ever been filled in from Nimbus. */}
+        {r.bk?.id ? (
+          confirmWipe ? (
+            <>
+              <span className="mr-auto text-[12.5px] font-semibold text-danger">
+                Clear everything typed for {r.ds}? The imported sales stay.
+              </span>
+              <button onClick={wipe} disabled={saving}
+                className="rounded-full bg-danger px-3.5 py-2 text-[12.5px] font-semibold text-white transition hover:opacity-90 disabled:opacity-50">
+                {saving ? "Clearing…" : "Yes, clear it"}
+              </button>
+              <button onClick={() => setConfirmWipe(false)} className={btnGhost}>Keep</button>
+            </>
+          ) : (
+            <button onClick={() => setConfirmWipe(true)} className={`${btnGhost} mr-auto !text-danger`}>
+              <Trash2 size={14} /> Clear this day
+            </button>
+          )
+        ) : null}
+        <button onClick={onClose} className={btnGhost}>Cancel</button>
+        <button onClick={save} disabled={saving} className={btnPrimary}>{saving ? "Saving…" : "Save day"}</button>
       </div>
     </Modal>
   );

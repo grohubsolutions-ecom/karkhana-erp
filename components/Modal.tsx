@@ -2,8 +2,8 @@
 import { X } from "lucide-react";
 import { useEffect } from "react";
 
-export default function Modal({ open, onClose, title, subtitle, children, wide, xwide }:
-  { open: boolean; onClose: () => void; title: string; subtitle?: string; children: React.ReactNode; wide?: boolean; xwide?: boolean }) {
+export default function Modal({ open, onClose, title, subtitle, children, wide }:
+  { open: boolean; onClose: () => void; title: string; subtitle?: string; children: React.ReactNode; wide?: boolean }) {
   useEffect(() => {
     const esc = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     if (open) window.addEventListener("keydown", esc);
@@ -12,8 +12,13 @@ export default function Modal({ open, onClose, title, subtitle, children, wide, 
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-[60] flex items-end justify-center bg-black/45 p-0 sm:items-center sm:p-4" onClick={onClose}>
+      {/* role/aria-modal so a screen reader announces this as a dialog and
+          stops reading the page behind it, and aria-label so it is announced
+          by its title. It is also what lets a test address the dialog rather
+          than guessing which input on the page it means. */}
       <div onClick={(e) => e.stopPropagation()}
-        className={`max-h-[92dvh] w-full overflow-y-auto rounded-t-card border border-line bg-surface p-5 shadow-xl sm:rounded-card dark:border-white/[0.08] dark:bg-[#201c17] ${xwide ? "sm:max-w-5xl" : wide ? "sm:max-w-3xl" : "sm:max-w-lg"}`}>
+        role="dialog" aria-modal="true" aria-label={title}
+        className={`max-h-[92dvh] w-full overflow-y-auto rounded-t-card border border-line bg-surface p-5 shadow-xl sm:rounded-card dark:border-white/[0.08] dark:bg-[#201c17] ${wide ? "sm:max-w-3xl" : "sm:max-w-lg"}`}>
         <div className="mb-4 flex items-start justify-between gap-3">
           <div>
             <h3 className="text-[17px] font-extrabold tracking-tight text-ink dark:text-[#f4f1ea]">{title}</h3>
@@ -27,13 +32,10 @@ export default function Modal({ open, onClose, title, subtitle, children, wide, 
   );
 }
 
-export function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
+export function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <label className="block text-[12.5px] font-semibold text-ink dark:text-[#e7e2d8]">
       {label}
-      {/* H289: a field whose value changes a wage says so where it is typed,
-          not in a note somebody has to be told about. */}
-      {hint && <span className="ml-1.5 font-normal text-hint dark:text-[#8a8175]">{hint}</span>}
       <div className="mt-1.5">{children}</div>
     </label>
   );
