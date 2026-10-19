@@ -24,19 +24,24 @@
  *   because phones block a window opened after an await.
  */
 import { useState } from "react";
-import { Printer, Loader2, FileSpreadsheet, FileDown } from "lucide-react";
+import { Printer, Loader2, FileSpreadsheet, FileDown, AlertTriangle } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { rangeDates } from "@/lib/dateRange";
 import Modal, { btnPrimary, btnGhost, inputCls, Field } from "@/components/Modal";
 import { exportExcel, exportPDF, type ExportTable } from "@/lib/export";
-import { downloadBoardExcel, downloadBoardPdf, boardHtml, boardHtmlMulti, boardHead, BASE_CSS } from "@/lib/returnsBoardExport";
+import { downloadBoardExcel, downloadBoardPdf, boardHtml, boardHead, BASE_CSS } from "@/lib/returnsBoardExport";
 
 type R = {
   tracking_id: string; order_number: string | null; store_code: string | null;
   courier: string | null; return_date: string | null;
   cod_amount?: number | null; customer_name?: string | null; city?: string | null; phone?: string | null;
   reason?: string | null; shopify_cancelled?: boolean; person_received?: boolean;
+  /* A stuck-at-courier parcel merged onto the pending sheet (see below). */
+  stuck?: boolean; age_days?: number | null;
 };
+/* A courier whose status feed has stopped answering (hub_courier_sync_health).
+   While one is down, its returns cannot reach this sheet — say so before printing. */
+type FeedIssue = { courier: string; ok: boolean; last_ok_at: string | null; problem: string | null };
 type Scope = "pending" | "period" | "stuck";
 type Opts = { scope: Scope; from: string | null; to: string | null; courier: string; store: string };
 
@@ -75,10 +80,21 @@ export default function ReturnsPrintButton({ store = "ALL" }: { store?: string }
   const [st, setSt] = useState(store);
   const [busy, setBusy] = useState<"" | "print" | "xlsx" | "pdf">("");
   const [err, setErr] = useState("");
+  const [feeds, setFeeds] = useState<FeedIssue[]>([]);
+
+  /* Read when the dialog opens. Failing to read it is not a reason to block a
+     print, so an error here just shows nothing. */
+  async function checkFeeds() {
+    if (!supabase) return;
+    const { data } = await supabase.rpc("hub_courier_sync_health");
+    setFeeds(((data ?? []) as FeedIssue[]).filter((f) => !f.ok));
+  }
 
   async function fetchRows(which: Scope, from: string | null, to: string | null): Promise<R[]> {
     const all: R[] = [];
-    const cols = "tracking_id,order_number,store_code,courier,return_date,cod_amount,customer_name,city,phone,courier_reason_text,order_cancelled_at";
+    // age_days exists on v_returns_stuck only — the days-out number a stuck row prints.
+    const cols = "tracking_id,order_number,store_code,courier,return_date,cod_amount,customer_name,city,phone,courier_reason_text,order_cancelled_at"
+      + (which === "stuck" ? ",age_days" : "");
     /* Paged: every request stops at 1,000 rows, and a checklist that silently
        ended there would be a checklist with its end torn off. */
     for (let off = 0; ; off += 1000) {
@@ -115,6 +131,21 @@ export default function ReturnsPrintButton({ store = "ALL" }: { store?: string }
     return all;
   }
 
+  /* THE PENDING SHEET WITH THE STUCK PARCELS ON IT (owner, 19 Oct 2026).
+     "When the pending orders are printed, the stuck at courier orders should
+     appear on the same page." The team was pencilling them in by hand.
+     They join the same board — same courier and store columns, same
+     order-number run — flagged so the board marks them "!" with their days
+     out. A parcel can't be in both views (RTS/Returned vs In Transit), but a
+     row is never printed twice: pending wins. */
+  async function pendingWithStuck(): Promise<R[]> {
+    const [pending, stuck] = await Promise.all([fetchRows("pending", null, null), fetchRows("stuck", null, null)]);
+    const seen = new Set(pending.map((r) => r.tracking_id));
+    return [...pending, ...stuck.filter((r) => !seen.has(r.tracking_id)).map((r) => ({ ...r, stuck: true }))];
+  }
+  const rowsFor = (from: string | null, to: string | null) =>
+    scope === "pending" ? pendingWithStuck() : fetchRows(scope, from, to);
+
   async function print() {
     if (!supabase) return;
     setErr("");
@@ -125,20 +156,9 @@ export default function ReturnsPrintButton({ store = "ALL" }: { store?: string }
     try {
       const [from, to] = scope === "period" ? rangeDates(period) : [null, null];
       const o: Opts = { scope, from, to, courier, store: st };
-      let doc: string;
-      if (scope === "pending" && layout === "board") {
-        /* THE PENCIL SHEET, FINISHED. The pending board, then the stuck-at-courier
-           chase list on its own page — one print, so the parcels the team used to
-           add by hand are already on the paper. The stuck page is skipped on a day
-           nothing is stuck. */
-        const [pending, stuck] = await Promise.all([fetchRows("pending", null, null), fetchRows("stuck", null, null)]);
-        doc = stuck.length
-          ? boardHtmlMulti([{ rows: pending, o }, { rows: stuck, o: { ...o, scope: "stuck" } }])
-          : boardHtml(pending, o);
-      } else {
-        const rows = await fetchRows(scope, from, to);
-        doc = layout === "board" ? boardHtml(rows, o) : listHtml(rows, o);
-      }
+      // Pending: one sheet, the stuck parcels in it. Other scopes: as chosen.
+      const rows = await rowsFor(from, to);
+      const doc = layout === "board" ? boardHtml(rows, o) : listHtml(rows, o);
       w.document.open();
       w.document.write(doc);
       w.document.close();
@@ -160,7 +180,8 @@ export default function ReturnsPrintButton({ store = "ALL" }: { store?: string }
     setErr(""); setBusy(kind);
     try {
       const [from, to] = scope === "period" ? rangeDates(period) : [null, null];
-      const rows = await fetchRows(scope, from, to);
+      // The same rows as the printout — so the pending file carries the stuck parcels too.
+      const rows = await rowsFor(from, to);
       const o: Opts = { scope, from, to, courier, store: st };
       if (layout === "board") {
         if (kind === "xlsx") downloadBoardExcel(rows, o); else downloadBoardPdf(rows, o);
@@ -169,10 +190,10 @@ export default function ReturnsPrintButton({ store = "ALL" }: { store?: string }
           String(a.courier ?? "").localeCompare(String(b.courier ?? ""))
           || String(b.return_date ?? "").localeCompare(String(a.return_date ?? "")));
         const table: ExportTable = {
-          title: scope === "pending" ? "Pending returns" : "Returns",
+          title: scope === "pending" ? "Pending returns" : scope === "stuck" ? "Stuck at courier" : "Returns",
           headers: ["#", "Courier", "Store", "Order", "Returned", "Tracking", "Customer", "City", "Phone", "COD"],
           rows: sorted.map((r, i) => [i + 1, r.courier ?? "", r.store_code ?? "", r.order_number ?? "",
-            r.return_date ?? "", r.tracking_id, r.customer_name ?? "", r.city ?? "", r.phone ?? "",
+            r.stuck ? `STUCK ${r.age_days ?? ""}d` : r.return_date ?? "", r.tracking_id, r.customer_name ?? "", r.city ?? "", r.phone ?? "",
             Number(r.cod_amount) || 0]),
         };
         if (kind === "xlsx") exportExcel(table); else exportPDF(table);
@@ -190,7 +211,7 @@ export default function ReturnsPrintButton({ store = "ALL" }: { store?: string }
 
   return (
     <>
-      <button onClick={() => { setSt(store); setErr(""); setOpen(true); }}
+      <button onClick={() => { setSt(store); setErr(""); setOpen(true); checkFeeds(); }}
         className="flex items-center justify-center gap-2 rounded-full border border-line bg-surface px-4 py-2 text-[13px] font-semibold text-ink transition hover:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:hover:bg-white/[0.12]">
         <Printer size={14} /> Print / download
       </button>
@@ -208,11 +229,22 @@ export default function ReturnsPrintButton({ store = "ALL" }: { store?: string }
           </Field>
           <p className="-mt-2 text-[12px] leading-snug text-muted dark:text-[#a89f93]">
             {scope === "pending"
-              ? "The printed board also prints the stuck-at-courier chase list on page 2 — the parcels the team used to add to the sheet by hand."
+              ? "Stuck-at-courier parcels print on the same sheet, in the same columns, marked ! with the days they have been out — nothing to add by hand."
               : scope === "stuck"
               ? "Parcels still marked in transit but not moving — a failed attempt, or no update for 15+ days. Chase the courier (OwnEx especially)."
               : "Every return in the chosen window; received ones are struck through."}
           </p>
+          {feeds.length > 0 && (
+            /* A dead courier feed means that courier's returns cannot reach this
+               sheet at all — the 10–19 Oct OwnEx gap. Say it where it matters. */
+            <div className="flex gap-2 rounded-card border border-amber-300 bg-amber-50 p-3 text-[12.5px] text-amber-900 dark:border-amber-400/40 dark:bg-amber-400/10 dark:text-amber-200">
+              <AlertTriangle size={15} className="mt-0.5 shrink-0" />
+              <span>
+                {feeds.map((f) => `${f.courier} status updates are not coming through${f.last_ok_at ? ` (last good ${new Date(f.last_ok_at).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })})` : ""}`).join(" · ")}.
+                {" "}This sheet may be missing their returns. Tell Kashif.
+              </span>
+            </div>
+          )}
           {scope === "period" && (
             <Field label="Returned in">
               <div className="flex flex-wrap gap-2">
@@ -273,14 +305,16 @@ function listHtml(rows: R[], o: Opts) {
   const body = keys.map((k) => {
     const t = TONE[k] ?? TONE.Other;
     const list = groups.get(k)!.slice().sort((a, b) => String(b.return_date ?? "").localeCompare(String(a.return_date ?? "")));
+    const stuckN = list.filter((r) => r.stuck).length;
     return `<tbody><tr><td colspan="10" class="grp" style="background:${t.fill};color:${t.ink};border-color:${t.line}">
-        <b>${esc(k)}</b> · ${list.length} return${list.length === 1 ? "" : "s"}</td></tr>
+        <b>${esc(k)}</b> · ${list.length - stuckN} return${list.length - stuckN === 1 ? "" : "s"}${stuckN ? ` · ${stuckN} stuck at courier (!)` : ""}</td></tr>
       ${list.map((r) => {
         n += 1; const got = o.scope === "period" && !!r.person_received;
-        return `<tr class="${got ? "got" : ""}">
-          <td class="c">${n}</td><td class="bx">${got ? "&#10003;" : ""}</td>
+        // Stuck at courier: "!" in the box and its days out where the date goes.
+        return `<tr class="${got ? "got" : ""}${r.stuck ? " stk" : ""}">
+          <td class="c">${n}</td><td class="bx">${got ? "&#10003;" : r.stuck ? "!" : ""}</td>
           <td class="b on">${esc(r.order_number ?? "—")}</td><td class="c">${esc(r.store_code ?? "")}</td>
-          <td class="c">${esc(dd(r.return_date))}</td><td class="mono">${esc(r.tracking_id)}</td>
+          <td class="c">${r.stuck ? `<b>stuck ${esc(r.age_days ?? "")}d</b>` : esc(dd(r.return_date))}</td><td class="mono">${esc(r.tracking_id)}</td>
           <td class="wrap">${esc(r.customer_name ?? "")}</td><td>${esc(short(r.city, 16))}</td>
           <td class="mono">${esc(r.phone ?? "")}</td><td class="r">${esc(num(Number(r.cod_amount) || 0))}</td>
         </tr>`;
@@ -296,6 +330,7 @@ function listHtml(rows: R[], o: Opts) {
   .bx { width: 22px; text-align: center; }
   td.grp { padding: 5px 7px; font-size: 11px; border-width: 1.5px; }
   tr.got td { background: #EAF3DE; color: #3B6D11; } tr.got .on { text-decoration: line-through; }
+  tr.stk td { background: #FCEBD6; } tr.stk td.bx { font-weight: 800; color: #8A2F1E; }
 </style></head><body>
   ${boardHead(rows, o)}
   <table>

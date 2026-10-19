@@ -17,6 +17,13 @@
 export type BoardRow = {
   tracking_id: string; order_number: string | null; store_code: string | null;
   courier: string | null; return_date: string | null; person_received?: boolean;
+  /* STUCK AT COURIER, ON THE SAME SHEET (owner, 19 Oct 2026).
+     A row merged in from v_returns_stuck: the courier still has it "in transit"
+     (a failed attempt, or no movement for 15+ days), so it is not a return
+     yet — but the team was pencilling these onto the pending sheet by hand.
+     They now print in the same columns, in the same order-number run, marked
+     "!" with the number of days they have been out where the date would be. */
+  stuck?: boolean; age_days?: number | null;
 };
 export type BoardOpts = { scope: "pending" | "period" | "stuck"; from: string | null; to: string | null; courier: string; store: string };
 
@@ -58,8 +65,14 @@ function build(rows: BoardRow[], o: BoardOpts) {
   const title = o.scope === "stuck" ? "Stuck at courier" : o.scope === "pending" ? "Pending returns" : "Returns";
   const scope = `${STORE_NAME[o.store] ?? o.store} - ${o.courier === "Both" ? "PostEx & OwnEx" : o.courier}`
     + (o.scope === "period" ? ` - returned ${o.from && o.to ? `${o.from} to ${o.to}` : "at any time"}` : "");
+  /* merged: the pending board carrying stuck-at-courier rows. Its cards and
+     bands count the two apart, so the sheet still says how many returns are
+     coming back as well as how many parcels need chasing. */
+  const stuckCount = rows.filter((r) => r.stuck).length;
   return { couriers, stores, cols, depth, pend, printed, title, scope,
-           pendingCount: rows.filter(pend).length, total: rows.length };
+           pendingCount: rows.filter(pend).length, total: rows.length,
+           stuckCount, pendingOnly: rows.filter((r) => pend(r) && !r.stuck).length,
+           merged: o.scope === "pending" && stuckCount > 0 };
 }
 const storeLabel = (s: string) => STORE_NAME[s] ?? s;
 const dateShort = (s: string | null) => {
@@ -67,6 +80,30 @@ const dateShort = (s: string | null) => {
   const x = new Date(s + "T00:00:00");
   return isNaN(x.getTime()) ? s : x.toLocaleDateString("en-GB", { day: "2-digit", month: "short" });
 };
+/* Days a stuck parcel has been out: the database's own count when it sent one
+   (the same number the Stuck at courier tab shows), otherwise worked out from
+   its dispatch date. */
+const ageOf = (r: BoardRow): number | null => {
+  if (typeof r.age_days === "number" && isFinite(r.age_days)) return r.age_days;
+  if (!r.return_date) return null;
+  const x = new Date(r.return_date + "T00:00:00");
+  if (isNaN(x.getTime())) return null;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  return Math.max(0, Math.round((today.getTime() - x.getTime()) / 864e5));
+};
+/* The date slot of a cell. A return shows the day it came back; a stuck parcel
+   shows how many days it has been out — the number to chase on. "154d" is
+   narrower than "00 Mmm", so the fitted column widths still hold. */
+const cellDate = (r: BoardRow) => {
+  if (!r.stuck) return dateShort(r.return_date);
+  const a = ageOf(r);
+  return a == null ? "-" : `${a}d`;
+};
+/* Per courier/store counts for a merged board: returns and stuck apart. */
+const splitCount = (list: BoardRow[], pend: (r: BoardRow) => boolean) => ({
+  pend: list.filter((r) => pend(r) && !r.stuck).length,
+  stuck: list.filter((r) => r.stuck).length,
+});
 const fileName = (title: string, ext: string) =>
   `${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${new Date().toISOString().slice(0, 10)}.${ext}`;
 function save(blob: Blob, name: string) {
@@ -92,7 +129,8 @@ export function downloadBoardExcel(rows: BoardRow[], o: BoardOpts) {
   /* Styles (cellXfs index):
      1 bordered text · 2 grey header · 3 title · 4 meta · 5 PostEx band ·
      6 OwnEx band · 7 other band · 8 bordered bold order · 9 bordered centred ·
-     10 bordered date · 11 bordered bold order, struck (received) */
+     10 bordered date · 11 bordered bold order, struck (received) ·
+     12 bordered bold order, stuck at courier (tinted) · 13 its days-out cell */
   const band = (c: string) => (c === "PostEx" ? 5 : c === "OwnEx" ? 6 : 7);
   const str = (ref: string, v: string, s: number) =>
     `<c r="${ref}" t="inlineStr" s="${s}"><is><t xml:space="preserve">${xml(v)}</t></is></c>`;
@@ -109,7 +147,10 @@ export function downloadBoardExcel(rows: BoardRow[], o: BoardOpts) {
 
   rowsXml.push(`<row r="1" ht="22" customHeight="1">${str("A1", b.title, 3)}</row>`);
   merges.push(`A1:${lastCol}1`);
-  rowsXml.push(`<row r="2">${str("A2", `Printed on ${b.printed}   |   ${o.scope === "stuck" ? "Stuck" : o.scope === "pending" ? "Pending" : "Pending of " + b.total}: ${b.pendingCount}   |   ${b.scope}`, 4)}</row>`);
+  const summary = b.merged
+    ? `Pending: ${b.pendingOnly}   |   Stuck at courier: ${b.stuckCount} (marked !, days out instead of a date)`
+    : `${o.scope === "stuck" ? "Stuck" : o.scope === "pending" ? "Pending" : "Pending of " + b.total}: ${b.pendingCount}`;
+  rowsXml.push(`<row r="2">${str("A2", `Printed on ${b.printed}   |   ${summary}   |   ${b.scope}`, 4)}</row>`);
   merges.push(`A2:${lastCol}2`);
 
   // Courier band
@@ -117,8 +158,12 @@ export function downloadBoardExcel(rows: BoardRow[], o: BoardOpts) {
   b.couriers.forEach((c, ci) => {
     const start = 1 + ci * b.stores.length * 2;
     const end = start + b.stores.length * 2 - 1;
-    const cnt = b.cols.filter((x) => x.courier === c).reduce((t, x) => t + x.list.filter(b.pend).length, 0);
-    for (let k = start; k <= end; k++) r1 += str(`${col(k)}${HEAD}`, k === start ? `${c}  (${cnt}${o.scope === "stuck" ? " stuck" : " pending"})` : "", band(c));
+    const mine = b.cols.filter((x) => x.courier === c);
+    const cnt = mine.reduce((t, x) => t + x.list.filter(b.pend).length, 0);
+    const sc = splitCount(mine.flatMap((x) => x.list), b.pend);
+    const label = b.merged ? `${c}  (${sc.pend} pending, ${sc.stuck} stuck)`
+                           : `${c}  (${cnt}${o.scope === "stuck" ? " stuck" : " pending"})`;
+    for (let k = start; k <= end; k++) r1 += str(`${col(k)}${HEAD}`, k === start ? label : "", band(c));
     merges.push(`${col(start)}${HEAD}:${col(end)}${HEAD}`);
   });
   rowsXml.push(`<row r="${HEAD}" ht="20" customHeight="1">${r1}</row>`);
@@ -126,7 +171,9 @@ export function downloadBoardExcel(rows: BoardRow[], o: BoardOpts) {
   let r2 = str(`A${HEAD + 1}`, "", 2);
   b.cols.forEach((x, i) => {
     const c0 = 1 + i * 2;
-    r2 += str(`${col(c0)}${HEAD + 1}`, `${storeLabel(x.store)}  (${x.list.filter(b.pend).length})`, band(x.courier));
+    const sc = splitCount(x.list, b.pend);
+    const n = b.merged && sc.stuck ? `${sc.pend} + ${sc.stuck} stuck` : String(x.list.filter(b.pend).length);
+    r2 += str(`${col(c0)}${HEAD + 1}`, `${storeLabel(x.store)}  (${n})`, band(x.courier));
     r2 += str(`${col(c0 + 1)}${HEAD + 1}`, "", band(x.courier));
     merges.push(`${col(c0)}${HEAD + 1}:${col(c0 + 1)}${HEAD + 1}`);
   });
@@ -147,6 +194,12 @@ export function downloadBoardExcel(rows: BoardRow[], o: BoardOpts) {
       const c0 = 1 + ci * 2;
       const r = x.list[i];
       if (!r) { cells += str(`${col(c0)}${rn}`, "", 1) + str(`${col(c0 + 1)}${rn}`, "", 1); return; }
+      if (r.stuck) {
+        // Stuck at courier: "!" before the order, days out where the date goes.
+        cells += str(`${col(c0)}${rn}`, `! ${r.order_number ?? r.tracking_id}`, 12);
+        cells += str(`${col(c0 + 1)}${rn}`, cellDate(r), 13);
+        return;
+      }
       cells += str(`${col(c0)}${rn}`, r.order_number ?? r.tracking_id, b.pend(r) ? 8 : 11);
       cells += r.return_date && /^\d{4}-\d{2}-\d{2}$/.test(r.return_date)
         ? `<c r="${col(c0 + 1)}${rn}" s="10"><v>${serial(r.return_date)}</v></c>`
@@ -191,11 +244,11 @@ export function downloadBoardExcel(rows: BoardRow[], o: BoardOpts) {
     `<font><b/><strike/><sz val="11"/><color rgb="FF27500A"/><name val="Calibri"/></font>` + // 4
     `<font><b/><sz val="12"/><name val="Calibri"/></font>` +                               // 5
     `</fonts>` +
-    `<fills count="7"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill>` +
-    fill("E7E5E4") + fill("E6F1FB") + fill("E1F5EE") + fill("F1EFE8") + fill("EAF3DE") + `</fills>` +
+    `<fills count="8"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill>` +
+    fill("E7E5E4") + fill("E6F1FB") + fill("E1F5EE") + fill("F1EFE8") + fill("EAF3DE") + fill("FCEBD6") + `</fills>` +
     `<borders count="2"><border><left/><right/><top/><bottom/><diagonal/></border>${border}</borders>` +
     `<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>` +
-    `<cellXfs count="12">` +
+    `<cellXfs count="14">` +
     `<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>` +                                                        // 0
     `<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1"/>` +                                        // 1
     `<xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1">${centre}</xf>` + // 2
@@ -208,6 +261,8 @@ export function downloadBoardExcel(rows: BoardRow[], o: BoardOpts) {
     `<xf numFmtId="0" fontId="0" fillId="5" borderId="1" xfId="0" applyFill="1" applyBorder="1" applyAlignment="1">${centre}</xf>` + // 9 # / centred
     `<xf numFmtId="166" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1" applyAlignment="1">${centre}</xf>` + // 10 date
     `<xf numFmtId="0" fontId="4" fillId="6" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1"/>` +            // 11 struck
+    `<xf numFmtId="0" fontId="1" fillId="7" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1"/>` +            // 12 stuck order
+    `<xf numFmtId="0" fontId="1" fillId="7" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1">${centre}</xf>` + // 13 stuck days
     `</cellXfs>` +
     `<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>` +
     `</styleSheet>`;
@@ -288,14 +343,38 @@ const fontFor = (rh: number) => Math.min(12, Math.floor(rh * 0.65 * 4) / 4);
 const dateFont = (f: number) => Math.max(3.5, Math.round(f * 0.82 * 4) / 4);
 const boxFor = (f: number) => Math.max(3.5, Math.round(f * 0.88 * 4) / 4);
 
+/* ONE LONG NAME MUST NOT SHRINK THE WHOLE SHEET (19 Oct 2026).
+   Every lane used to be as wide as the longest order label anywhere on the
+   board. Merging the stuck parcels in brought one order whose reference is a
+   name — "Diverse Activewear" — and it widened every column and drove the whole
+   sheet down to the smallest print. Now each column is sized by its own labels,
+   and a label longer than an order reference is shortened on the board (the full
+   text stays in Excel and on screen). A bare tracking number keeps its END,
+   which is the part that tells parcels apart. */
+const LABEL_MAX = 10;
+const boardLabel = (r: BoardRow) => {
+  const s = String(r.order_number ?? r.tracking_id ?? "");
+  if (s.length <= LABEL_MAX) return s;
+  if (/^\d+$/.test(s)) return "…" + s.slice(-(LABEL_MAX - 1));
+  return s.slice(0, LABEL_MAX - 1).trimEnd() + "…";
+};
+/* The PDF's fonts carry no "…", so it gets three dots (also the wider of the two,
+   which makes it the safe one to measure with). */
+const pdfLabel = (r: BoardRow) => ascii(boardLabel(r).replace("…", "..."));
+
 export function fitBoard(cols: { store: string; list: BoardRow[] }[], usable: number, rowsH: number): BoardFit {
   const counts = cols.map((c) => c.list.length);
-  const orders = cols.flatMap((c) => c.list.map((r) => ascii(r.order_number ?? r.tracking_id)));
-  const headW = cols.map((c) => tw(ascii(storeLabel(c.store)), "F2", 8.5) + 10);
-  const laneW = (f: number) =>
-    3 + boxFor(f) + 3.5 + Math.max(tw("#LM00000", "F2", f), ...orders.map((t) => tw(t, "F2", f)))
+  const colLabels = cols.map((c) => c.list.map(pdfLabel));
+  // A store heading must fit its name and, on a merged sheet, "15 + 44 stuck".
+  const headW = cols.map((c) => {
+    const stk = c.list.filter((r) => r.stuck).length;
+    const cnt = stk ? `${c.list.length - stk} + ${stk} stuck` : String(c.list.length);
+    return Math.max(tw(ascii(storeLabel(c.store)), "F2", 8.5), tw(cnt, "F2", 7.5)) + 10;
+  });
+  const laneW = (f: number, i: number) =>
+    3 + boxFor(f) + 3.5 + Math.max(tw("#LM00000", "F2", f), ...colLabels[i].map((t) => tw(t, "F2", f)))
       + 4 + tw("00 Mmm", "F1", dateFont(f)) + 3;
-  const need = (lanes: number[], f: number) => { const w = laneW(f); return lanes.map((l, i) => Math.max(l * w, headW[i])); };
+  const need = (lanes: number[], f: number) => lanes.map((l, i) => Math.max(l * laneW(f, i), headW[i]));
   const fits = (lanes: number[], f: number, seq: boolean) =>
     need(lanes, f).reduce((a, x) => a + x, 0) + (seq ? SEQ_W : 0) <= usable + 0.01;
   const make = (rh: number, lanes: number[], seq: boolean, perPage: number): BoardFit => {
@@ -376,13 +455,22 @@ export function downloadBoardPdf(rows: BoardRow[], o: BoardOpts) {
     // Heading: title and scope on the left, Pending and Printed-on cards on the right.
     s += T(M, H - M - 14, "F2", 17, b.title);
     s += T(M, H - M - 28, "F1", 8.5, `Grohub Solutions - ${b.scope}`, "444441");
-    s += T(M, H - M - 39, "F1", 8.5, stuck ? "Still in transit but not moving - chase the courier (OwnEx especially). Oldest first." : o.scope === "pending" ? "Not yet received or cancelled - the same list as the Pending tab" : "", "444441");
+    s += T(M, H - M - 39, "F1", 8.5, stuck ? "Still in transit but not moving - chase the courier (OwnEx especially). Oldest first."
+      : b.merged ? "Not yet received or cancelled, plus parcels stuck at courier (!)"
+      : o.scope === "pending" ? "Not yet received or cancelled - the same list as the Pending tab" : "", "444441");
     const cardW2 = 190, cardW1 = 96, cardH = 38, cy = H - M - cardH;
     const c2x = W - M - cardW2, c1x = c2x - 8 - cardW1;
     const cFill = stuck ? "FBEAE7" : "EEEDFE", cBox = stuck ? "B5452F" : "534AB7", cInk = stuck ? "8A2F1E" : "3C3489";
     s += rect(c1x, cy, cardW1, cardH, cFill) + box(c1x, cy, cardW1, cardH, cBox);
     s += TC(c1x + cardW1 / 2, cy + 26, "F2", 7.5, stuck ? "STUCK" : o.scope === "pending" ? "PENDING" : `PENDING OF ${b.total}`, cInk);
-    s += TC(c1x + cardW1 / 2, cy + 8, "F2", 16, String(b.pendingCount), cInk);
+    s += TC(c1x + cardW1 / 2, cy + 8, "F2", 16, String(b.merged ? b.pendingOnly : b.pendingCount), cInk);
+    if (b.merged) {
+      // The stuck parcels counted apart, in their own card left of Pending.
+      const c0x = c1x - 8 - cardW1;
+      s += rect(c0x, cy, cardW1, cardH, "FBEAE7") + box(c0x, cy, cardW1, cardH, "B5452F");
+      s += TC(c0x + cardW1 / 2, cy + 26, "F2", 7.5, "STUCK AT COURIER", "8A2F1E");
+      s += TC(c0x + cardW1 / 2, cy + 8, "F2", 16, String(b.stuckCount), "8A2F1E");
+    }
     s += rect(c2x, cy, cardW2, cardH, "F1EFE8") + box(c2x, cy, cardW2, cardH, "5F5E5A");
     s += TC(c2x + cardW2 / 2, cy + 26, "F2", 7.5, "PRINTED ON", "444441");
     s += TC(c2x + cardW2 / 2, cy + 10, "F2", 9.5, b.printed, "111111");
@@ -397,17 +485,22 @@ export function downloadBoardPdf(rows: BoardRow[], o: BoardOpts) {
       const t = TONE[c] ?? TONE.Other;
       const first = ci * nS, x = xs[first];
       const w = fit.widths.slice(first, first + nS).reduce((a, v) => a + v, 0);
-      const cnt = b.cols.filter((k) => k.courier === c).reduce((a, k) => a + k.list.filter(b.pend).length, 0);
+      const mine = b.cols.filter((k) => k.courier === c);
+      const cnt = mine.reduce((a, k) => a + k.list.filter(b.pend).length, 0);
+      const sc = splitCount(mine.flatMap((k) => k.list), b.pend);
       s += rect(x, yC, w, CH, t.fill);
-      s += TC(x + w / 2, yC + 6.5, "F2", 11.5, `${c}  -  ${cnt} pending`, t.ink);
+      s += TC(x + w / 2, yC + 6.5, "F2", 11.5,
+              b.merged ? `${c}  -  ${sc.pend} pending - ${sc.stuck} stuck` : `${c}  -  ${cnt} ${stuck ? "stuck" : "pending"}`, t.ink);
     });
     // Store band
     const yS = yC - SH;
     b.cols.forEach((k, i) => {
       const t = TONE[k.courier] ?? TONE.Other;
+      const sc = splitCount(k.list, b.pend);
       s += rect(xs[i], yS, fit.widths[i], SH, t.fill);
       s += TC(xs[i] + fit.widths[i] / 2, yS + 13, "F2", 8.5, storeLabel(k.store), t.ink);
-      s += TC(xs[i] + fit.widths[i] / 2, yS + 4, "F2", 7.5, String(k.list.filter(b.pend).length), t.ink);
+      s += TC(xs[i] + fit.widths[i] / 2, yS + 4, "F2", 7.5,
+              b.merged && sc.stuck ? `${sc.pend} + ${sc.stuck} stuck` : String(k.list.filter(b.pend).length), t.ink);
     });
 
     // Rows
@@ -424,14 +517,19 @@ export function downloadBoardPdf(rows: BoardRow[], o: BoardOpts) {
           const r = at.get(`${pi}:${ri}:${ci}:${l}`);
           if (!r) continue;
           const got = !b.pend(r);
+          const stk = !!r.stuck;
           const x = xs[ci] + l * laneW(ci);
           if (got) s += rect(x, y, laneW(ci), rh, "EAF3DE");
-          s += box(x + 3, y + (rh - fit.bs) / 2, fit.bs, fit.bs, "222222", fit.bs > 5 ? 0.6 : 0.45);
-          const on = ascii(r.order_number ?? r.tracking_id);
+          if (stk) s += rect(x, y, laneW(ci), rh, "FCEBD6");     // stuck at courier: tinted
+          const by = y + (rh - fit.bs) / 2;
+          s += box(x + 3, by, fit.bs, fit.bs, "222222", fit.bs > 5 ? 0.6 : 0.45);
+          // "!" in the box: readable on a black-and-white printer, where the tint is not.
+          if (stk) s += TC(x + 3 + fit.bs / 2, by + fit.bs * 0.18, "F2", fit.bs * 0.85, "!", "8A2F1E");
+          const on = pdfLabel(r);
           const ox = x + 3 + fit.bs + 3.5, base = y + (rh - fit.f * 0.72) / 2, onW = tw(on, "F2", fit.f);
           s += T(ox, base, "F2", fit.f, on, got ? "27500A" : "000000");
           if (got) s += line(ox, base + fit.f * 0.33, ox + onW, base + fit.f * 0.33, "27500A", 0.7);
-          s += T(ox + onW + 4, base, "F1", fit.fd, dateShort(r.return_date), "555555");
+          s += T(ox + onW + 4, base, stk ? "F2" : "F1", fit.fd, cellDate(r), stk ? "8A2F1E" : "555555");
         }
       });
     }
@@ -453,6 +551,10 @@ export function downloadBoardPdf(rows: BoardRow[], o: BoardOpts) {
     s += line(left, TOP, left, bottom, "333333", fit.seq ? 1.8 : 1);
     if (fit.seq) s += line(M, yS, left, yS, "9A9892", 0.6);
     s += box(M, bottom, usable, TOP - bottom, "222222", 1);
+
+    // The key for a merged sheet, every page: what "!" and the day count mean.
+    if (b.merged) s += T(M, bottom - 10, "F1", 7,
+      "! = stuck at courier (still in transit, not moving): chase it - the number is days since dispatch.  Other rows: tick when the parcel arrives.", "333333");
 
     // Footer: signatures on the last page, page number on every page.
     if (pi === fit.pages - 1) {
@@ -571,11 +673,16 @@ export function boardHead(rows: PrintRow[], o: BoardOpts) {
     : `Returned ${o.from && o.to ? `${longDate(o.from)} – ${longDate(o.to)}` : "at any time"}`;
   const scope = `${STORE_NAME[o.store] ?? o.store} · ${o.courier === "Both" ? "PostEx & OwnEx" : o.courier}`;
   const count = o.scope === "period" ? rows.filter((r) => !r.person_received).length : rows.length;
+  const stuckN = o.scope === "pending" ? rows.filter((r) => r.stuck).length : 0;
+  const stuckCard = stuckN
+    ? `<div class="card pend" style="background:#FBEAE7;border-color:#B5452F;color:#8A2F1E"><div class="k" style="color:#8A2F1E">STUCK AT COURIER</div><div class="v">${stuckN}</div></div>`
+    : "";
   return `
   <div class="head">
-    <div><h1>${escHtml(title)}</h1><div class="sub">Grohub Solutions · ${escHtml(scope)}</div><div class="sub">${escHtml(what)}</div></div>
+    <div><h1>${escHtml(title)}</h1><div class="sub">Grohub Solutions · ${escHtml(scope)}</div><div class="sub">${escHtml(stuckN ? "Not yet received or cancelled, plus parcels stuck at courier (!)" : what)}</div></div>
     <div style="display:flex;gap:10px">
-      <div class="card pend"><div class="k">${stuck ? "STUCK AT COURIER" : o.scope === "pending" ? "PENDING" : "PENDING OF " + rows.length}</div><div class="v">${count}</div></div>
+      ${stuckCard}
+      <div class="card pend"><div class="k">${stuck ? "STUCK AT COURIER" : o.scope === "pending" ? "PENDING" : "PENDING OF " + rows.length}</div><div class="v">${count - stuckN}</div></div>
       <div class="card"><div class="k">PRINTED ON</div><div class="v" style="font-size:13px">${escHtml(printed)}</div><div class="k" style="font-weight:400">${escHtml(time)}</div></div>
     </div>
   </div>`;
@@ -634,6 +741,11 @@ const BOARD_CSS = `
   .board td.cell { white-space: nowrap; padding: 0 3pt; vertical-align: middle; }
   .board td.lane { border-left: 0.5pt dashed #b4b2aa; }
   .board td.got { background: #EAF3DE; }
+  /* Stuck at courier on the pending sheet: a tint for colour printers and a
+     bold "!" in the tick box for black-and-white ones, where the tint is lost. */
+  .board td.stk { background: #FCEBD6; }
+  .stk .bx { font-weight: 800; color: #8A2F1E; }
+  .stk .dt { color: #8A2F1E; font-weight: 700; }
   .board td.empty { text-align: center; font-size: 9pt; color: #444; }
   .bx { display: inline-block; width: var(--bs); height: var(--bs); border: var(--bxbw) solid #222;
         margin-right: 3.5pt; vertical-align: middle; font-size: var(--bxf); line-height: var(--bs); text-align: center; }
@@ -664,17 +776,25 @@ function boardSheets(rows: PrintRow[], o: BoardOpts): string {
   const time = now.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
   const what = stuck
     ? "Still in transit but not moving — a failed attempt, or 15+ days with no update. Chase the courier (OwnEx especially). Oldest first."
+    : b.merged
+    ? "Not yet received or cancelled, plus parcels stuck at courier (!)"
     : o.scope === "pending"
     ? "Not yet received or cancelled — the same list as the Pending tab"
     : `Returned ${o.from && o.to ? `${longDate(o.from)} – ${longDate(o.to)}` : "at any time"}`;
   const scope = `${STORE_NAME[o.store] ?? o.store} · ${o.courier === "Both" ? "PostEx & OwnEx" : o.courier}`;
   const cardCls = stuck ? "card stuck" : "card pend";
   const cardK = stuck ? "STUCK AT COURIER" : o.scope === "pending" ? "PENDING" : "PENDING OF " + b.total;
+  /* A merged sheet counts the two apart: the returns coming back, and the
+     parcels to chase. */
+  const cards = b.merged
+    ? `<div class="card stuck"><div class="k">STUCK AT COURIER</div><div class="v">${b.stuckCount}</div></div>
+        <div class="card pend"><div class="k">PENDING</div><div class="v">${b.pendingOnly}</div></div>`
+    : `<div class="${cardCls}"><div class="k">${cardK}</div><div class="v">${b.pendingCount}</div></div>`;
   const head = `
     <div class="hd">
       <div><h1>${escHtml(b.title)}</h1><div class="sub">Grohub Solutions · ${escHtml(scope)}</div><div class="sub">${escHtml(what)}</div></div>
       <div class="cards">
-        <div class="${cardCls}"><div class="k">${cardK}</div><div class="v">${b.pendingCount}</div></div>
+        ${cards}
         <div class="card pr"><div class="k">PRINTED ON</div><div class="v">${escHtml(printed)}, ${escHtml(time)}</div></div>
       </div>
     </div>`;
@@ -686,19 +806,26 @@ function boardSheets(rows: PrintRow[], o: BoardOpts): string {
     const span = L.slice(ci * nS, ci * nS + nS).reduce((a, x) => a + x, 0);
     const pend = mine.reduce((a, k) => a + k.list.filter(b.pend).length, 0);
     const total = mine.reduce((a, k) => a + k.list.length, 0);
+    const sc = splitCount(mine.flatMap((k) => k.list), b.pend);
     const t = tone(c);
+    const cnt = b.merged ? `${sc.pend} pending${sc.stuck ? ` · ${sc.stuck} stuck` : ""}`
+      : `${pend}${o.scope === "period" ? ` pending of ${total}` : stuck ? " stuck" : " pending"}`;
     return `<th colspan="${span}" class="courier split" style="background:${t.fill};color:${t.ink}">${escHtml(c)}
-      <span class="cnt">· ${pend}${o.scope === "period" ? ` pending of ${total}` : stuck ? " stuck" : " pending"}</span></th>`;
+      <span class="cnt">· ${cnt}</span></th>`;
   }).join("");
   const storeRow = b.cols.map((k, i) => {
     const t = tone(k.courier);
+    const sc = splitCount(k.list, b.pend);
+    const n = b.merged && sc.stuck ? `${sc.pend} + ${sc.stuck} stuck` : String(k.list.filter(b.pend).length);
     return `<th colspan="${L[i]}" class="store${i % nS === 0 ? " split" : ""}" style="background:${t.fill};color:${t.ink}">
-      <div class="sn">${escHtml(STORE_NAME[k.store] ?? k.store)}</div><div class="sc">${k.list.filter(b.pend).length}</div></th>`;
+      <div class="sn">${escHtml(STORE_NAME[k.store] ?? k.store)}</div><div class="sc">${n}</div></th>`;
   }).join("");
 
   const footer = `
     <div class="key">${stuck
       ? `<b>&#9744;</b> chase these with the courier &nbsp;·&nbsp; tick once it moves or comes back &nbsp;·&nbsp; each column in order-number order${fit.seq ? "" : ", down one list then the next"} &nbsp;·&nbsp; date = when it was dispatched`
+      : b.merged
+      ? `<b>&#9744;</b> tick when it arrives &nbsp;·&nbsp; strike through once in hand and cancelled in Shopify &nbsp;·&nbsp; <b>!</b> = stuck at courier: chase it (the number is days since dispatch) &nbsp;·&nbsp; order-number order${fit.seq ? "" : ", one list then the next"}`
       : `<b>&#9744;</b> tick when the parcel arrives &nbsp;·&nbsp; strike the order through once it is in hand and cancelled in Shopify &nbsp;·&nbsp; each column in order-number order${fit.seq ? "" : ", down one list then the next"} &nbsp;·&nbsp; date = the day the courier returned it`}</div>
     <div class="sign">${stuck
       ? "<div>Prepared by</div><div>Chased by</div><div>Courier contacted</div>"
@@ -719,7 +846,8 @@ function boardSheets(rows: PrintRow[], o: BoardOpts): string {
           const cls = `cell${l === 0 && c % nS === 0 ? " split" : ""}${l > 0 ? " lane" : ""}`;
           if (!e) { cells += `<td class="${cls}"></td>`; continue; }
           const got = !b.pend(e);
-          cells += `<td class="${cls}${got ? " got" : ""}"><span class="bx">${got ? "&#10003;" : ""}</span><span class="on">${escHtml(e.order_number ?? e.tracking_id)}</span><span class="dt">${escHtml(dd(e.return_date))}</span></td>`;
+          const stk = !!e.stuck;
+          cells += `<td class="${cls}${got ? " got" : ""}${stk ? " stk" : ""}"><span class="bx">${got ? "&#10003;" : stk ? "!" : ""}</span><span class="on">${escHtml(boardLabel(e))}</span><span class="dt">${escHtml(cellDate(e))}</span></td>`;
         }
         return cells;
       }).join("") + "</tr>";

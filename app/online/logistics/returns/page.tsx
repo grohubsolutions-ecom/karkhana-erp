@@ -94,6 +94,11 @@ export default function ReturnsPage() {
   const [counts, setCounts] = useState<SectionCount[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
+  /* COURIER FEED HEALTH (19 Oct 2026). From 10 to 19 Oct OwnEx's status feed
+     failed on every run and nothing said so: 61 returns never reached this page.
+     hub_courier_sync_health() is fed by a watchdog that reads every status run;
+     a feed down for 30 minutes shows here, on the page whose numbers it breaks. */
+  const [feedDown, setFeedDown] = useState<{ courier: string; last_ok_at: string | null; problem: string | null }[]>([]);
   const [preset, setPreset] = useState("all");
   const [cf, setCf] = useState(""); const [ct, setCt] = useState("");
   const [store, setStore] = useState("ALL");
@@ -220,6 +225,20 @@ export default function ReturnsPage() {
   }, [tab, preset, cf, ct, store, courier, term]);
 
   useEffect(() => { load(); }, [load]);
+  // Feed health: on arrival and every 10 minutes (the watchdog's own pace).
+  useEffect(() => {
+    if (!isSupabaseConfigured || !supabase) return;
+    const sb = supabase;
+    let live = true;
+    const check = async () => {
+      const { data } = await sb.rpc("hub_courier_sync_health");
+      if (live) setFeedDown(((data ?? []) as { courier: string; ok: boolean; last_ok_at: string | null; problem: string | null }[])
+        .filter((f) => !f.ok));
+    };
+    check();
+    const t = setInterval(check, 10 * 60 * 1000);
+    return () => { live = false; clearInterval(t); };
+  }, []);
   /* Figures only on a live tick — the same reason as Orders and Logistics.
      A courier status change should update the counts, not re-pull the list. */
   useLiveTables(["online_logistics"], useCallback(() => load({ silent: true, figuresOnly: true }), [load]));
@@ -323,6 +342,24 @@ export default function ReturnsPage() {
           </button>
         </PageActions>
       </div>
+
+      {feedDown.length > 0 && (
+        <div className="mt-3 flex gap-2.5 rounded-card border border-red-300 bg-red-50 p-3.5 text-[13px] text-red-900 dark:border-red-400/40 dark:bg-red-500/10 dark:text-red-200">
+          <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+          <div>
+            {feedDown.map((f) => (
+              <div key={f.courier}>
+                <b>{f.courier} statuses are not updating</b>
+                {f.last_ok_at ? ` — last good update ${new Date(f.last_ok_at).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}` : ""}
+                {f.problem ? <span className="text-red-800/80 dark:text-red-200/80"> ({f.problem})</span> : null}
+              </div>
+            ))}
+            <div className="mt-1 text-[12.5px]">
+              Until it is fixed, that courier&apos;s returns cannot reach Pending returns or the printed sheet. Tell Kashif.
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* range — the same control as every other Hub page: presets on a
           desktop, one picker on a phone (the old row wrapped into three lines
