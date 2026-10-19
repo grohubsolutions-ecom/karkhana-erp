@@ -618,7 +618,7 @@ export default function HubEmployeesPage() {
                 it are not paid, so a man who starts on the 15th is not paid for
                 the two Sundays he was not here. Left empty, every Sunday of his
                 first month is paid. */}
-            <Field label="Joined" hint="Sundays before this date are not paid">
+            <Field label="Joined">
               <input type="date" data-field="joined" className={inputCls} value={form.join_date} max={todayPk()}
                  onChange={(e) => setForm({ ...form, join_date: e.target.value })} />
               <p className="mt-1 text-[11.5px] text-hint dark:text-[#8a8175]">
