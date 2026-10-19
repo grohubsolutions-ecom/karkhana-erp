@@ -57,6 +57,8 @@ type ReturnRow = {
   customer_name: string | null; city: string | null;
   return_date: string | null; return_received_at: string | null; received: boolean;
   return_claim_status: string | null; age_days: number | null;
+  /* "In Transit" on a search hit means a stuck-at-courier parcel (19 Oct 2026). */
+  delivery_status?: string | null;
 };
 
 type UnpaidRow = {
@@ -170,10 +172,17 @@ export default function ReturnsPage() {
          sit after an early return and never ran. */
       setJumped("");
       if (hits.length && tab !== "delivered_unpaid") {
-        const allClosed  = hits.every((x) => x.needs_chasing === false);
+        /* The search also finds parcels STUCK AT THE COURIER (19 Oct 2026):
+           #TS3829 was on the printed sheet and the search said "No parcel
+           matches". Those hits carry delivery_status "In Transit"; they belong
+           on the Stuck tab, not under Returns delivered. */
+        const isStuck    = (x: ReturnRow) => x.delivery_status === "In Transit";
+        const allStuck   = hits.every(isStuck);
+        const allClosed  = hits.every((x) => !isStuck(x) && x.needs_chasing === false);
         const allChasing = hits.every((x) => x.needs_chasing === true);
-        if (tab === "pending_returns" && allClosed)  { setJumped("Returns delivered");  setTab("closed_returns"); }
-        if (tab === "closed_returns"  && allChasing) { setJumped("Pending returns"); setTab("pending_returns"); }
+        if (allStuck && tab !== "stuck_returns")          { setJumped("Stuck at courier");  setTab("stuck_returns"); }
+        else if (tab === "pending_returns" && allClosed)  { setJumped("Returns delivered");  setTab("closed_returns"); }
+        else if (tab === "closed_returns"  && allChasing) { setJumped("Pending returns"); setTab("pending_returns"); }
       }
       return;
     }

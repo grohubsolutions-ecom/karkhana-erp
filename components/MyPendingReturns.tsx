@@ -17,16 +17,17 @@
  *   The same rows the Pending tab counts, so his sheet and the office screen
  *   can never disagree, and the printed board is the same board — one renderer
  *   in lib/returnsBoardExport, used by both.
+ *
+ *   Only parcels the courier has marked as a return (owner, 19 Oct 2026). The
+ *   stuck-at-courier list was merged in here for part of 19 Oct and taken out
+ *   again: an "Attempted" parcel is not a return and must not be on his sheet.
  */
 import { useCallback, useEffect, useState } from "react";
 import { Printer, Loader2, FileSpreadsheet, FileDown, RefreshCw, Undo2, AlertTriangle } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { downloadBoardExcel, downloadBoardPdf, boardHtml, type BoardOpts, type PrintRow } from "@/lib/returnsBoardExport";
 
-/* stuck / age_days: a stuck-at-courier parcel from my_stuck_returns(), merged in
-   so the sheet carries it (owner, 19 Oct 2026) — printed "!" with its days out. */
-type Row = { tracking_id: string; order_number: string | null; store_code: string | null; courier: string | null;
-             return_date: string | null; stuck?: boolean; age_days?: number | null };
+type Row = { tracking_id: string; order_number: string | null; store_code: string | null; courier: string | null; return_date: string | null };
 
 const STORE_NAME: Record<string, string> = { LM: "Little Minors", TS: "TopShop", TRZ: "Trenzee" };
 const TONE: Record<string, string> = {
@@ -50,17 +51,9 @@ export default function MyPendingReturns() {
   const load = useCallback(async () => {
     if (!isSupabaseConfigured || !supabase) { setLoading(false); return; }
     setLoading(true); setErr("");
-    /* The pending returns AND the parcels stuck at the courier — the ones the
-       sheet used to get pencilled onto it by hand. Both come through their own
-       boundary functions; the stuck list failing must not take the pending one
-       with it, so its error is shown but the pending rows still load. */
-    const [p, s] = await Promise.all([supabase.rpc("my_pending_returns"), supabase.rpc("my_stuck_returns")]);
-    if (p.error) setErr(p.error.message);
-    else if (s.error) setErr(`Stuck-at-courier parcels could not be loaded: ${s.error.message}`);
-    const pending = (p.data as Row[]) ?? [];
-    const seen = new Set(pending.map((r) => r.tracking_id));
-    const stuck = ((s.data as Row[]) ?? []).filter((r) => !seen.has(r.tracking_id)).map((r) => ({ ...r, stuck: true }));
-    setRows([...pending, ...stuck]);
+    const { data, error } = await supabase.rpc("my_pending_returns");
+    if (error) setErr(error.message);
+    setRows((data as Row[]) ?? []);
     setLoading(false);
   }, []);
   useEffect(() => { load(); }, [load]);
@@ -86,8 +79,6 @@ export default function MyPendingReturns() {
 
   const couriers = ["PostEx", "OwnEx"];
   for (const r of rows) { const c = r.courier || "Other"; if (!couriers.includes(c)) couriers.push(c); }
-  const stuckCount = rows.filter((r) => r.stuck).length;
-  const pendingCount = rows.length - stuckCount;
   const btn = "flex h-11 items-center justify-center gap-2 rounded-full border border-line bg-surface px-4 text-[13px] font-semibold text-ink transition active:bg-panel disabled:opacity-50 dark:border-white/10 dark:bg-white/[0.06] dark:text-white";
 
   return (
@@ -102,17 +93,9 @@ export default function MyPendingReturns() {
               Coming back from the courier and not yet cancelled in Shopify. When a parcel arrives, cancel it in Shopify and tag it RTS — it leaves this list by itself.
             </p>
           </div>
-          <div className="flex items-baseline gap-4">
-            <div className="flex items-baseline gap-2">
-              <span className="text-[28px] font-extrabold leading-none tabular-nums text-ink dark:text-[#f4f1ea]">{loading ? "—" : pendingCount}</span>
-              <span className="text-[12px] font-semibold text-muted dark:text-[#a89f93]">pending</span>
-            </div>
-            {!loading && stuckCount > 0 && (
-              <div className="flex items-baseline gap-2">
-                <span className="text-[28px] font-extrabold leading-none tabular-nums text-[#8A2F1E] dark:text-[#f0a493]">{stuckCount}</span>
-                <span className="text-[12px] font-semibold text-muted dark:text-[#a89f93]">stuck at courier</span>
-              </div>
-            )}
+          <div className="flex items-baseline gap-2">
+            <span className="text-[28px] font-extrabold leading-none tabular-nums text-ink dark:text-[#f4f1ea]">{loading ? "—" : rows.length}</span>
+            <span className="text-[12px] font-semibold text-muted dark:text-[#a89f93]">pending</span>
           </div>
         </div>
 
@@ -171,13 +154,9 @@ export default function MyPendingReturns() {
                           <ul className="mt-1.5 space-y-1">
                             {list.length === 0 ? <li className="text-[12px] text-hint dark:text-[#8a8175]">—</li>
                               : list.map((r) => (
-                                <li key={r.tracking_id} className={`flex items-baseline justify-between gap-2 rounded-xl2 border px-2.5 py-1.5 text-[12.5px] ${r.stuck
-                                    ? "border-[#B5452F]/30 bg-[#FCEBD6] dark:border-[#f0a493]/30 dark:bg-[#f0a493]/10"
-                                    : "border-line dark:border-white/10"}`}>
-                                  <span className="font-bold text-ink dark:text-[#f4f1ea]">{r.stuck && <span className="mr-1 text-[#8A2F1E] dark:text-[#f0a493]">!</span>}{r.order_number ?? r.tracking_id}</span>
-                                  <span className={`shrink-0 text-[11.5px] ${r.stuck ? "font-bold text-[#8A2F1E] dark:text-[#f0a493]" : "text-muted dark:text-[#a89f93]"}`}>
-                                    {r.stuck ? `stuck ${r.age_days ?? "?"}d` : dd(r.return_date)}
-                                  </span>
+                                <li key={r.tracking_id} className="flex items-baseline justify-between gap-2 rounded-xl2 border border-line px-2.5 py-1.5 text-[12.5px] dark:border-white/10">
+                                  <span className="font-bold text-ink dark:text-[#f4f1ea]">{r.order_number ?? r.tracking_id}</span>
+                                  <span className="shrink-0 text-[11.5px] text-muted dark:text-[#a89f93]">{dd(r.return_date)}</span>
                                 </li>
                               ))}
                           </ul>
@@ -194,8 +173,7 @@ export default function MyPendingReturns() {
 
       <p className="px-1 text-[11.5px] leading-relaxed text-hint dark:text-[#8a8175]">
         The printed sheet carries the same list: PostEx and OwnEx side by side, each split by store,
-        in order-number order, with a box against every order to tick as the parcel arrives. Parcels
-        stuck at the courier print on the same sheet, marked ! with the days they have been out — chase those.
+        in order-number order, with a box against every order to tick as the parcel arrives.
       </p>
     </div>
   );

@@ -10,6 +10,14 @@
  *   put 83 rows on paper when the screen said 4. That is still available as an
  *   option ("All returns in a period"), but it is not what the button is for.
  *
+ * ONLY WHAT THE COURIER HAS MARKED AS A RETURN (owner, 19 Oct 2026)
+ *   A parcel reaches this sheet when PostEx or OwnEx turns its status into a
+ *   return — not before. "Attempted", refused, held or not moving is still out
+ *   with the courier: those are on "Stuck at courier", which prints on a sheet
+ *   of its own. Printing them on the pending sheet (tried on 19 Oct and taken
+ *   out the same day) put attempted parcels like #LM16871 under a "Pending
+ *   returns" heading, which is exactly the confusion this sheet must not cause.
+ *
  * THE LAYOUT IS THE OWNER'S OWN DRAWING
  *     Date printed (fills itself) · pending total
  *     #  |        PostEx         |         OwnEx
@@ -36,8 +44,6 @@ type R = {
   courier: string | null; return_date: string | null;
   cod_amount?: number | null; customer_name?: string | null; city?: string | null; phone?: string | null;
   reason?: string | null; shopify_cancelled?: boolean; person_received?: boolean;
-  /* A stuck-at-courier parcel merged onto the pending sheet (see below). */
-  stuck?: boolean; age_days?: number | null;
 };
 /* A courier whose status feed has stopped answering (hub_courier_sync_health).
    While one is down, its returns cannot reach this sheet — say so before printing. */
@@ -92,19 +98,17 @@ export default function ReturnsPrintButton({ store = "ALL" }: { store?: string }
 
   async function fetchRows(which: Scope, from: string | null, to: string | null): Promise<R[]> {
     const all: R[] = [];
-    // age_days exists on v_returns_stuck only — the days-out number a stuck row prints.
-    const cols = "tracking_id,order_number,store_code,courier,return_date,cod_amount,customer_name,city,phone,courier_reason_text,order_cancelled_at"
-      + (which === "stuck" ? ",age_days" : "");
+    const cols = "tracking_id,order_number,store_code,courier,return_date,cod_amount,customer_name,city,phone,courier_reason_text,order_cancelled_at";
     /* Paged: every request stops at 1,000 rows, and a checklist that silently
        ended there would be a checklist with its end torn off. */
     for (let off = 0; ; off += 1000) {
       let data: unknown[] | null; let error: { message: string } | null;
       if (which === "pending" || which === "stuck") {
-        /* Pending reads the Pending tab's own flag, so paper and screen agree.
-           Stuck reads its own live view (v_returns_stuck) — the same parcels the
-           "Stuck at courier" tab shows, the ones that never reach Pending on
-           their own and were being pencilled onto the sheet by hand. Both views
-           carry the same columns, so the one board draws either. */
+        /* Pending reads the Pending tab's own flag, so paper and screen agree:
+           courier-marked returns only. Stuck reads its own live view
+           (v_returns_stuck) — the same parcels the "Stuck at courier" tab shows,
+           on their own sheet. Both views carry the same columns, so the one
+           board draws either. */
         let q = supabase!.from(which === "stuck" ? "v_returns_stuck" : "v_returns_all")
           .select(cols)
           .order("return_date", { ascending: which === "stuck", nullsFirst: false })
@@ -131,21 +135,6 @@ export default function ReturnsPrintButton({ store = "ALL" }: { store?: string }
     return all;
   }
 
-  /* THE PENDING SHEET WITH THE STUCK PARCELS ON IT (owner, 19 Oct 2026).
-     "When the pending orders are printed, the stuck at courier orders should
-     appear on the same page." The team was pencilling them in by hand.
-     They join the same board — same courier and store columns, same
-     order-number run — flagged so the board marks them "!" with their days
-     out. A parcel can't be in both views (RTS/Returned vs In Transit), but a
-     row is never printed twice: pending wins. */
-  async function pendingWithStuck(): Promise<R[]> {
-    const [pending, stuck] = await Promise.all([fetchRows("pending", null, null), fetchRows("stuck", null, null)]);
-    const seen = new Set(pending.map((r) => r.tracking_id));
-    return [...pending, ...stuck.filter((r) => !seen.has(r.tracking_id)).map((r) => ({ ...r, stuck: true }))];
-  }
-  const rowsFor = (from: string | null, to: string | null) =>
-    scope === "pending" ? pendingWithStuck() : fetchRows(scope, from, to);
-
   async function print() {
     if (!supabase) return;
     setErr("");
@@ -156,8 +145,7 @@ export default function ReturnsPrintButton({ store = "ALL" }: { store?: string }
     try {
       const [from, to] = scope === "period" ? rangeDates(period) : [null, null];
       const o: Opts = { scope, from, to, courier, store: st };
-      // Pending: one sheet, the stuck parcels in it. Other scopes: as chosen.
-      const rows = await rowsFor(from, to);
+      const rows = await fetchRows(scope, from, to);
       const doc = layout === "board" ? boardHtml(rows, o) : listHtml(rows, o);
       w.document.open();
       w.document.write(doc);
@@ -180,8 +168,7 @@ export default function ReturnsPrintButton({ store = "ALL" }: { store?: string }
     setErr(""); setBusy(kind);
     try {
       const [from, to] = scope === "period" ? rangeDates(period) : [null, null];
-      // The same rows as the printout — so the pending file carries the stuck parcels too.
-      const rows = await rowsFor(from, to);
+      const rows = await fetchRows(scope, from, to);
       const o: Opts = { scope, from, to, courier, store: st };
       if (layout === "board") {
         if (kind === "xlsx") downloadBoardExcel(rows, o); else downloadBoardPdf(rows, o);
@@ -191,9 +178,9 @@ export default function ReturnsPrintButton({ store = "ALL" }: { store?: string }
           || String(b.return_date ?? "").localeCompare(String(a.return_date ?? "")));
         const table: ExportTable = {
           title: scope === "pending" ? "Pending returns" : scope === "stuck" ? "Stuck at courier" : "Returns",
-          headers: ["#", "Courier", "Store", "Order", "Returned", "Tracking", "Customer", "City", "Phone", "COD"],
+          headers: ["#", "Courier", "Store", "Order", scope === "stuck" ? "Dispatched" : "Returned", "Tracking", "Customer", "City", "Phone", "COD"],
           rows: sorted.map((r, i) => [i + 1, r.courier ?? "", r.store_code ?? "", r.order_number ?? "",
-            r.stuck ? `STUCK ${r.age_days ?? ""}d` : r.return_date ?? "", r.tracking_id, r.customer_name ?? "", r.city ?? "", r.phone ?? "",
+            r.return_date ?? "", r.tracking_id, r.customer_name ?? "", r.city ?? "", r.phone ?? "",
             Number(r.cod_amount) || 0]),
         };
         if (kind === "xlsx") exportExcel(table); else exportPDF(table);
@@ -229,7 +216,7 @@ export default function ReturnsPrintButton({ store = "ALL" }: { store?: string }
           </Field>
           <p className="-mt-2 text-[12px] leading-snug text-muted dark:text-[#a89f93]">
             {scope === "pending"
-              ? "Stuck-at-courier parcels print on the same sheet, in the same columns, marked ! with the days they have been out — nothing to add by hand."
+              ? "Only parcels PostEx or OwnEx have marked as a return — the same list as the Pending tab. Parcels still with the courier (attempted, refused, not moving) are not returns yet; print those with “Stuck at courier”."
               : scope === "stuck"
               ? "Parcels still marked in transit but not moving — a failed attempt, or no update for 15+ days. Chase the courier (OwnEx especially)."
               : "Every return in the chosen window; received ones are struck through."}
@@ -305,16 +292,14 @@ function listHtml(rows: R[], o: Opts) {
   const body = keys.map((k) => {
     const t = TONE[k] ?? TONE.Other;
     const list = groups.get(k)!.slice().sort((a, b) => String(b.return_date ?? "").localeCompare(String(a.return_date ?? "")));
-    const stuckN = list.filter((r) => r.stuck).length;
     return `<tbody><tr><td colspan="10" class="grp" style="background:${t.fill};color:${t.ink};border-color:${t.line}">
-        <b>${esc(k)}</b> · ${list.length - stuckN} return${list.length - stuckN === 1 ? "" : "s"}${stuckN ? ` · ${stuckN} stuck at courier (!)` : ""}</td></tr>
+        <b>${esc(k)}</b> · ${list.length} ${o.scope === "stuck" ? `parcel${list.length === 1 ? "" : "s"}` : `return${list.length === 1 ? "" : "s"}`}</td></tr>
       ${list.map((r) => {
         n += 1; const got = o.scope === "period" && !!r.person_received;
-        // Stuck at courier: "!" in the box and its days out where the date goes.
-        return `<tr class="${got ? "got" : ""}${r.stuck ? " stk" : ""}">
-          <td class="c">${n}</td><td class="bx">${got ? "&#10003;" : r.stuck ? "!" : ""}</td>
+        return `<tr class="${got ? "got" : ""}">
+          <td class="c">${n}</td><td class="bx">${got ? "&#10003;" : ""}</td>
           <td class="b on">${esc(r.order_number ?? "—")}</td><td class="c">${esc(r.store_code ?? "")}</td>
-          <td class="c">${r.stuck ? `<b>stuck ${esc(r.age_days ?? "")}d</b>` : esc(dd(r.return_date))}</td><td class="mono">${esc(r.tracking_id)}</td>
+          <td class="c">${esc(dd(r.return_date))}</td><td class="mono">${esc(r.tracking_id)}</td>
           <td class="wrap">${esc(r.customer_name ?? "")}</td><td>${esc(short(r.city, 16))}</td>
           <td class="mono">${esc(r.phone ?? "")}</td><td class="r">${esc(num(Number(r.cod_amount) || 0))}</td>
         </tr>`;
@@ -330,11 +315,10 @@ function listHtml(rows: R[], o: Opts) {
   .bx { width: 22px; text-align: center; }
   td.grp { padding: 5px 7px; font-size: 11px; border-width: 1.5px; }
   tr.got td { background: #EAF3DE; color: #3B6D11; } tr.got .on { text-decoration: line-through; }
-  tr.stk td { background: #FCEBD6; } tr.stk td.bx { font-weight: 800; color: #8A2F1E; }
 </style></head><body>
   ${boardHead(rows, o)}
   <table>
-    <thead><tr><th>#</th><th class="bx">&#9744;</th><th>Order</th><th>Store</th><th>Returned</th><th>Tracking</th><th>Customer</th>
+    <thead><tr><th>#</th><th class="bx">&#9744;</th><th>Order</th><th>Store</th><th>${o.scope === "stuck" ? "Dispatched" : "Returned"}</th><th>Tracking</th><th>Customer</th>
       <th>City</th><th>Phone</th><th>COD</th></tr></thead>
     ${body || `<tbody><tr><td colspan="10" class="c" style="padding:24px">No returns to print.</td></tr></tbody>`}
   </table>
