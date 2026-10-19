@@ -21,7 +21,7 @@ import ReturnsPrintButton from "@/components/ReturnsPrintSheet";
    Pending returns is deliberately oldest-first: couriers stop honouring claims
    after a while, so the row most likely to cost money is the one at the top. */
 
-type Section = "pending_returns" | "closed_returns" | "delivered_unpaid";
+type Section = "pending_returns" | "closed_returns" | "delivered_unpaid" | "stuck_returns";
 
 const TABS: { key: Section; label: string; hint: string }[] = [
   /* THE OWNER'S RULE (H241, H242): Shopify first.
@@ -40,6 +40,11 @@ const TABS: { key: Section; label: string; hint: string }[] = [
      which reads as "this does not exist". */
   { key: "closed_returns",   label: "Returns delivered", hint: "Cancelled in Shopify or marked received (back in the office), paid in Shopify, or past the courier's window — PostEx 30 days, OwnEx 60. The reason is on each row." },
   { key: "delivered_unpaid", label: "Awaiting CPR", hint: "Delivered to the customer, but the COD has not reached you yet. The CPR confirms it. This is the receivable." },
+  /* STUCK AT THE COURIER — the blind spot these pencilled parcels came from. A
+     failed-attempt or no-movement parcel the courier never turned into a return:
+     not in Pending (no return code) and aged off the First-Attempt desk
+     (yesterday+today only). Surfaced here so nobody tracks them on paper. */
+  { key: "stuck_returns", label: "Stuck at courier", hint: "Still ‘in transit’ but not moving — a failed attempt the courier hasn’t turned into a return, or no movement for 15+ days. These never reach Pending returns on their own; chase the courier (OwnEx especially). Oldest first." },
 ];
 
 type ReturnRow = {
@@ -119,7 +124,7 @@ export default function ReturnsPage() {
     setErr("");
     const [from, to] = rangeDates(preset, cf, ct);
 
-    const view = tab === "delivered_unpaid" ? "v_delivered_unpaid" : "v_returns_all";  // closed returns come from the same view, filtered below
+    const view = tab === "delivered_unpaid" ? "v_delivered_unpaid" : tab === "stuck_returns" ? "v_returns_stuck" : "v_returns_all";  // closed returns come from v_returns_all filtered below; stuck from its own live view
     const dateCol = tab === "delivered_unpaid" ? "delivery_date" : "return_date";
     /* OLDEST FIRST, on both tabs.
        A chase list is worked from the top, and the oldest parcel is the one
@@ -244,6 +249,9 @@ export default function ReturnsPage() {
     { key: "delivered_unpaid" as Section, label: "Awaiting CPR", Icon: Wallet, bg: "bg-success-soft",
       n: find("delivered_unpaid")?.n ?? 0, v: find("delivered_unpaid")?.value ?? 0,
       sub: find("delivered_unpaid")?.oldest_days ? `oldest ${find("delivered_unpaid")?.oldest_days}d` : undefined },
+    { key: "stuck_returns" as Section, label: "Stuck at courier", Icon: AlertTriangle, bg: "bg-danger-soft",
+      n: find("stuck_returns")?.n ?? 0, v: find("stuck_returns")?.value ?? 0,
+      sub: find("stuck_returns")?.oldest_days ? `oldest ${find("stuck_returns")?.oldest_days}d` : undefined },
   ];
 
   /* The database already matched the search — tracking, order, customer AND
@@ -252,6 +260,9 @@ export default function ReturnsPage() {
   const filtered = rows;
 
   const isReturns = tab !== "delivered_unpaid";
+  /* Mark received acts on RTS/Returned parcels only — a stuck parcel is still
+     'In Transit', so its checkboxes and the Mark-received bar are hidden. */
+  const canReceive = tab === "pending_returns" || tab === "closed_returns";
 
   /* A courier saying "returned" is not the same as the parcel being on your
      shelf, so nothing marks itself received — a person has to confirm they are
@@ -334,7 +345,7 @@ export default function ReturnsPage() {
       {/* The three sections are the tabs. Three across on a phone too — they
           were three full-width cards stacked, a screen of scrolling before the
           first parcel. */}
-      <div className="mt-4 grid grid-cols-3 gap-2 sm:mt-5 sm:gap-3">
+      <div className="mt-4 grid grid-cols-2 gap-2 sm:mt-5 sm:grid-cols-4 sm:gap-3">
         {cards.map((c) => (
           <button key={c.key} onClick={() => setTab(c.key)} aria-pressed={tab === c.key}
             className={`min-w-0 rounded-card p-3 text-left transition active:scale-[0.98] sm:p-4 ${c.bg} ${tab === c.key ? "ring-2 ring-ink dark:ring-white/40" : "opacity-80 hover:opacity-100"} dark:bg-white/[0.05]`}>
@@ -351,7 +362,7 @@ export default function ReturnsPage() {
 
       {/* On a phone this rides above the tab bar, so it is in reach wherever
           the ticked parcels are in the list. */}
-      {isReturns && picked.length > 0 && (
+      {canReceive && picked.length > 0 && (
         <div className="fixed inset-x-0 bottom-[calc(60px+env(safe-area-inset-bottom))] z-30 flex items-center gap-3 border-t border-line bg-surface px-4 py-2.5 shadow-[0_-6px_20px_rgba(20,16,12,0.08)] md:static md:mt-4 md:rounded-card md:border md:py-3 md:shadow-none dark:border-white/10 dark:bg-[#201c17] md:dark:bg-white/[0.05]">
           <span className="flex-1 text-[13px] font-semibold text-ink md:flex-none dark:text-[#f4f1ea]">{picked.length} selected</span>
           <button onClick={() => setPicked([])} className="h-11 px-2 text-[13px] font-semibold text-muted md:order-last md:h-auto dark:text-[#a89f93]">Clear</button>
@@ -489,7 +500,7 @@ export default function ReturnsPage() {
             const old = Number(r.age_days ?? 0) > 14;
             return (
               <div key={r.tracking_id} className={`flex items-stretch overflow-hidden rounded-xl2 border bg-surface dark:bg-[#201c17] ${on ? "border-ink dark:border-white/40" : "border-line dark:border-white/[0.06]"}`}>
-                {isReturns && (
+                {canReceive && (
                   <button type="button" aria-pressed={on} aria-label={`Select ${r.order_number ?? r.tracking_id}`}
                     onClick={() => setPicked((p) => on ? p.filter((x) => x !== r.tracking_id) : [...p, r.tracking_id])}
                     className="flex w-12 shrink-0 items-center justify-center border-r border-line active:bg-panel dark:border-white/[0.06]">
@@ -525,7 +536,7 @@ export default function ReturnsPage() {
         <table className="w-full min-w-[880px] text-left text-[13px]">
           <thead className="border-b border-line text-[11.5px] uppercase tracking-wide text-muted dark:border-white/[0.06] dark:text-[#a89f93]">
             <tr>
-              {isReturns && <th className="w-10 px-4 py-3" />}
+              {canReceive && <th className="w-10 px-4 py-3" />}
               <th className="px-4 py-3 font-semibold">Order</th>
               <th className="px-4 py-3 font-semibold">Store</th>
               <th className="px-4 py-3 font-semibold">Courier</th>
@@ -569,7 +580,7 @@ export default function ReturnsPage() {
               const reasons = isReturns ? allReasons(ret) : [];
               return (
                 <tr key={r.tracking_id} className="transition hover:bg-panel/60 dark:hover:bg-white/[0.04]">
-                  {isReturns && (
+                  {canReceive && (
                     <td className="px-4 py-3">
                       <input type="checkbox" checked={picked.includes(r.tracking_id)}
                         onChange={(e) => setPicked((p) => e.target.checked ? [...p, r.tracking_id] : p.filter((x) => x !== r.tracking_id))} />
