@@ -21,7 +21,7 @@
  *      load-bearing for compatibility with rows already in the old database.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Upload, FileCheck2, AlertTriangle, CheckCircle2, X, Info, Check } from "lucide-react";
+import { Upload, FileCheck2, AlertTriangle, CheckCircle2, X, Info, Check, Undo2 } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { btnPrimary, btnGhost } from "@/components/Modal";
 import {
@@ -114,6 +114,12 @@ export function ImportPanel({ onDone, inShop, inShopKey }: {
   /* What the database says about whose file this is — see the probe below. */
   const [probe, setProbe] = useState<ShopGuess | null>(null);
   const [probing, setProbing] = useState(false);
+  /* Recent sales imports, so a wrong one can be taken back out. */
+  type Batch = { id: number; filename: string | null; imported_at: string; lines: number; total: number };
+  const [batches, setBatches] = useState<Batch[]>([]);
+  const [undoOpen, setUndoOpen] = useState(false);
+  const [undoing, setUndoing] = useState<number | null>(null);
+  const [undoConfirm, setUndoConfirm] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState<string | null>(null);
 
@@ -148,6 +154,48 @@ export function ImportPanel({ onDone, inShop, inShopKey }: {
     () => (rows.length ? rows[0].findIndex((h) => h.trim() === "Receipt") : -1),
     [rows],
   );
+
+  /** UNDOING A WHOLE IMPORT.
+   *
+   *  A sale line is not a typed row and it has no business carrying a pencil:
+   *  there are 59,000 of them and they arrive a thousand at a time. What goes
+   *  wrong with sales is never one line — it is a whole file, dropped on the
+   *  wrong shop or twice. So the unit of undo is the file, which is exactly
+   *  what `retail_import_batches` already records: every line carries the
+   *  `import_batch_id` of the run that wrote it.
+   *
+   *  The count shown is read back live rather than taken from the batch's own
+   *  `inserted_count`, so a run whose rows have already gone says 0 instead of
+   *  offering to remove something that is not there. */
+  const loadBatches = useCallback(async () => {
+    if (!supabase) return;
+    const { data } = await supabase.from("retail_import_batches")
+      .select("id,filename,imported_at,inserted_count,total_sales")
+      .order("imported_at", { ascending: false }).limit(10);
+    const rows = (data ?? []) as { id: number; filename: string | null; imported_at: string; inserted_count: number | null; total_sales: number | null }[];
+    const out: Batch[] = [];
+    for (const b of rows) {
+      const { count } = await supabase.from("retail_sale_lines")
+        .select("id", { count: "exact", head: true }).eq("import_batch_id", b.id);
+      out.push({ id: b.id, filename: b.filename, imported_at: b.imported_at,
+                 lines: count ?? 0, total: Number(b.total_sales ?? 0) });
+    }
+    setBatches(out);
+  }, []);
+  useEffect(() => { if (undoOpen) loadBatches(); }, [undoOpen, loadBatches]);
+
+  /** Lines first, then the batch row. The other order would leave lines whose
+   *  batch no longer exists — invisible here and impossible to undo again. */
+  async function undoBatch(b: Batch) {
+    if (!supabase) return;
+    setUndoing(b.id); setFatal("");
+    const { error } = await supabase.from("retail_sale_lines").delete().eq("import_batch_id", b.id);
+    if (error) { setUndoing(null); setFatal(error.message); return; }
+    await supabase.from("retail_import_batches").delete().eq("id", b.id);
+    setUndoing(null); setUndoConfirm(null);
+    await loadBatches();
+    onDone?.();
+  }
 
   const resolveBranch = useCallback((ns: string): number | null => {
     const b = branches.find((x) => x.nimbus_name && normStore(x.nimbus_name) === ns);
@@ -1165,6 +1213,67 @@ export function ImportPanel({ onDone, inShop, inShopKey }: {
           </>}
         </SourceNote>
       )}
+
+      {/* ── TAKE A WHOLE IMPORT BACK OUT ──────────────────────────────────
+          Collapsed, because it is for the day something went in wrong — the
+          wrong shop, or the same file twice — and a destructive control should
+          not sit open next to the one you press every morning. */}
+      <div className="mt-6 border-t border-line pt-4 dark:border-white/[0.06]">
+        <button onClick={() => setUndoOpen((v) => !v)}
+          className="inline-flex items-center gap-2 rounded-full border border-line bg-surface px-3.5 py-2 text-[12.5px] font-semibold text-ink transition hover:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:hover:bg-white/[0.12]">
+          <Undo2 size={14} /> {undoOpen ? "Hide" : "Undo"} a previous import
+        </button>
+
+        {undoOpen && (
+          <div className="mt-3 overflow-hidden rounded-card border border-line dark:border-white/[0.06]">
+            <table className="w-full text-[13px]">
+              <thead className="bg-panel/70 text-left text-[12px] uppercase tracking-wide text-muted dark:bg-white/[0.04] dark:text-[#a89f93]">
+                <tr>
+                  <th className="px-4 py-2.5 font-semibold">File</th>
+                  <th className="px-4 py-2.5 font-semibold">Imported</th>
+                  <th className="px-4 py-2.5 text-right font-semibold">Lines still in</th>
+                  <th className="px-4 py-2.5 text-right font-semibold">Sales</th>
+                  <th className="px-4 py-2.5" />
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-line dark:divide-white/[0.05]">
+                {batches.length === 0 ? (
+                  <tr><td colSpan={5} className="px-4 py-8 text-center text-muted dark:text-[#a89f93]">No imports recorded yet.</td></tr>
+                ) : batches.map((b) => (
+                  <tr key={b.id} className="text-ink dark:text-[#e7e2d8]">
+                    <td className="px-4 py-2.5 font-semibold">{b.filename || `Import #${b.id}`}</td>
+                    <td className="px-4 py-2.5 text-muted dark:text-[#a89f93]">{String(b.imported_at).slice(0, 10)}</td>
+                    <td className="px-4 py-2.5 text-right tabular-nums">{b.lines.toLocaleString()}</td>
+                    <td className="px-4 py-2.5 text-right tabular-nums">{money(b.total)}</td>
+                    <td className="px-4 py-2.5 text-right">
+                      {b.lines === 0 ? (
+                        <span className="text-[11.5px] text-hint">already removed</span>
+                      ) : undoConfirm === b.id ? (
+                        <span className="flex items-center justify-end gap-1">
+                          <button onClick={() => undoBatch(b)} disabled={undoing === b.id}
+                            className="rounded-full bg-danger px-2.5 py-1.5 text-[12px] font-semibold text-white transition hover:opacity-90 disabled:opacity-50">
+                            {undoing === b.id ? "Removing…" : `Remove ${b.lines.toLocaleString()} lines`}
+                          </button>
+                          <button onClick={() => setUndoConfirm(null)} className="rounded-full px-2 py-1.5 text-[12px] font-semibold text-muted dark:text-[#a89f93]">Keep</button>
+                        </span>
+                      ) : (
+                        <button onClick={() => setUndoConfirm(b.id)}
+                          className="rounded-full border border-line px-3 py-1.5 text-[12px] font-semibold text-muted transition hover:bg-danger-soft hover:text-danger dark:border-white/10 dark:text-[#a89f93]">
+                          Undo
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="border-t border-line px-4 py-2.5 text-[11.5px] text-muted dark:border-white/[0.06] dark:text-[#a89f93]">
+              Removes every sale line that came in with that file. Expenses and non-cash tags are
+              not touched — those replace themselves on the next import of the same range.
+            </p>
+          </div>
+        )}
+      </div>
 
       <PreviewNote />
     </div>

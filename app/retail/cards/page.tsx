@@ -35,7 +35,7 @@
  *   that arrive without one. Re-entering the same credit is a no-op.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { CreditCard, Plus, Landmark, AlertTriangle, CheckCircle2, Link2 } from "lucide-react";
+import { CreditCard, Plus, Landmark, AlertTriangle, CheckCircle2, Link2, Trash2 } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import Modal, { Field, inputCls, btnPrimary, btnGhost } from "@/components/Modal";
 import { rangeDates } from "@/lib/dateRange";
@@ -450,6 +450,8 @@ export default function CardReconPage() {
   const [err, setErr] = useState("");
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [confirmDel, setConfirmDel] = useState<number | null>(null);
+  const [busyDel, setBusyDel] = useState<number | null>(null);
   const [form, setForm] = useState({ credit_date: today(), sale_date: today(), amount: "", ref: "", bank: "Bank Alfalah", branch_id: "", descr: "" });
   /* One payment's full row, for the phone sheet. Only reachable by tapping a
      card, which only exists below 768px, so this is dead state on a computer. */
@@ -542,6 +544,24 @@ export default function CardReconPage() {
     const { error } = await supabase.from("retail_card_settlements").update(patch).eq("id", Number(id));
     if (error) { setErr(error.message); return; }
     setSets((rs) => rs.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+  }
+
+  /** REMOVING A CREDIT THAT SHOULD NOT BE THERE.
+   *
+   *  Only one typed by hand. A row that came from a bank statement or a card
+   *  slip is a record of what the bank actually sent — deleting it here would
+   *  hide real money and the next statement import would bring it straight
+   *  back anyway. Those are corrected where they came from, not here. */
+  async function removeCredit(r: Row) {
+    if (!supabase) return;
+    if (String(r.source) !== "manual") { setErr("Only a credit typed in by hand can be removed here."); return; }
+    setBusyDel(Number(r.id)); setErr("");
+    const { error } = await supabase.from("retail_card_settlements").delete()
+      .eq("id", Number(r.id)).eq("source", "manual");
+    setBusyDel(null);
+    if (error) { setErr(error.message); return; }
+    setConfirmDel(null);
+    setSets((rs) => rs.filter((x) => Number(x.id) !== Number(r.id)));
   }
 
   async function save() {
@@ -754,6 +774,30 @@ export default function CardReconPage() {
           </Select>
         )
       ) },
+    /* A hand-typed credit can be taken off; one from a statement or a slip
+       shows why it cannot, rather than showing nothing. */
+    { head: "", right: true, phone: "hide", cell: (r) => {
+        if (String(r.source) !== "manual") {
+          return <span className="text-[11.5px] text-hint" title="This came from a bank statement or a card slip — correct it at the source.">from the bank</span>;
+        }
+        if (confirmDel === Number(r.id)) {
+          return (
+            <span className="flex items-center justify-end gap-1">
+              <button onClick={() => removeCredit(r)} disabled={busyDel === Number(r.id)}
+                className="rounded-full bg-danger px-2.5 py-1.5 text-[12px] font-semibold text-white transition hover:opacity-90 disabled:opacity-50">
+                {busyDel === Number(r.id) ? "…" : "Delete"}
+              </button>
+              <button onClick={() => setConfirmDel(null)} className="rounded-full px-2 py-1.5 text-[12px] font-semibold text-muted dark:text-[#a89f93]">Keep</button>
+            </span>
+          );
+        }
+        return (
+          <button onClick={() => { setErr(""); setConfirmDel(Number(r.id)); }} aria-label="Delete this credit"
+            className="rounded-full p-1.5 text-muted transition hover:bg-danger-soft hover:text-danger dark:text-[#a89f93] dark:hover:bg-white/[0.06]">
+            <Trash2 size={15} />
+          </button>
+        );
+      } },
   ];
 
   /* ── the one sentence at the top that says whether money is missing ────── */

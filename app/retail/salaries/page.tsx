@@ -59,7 +59,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
-import { Wallet, HandCoins, Banknote, CheckCircle2, Printer, Undo2, Plus } from "lucide-react";
+import { Wallet, HandCoins, Banknote, CheckCircle2, Printer, Undo2, Plus, Pencil } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import Modal, { Field, inputCls, btnPrimary, btnGhost } from "@/components/Modal";
 import {
@@ -109,6 +109,8 @@ export default function SalariesPage() {
   const [payFor, setPayFor] = useState<PayRow | null>(null);
   const [payForm, setPayForm] = useState({ ...BLANK_PAY });
   const [undoFor, setUndoFor] = useState<PayRow | null>(null);
+  const [editFor, setEditFor] = useState<PayRow | null>(null);
+  const [editForm, setEditForm] = useState({ salary: "", adv: "", net: "", paid_on: "", note: "" });
   const [slipFor, setSlipFor] = useState<PayRow | null>(null);
   const [wageOpen, setWageOpen] = useState(false);
   const [wageForm, setWageForm] = useState({ ...BLANK_WAGE });
@@ -337,6 +339,79 @@ export default function SalariesPage() {
     setSaving(false); setPayFor(null); load();
   }
 
+  /** CORRECTING A PAYSLIP THAT IS ALREADY PAID.
+   *
+   *  Until now the only way to fix a mis-keyed salary was Undo and pay again,
+   *  which throws away the original date and note and reads, afterwards, as if
+   *  the person was paid twice and refunded once.
+   *
+   *  THE DEDUCTION HAS TO MOVE WITH IT. The payslip is one of a pair: the other
+   *  half is a ledger row carrying `paid` = the advance deducted, and the two
+   *  are tied by `ledger_entry_id`. Changing the deducted figure on the payslip
+   *  alone would leave the ledger still holding the old number, and the
+   *  person's outstanding balance would be wrong by the difference — silently,
+   *  because both screens would still add up on their own.
+   *
+   *  So the four cases are handled explicitly: the amount changed (update the
+   *  ledger row), it went to zero (delete the row and clear the link), it came
+   *  up from zero (insert a row and store the new link), or there was never one
+   *  (nothing to do). The ledger goes first, exactly as in pay() and undo(), so
+   *  a failure never leaves a deduction without a payslip explaining it. */
+  function startEdit(r: PayRow) {
+    const rec = r.rec!;
+    setErr("");
+    setEditForm({
+      salary: String(num(rec.salary_amount) || ""),
+      adv: String(num(rec.advance_deducted) || ""),
+      net: String(num(rec.net_paid) || ""),
+      paid_on: String(rec.paid_on ?? today()),
+      note: String(rec.note ?? ""),
+    });
+    setEditFor(r);
+  }
+
+  async function saveEdit() {
+    if (!editFor?.rec || !supabase) return;
+    const rec = editFor.rec;
+    const sal = num(editForm.salary);
+    const adv = num(editForm.adv);
+    const net = num(editForm.net);
+    const paid_on = editForm.paid_on || today();
+    if (adv < 0 || sal < 0 || net < 0) { setErr("Amounts cannot be negative."); return; }
+    setSaving(true); setErr("");
+
+    const oldLedgerId = rec.ledger_entry_id == null ? null : Number(rec.ledger_entry_id);
+    let newLedgerId: number | null = oldLedgerId;
+
+    if (adv > 0 && oldLedgerId != null) {
+      const { error } = await supabase.from("retail_employee_ledger")
+        .update({ paid: adv, entry_date: paid_on }).eq("id", oldLedgerId);
+      if (error) { setSaving(false); setErr(error.message); return; }
+    } else if (adv > 0 && oldLedgerId == null) {
+      const { data, error } = await supabase.from("retail_employee_ledger").insert({
+        employee_id: editFor.e.id, entry_date: paid_on,
+        advance: 0, purchase_credit: 0, paid: adv,
+        purchase_details: `Deducted from ${monthLabel(month)} salary`,
+        source: "salary",
+      }).select("id").maybeSingle();
+      if (error) { setSaving(false); setErr(error.message); return; }
+      newLedgerId = data ? Number((data as Row).id) : null;
+    } else if (adv === 0 && oldLedgerId != null) {
+      const { error } = await supabase.from("retail_employee_ledger").delete().eq("id", oldLedgerId);
+      if (error) { setSaving(false); setErr(error.message); return; }
+      newLedgerId = null;
+    }
+
+    const { error } = await supabase.from("retail_salary_payments").update({
+      salary_amount: sal, advance_deducted: adv, net_paid: net,
+      paid_on, note: editForm.note.trim() || null,
+      ledger_entry_id: newLedgerId,
+    }).eq("id", Number(rec.id));
+    setSaving(false);
+    if (error) { setErr(error.message); return; }
+    setEditFor(null); load();
+  }
+
   /** Undo is the rollback, done on purpose: ledger row first, payslip second.
    *  Deleting the payslip first would strand the ledger row with nothing
    *  pointing at it, and the deduction would be permanent and untraceable. */
@@ -425,7 +500,13 @@ export default function SalariesPage() {
     { head: "", right: true, cell: (r) => (
         <div className="flex justify-end gap-1.5">
           {r.rec
-            ? <button onClick={() => { setErr(""); setUndoFor(r); }} className="rounded-full border border-line bg-surface px-3 py-1.5 text-[12px] font-semibold text-ink transition hover:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:hover:bg-white/[0.12]"><Undo2 size={13} className="inline" /> Undo</button>
+            ? <>
+                <button onClick={() => startEdit(r)} aria-label={`Edit ${r.e.name} payslip`}
+                  className="rounded-full border border-line bg-surface px-3 py-1.5 text-[12px] font-semibold text-ink transition hover:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:hover:bg-white/[0.12]">
+                  <Pencil size={13} className="inline" /> Edit
+                </button>
+                <button onClick={() => { setErr(""); setUndoFor(r); }} className="rounded-full border border-line bg-surface px-3 py-1.5 text-[12px] font-semibold text-ink transition hover:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:hover:bg-white/[0.12]"><Undo2 size={13} className="inline" /> Undo</button>
+              </>
             : <button onClick={() => startPay(r)} className="rounded-full bg-ink px-3.5 py-1.5 text-[12px] font-semibold text-white transition hover:opacity-90 dark:bg-white dark:text-[#141414]">Pay</button>}
           <button onClick={() => setSlipFor(r)} className="rounded-full border border-line bg-surface px-3 py-1.5 text-[12px] font-semibold text-ink transition hover:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:hover:bg-white/[0.12]">Slip</button>
         </div>
@@ -577,6 +658,45 @@ export default function SalariesPage() {
       </SourceNote>
 
       {/* ── pay dialog ─────────────────────────────────────────────────── */}
+      {/* ── correct a payslip that is already paid ─────────────────────── */}
+      <Modal open={!!editFor} onClose={() => setEditFor(null)}
+        title={editFor ? `Edit payslip — ${editFor.e.name}` : "Edit payslip"}
+        subtitle="The advance deduction moves with it, so the balance stays right.">
+        <div className="space-y-3.5">
+          <Field label="Salary">
+            <input type="number" step="1" inputMode="decimal" className={inputCls} value={editForm.salary}
+              onChange={(e) => setEditForm((f) => {
+                const salary = e.target.value;
+                return { ...f, salary, net: String(Math.max(0, num(salary) - num(f.adv))) };
+              })} />
+          </Field>
+          <Field label="Advance deducted" hint="Changing this moves the deduction on the person's ledger too">
+            <input type="number" step="1" inputMode="decimal" className={inputCls} value={editForm.adv}
+              onChange={(e) => setEditForm((f) => {
+                const adv = e.target.value;
+                return { ...f, adv, net: String(Math.max(0, num(f.salary) - num(adv))) };
+              })} />
+          </Field>
+          <Field label="Net paid">
+            <input type="number" step="1" inputMode="decimal" className={inputCls} value={editForm.net}
+              onChange={(e) => setEditForm({ ...editForm, net: e.target.value })} />
+          </Field>
+          <Field label="Paid on">
+            <input type="date" className={inputCls} value={editForm.paid_on}
+              onChange={(e) => setEditForm({ ...editForm, paid_on: e.target.value })} />
+          </Field>
+          <Field label="Note">
+            <input className={inputCls} value={editForm.note}
+              onChange={(e) => setEditForm({ ...editForm, note: e.target.value })} placeholder="optional" />
+          </Field>
+          {err && <p className="text-[12.5px] font-semibold text-danger">{err}</p>}
+          <div className="flex justify-end gap-2">
+            <button onClick={() => setEditFor(null)} className={btnGhost}>Cancel</button>
+            <button onClick={saveEdit} disabled={saving} className={btnPrimary}>{saving ? "Saving…" : "Save changes"}</button>
+          </div>
+        </div>
+      </Modal>
+
       <Modal open={!!payFor} onClose={() => setPayFor(null)}
         title={payFor ? `Pay ${payFor.e.name}` : ""}
         subtitle={`${monthLabel(month)} · advances owed are deducted, the net is the cash to hand over.`}>
