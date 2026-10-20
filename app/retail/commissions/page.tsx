@@ -60,7 +60,7 @@ import {
   useIsPhone, RowCard, useBranches,
   type CommCfg, type Row, type Col,
 } from "@/components/retail/kit";
-import { useStaleRates, reloadStale, staleSeen, markStaleSeen } from "@/lib/retailStale";
+import { useStaleRates, reloadStale, staleSeen, markStaleSeen, findDhaBranch, findOtherDhaBranches } from "@/lib/retailStale";
 import { useShopScope } from "@/lib/retailShop";
 /* THE RATE SHEET ARRIVES AS A FILE, NOT AS TYPING.
  *
@@ -205,20 +205,21 @@ export default function CommissionsPage() {
   const [staleBusy, setStaleBusy] = useState(false);
 
   /* ── FC DHA, resolved from the data ────────────────────────────────────
-   * The original hardcodes `const DHA_ID = 11`. That was FC DHA's primary key
-   * in the old Grohub database and there is no reason for it to survive the
-   * migration into this one — if the ids shift, a hardcoded 11 silently starts
-   * paying some other shop the DHA rate sheet and paying DHA a bonus it must
-   * never get. So the branch is looked up by name or code instead: whatever row
-   * is actually called DHA is the DHA branch, before and after any migration.
-   * If two shops ever match, the lowest id wins and the UI says which it chose.
-   */
-  const dhaMatches = useMemo(
-    () => branches.filter((b) => /dha/i.test(String(b.name ?? "")) || /dha/i.test(String(b.code ?? "")))
-      .sort((a, b) => a.id - b.id),
-    [branches]
-  );
-  const dhaBranch = dhaMatches[0] ?? null;
+   * ONE implementation, in lib/retailStale.ts, called from here. It used to be
+   * written out twice — once there, once here — with the same regex, and two
+   * copies of a rule that decides who gets paid is two copies that can drift.
+   *
+   * The rule itself changed because the old one had already failed: "any
+   * branch named DHA, lowest id wins" quietly handed the Fashion Collection
+   * flat rate sheet to TOP SHOP DHA when that shop opened, because its id (6)
+   * sorts before Fashion Collection DHA's (11). Top Shop DHA then earned Rs 0
+   * on Rs 2.5m of sales. The note in lib/retailStale.ts has the full account.
+   *
+   * `otherDha` is every other shop with DHA in its name. It is not a leftover
+   * — it is printed on screen, so the next time two shops share a word nobody
+   * has to work out which one the money went to. */
+  const dhaBranch = useMemo(() => findDhaBranch(branches), [branches]);
+  const otherDha = useMemo(() => findOtherDhaBranches(branches), [branches]);
   const dhaId = dhaBranch ? Number(dhaBranch.id) : null;
 
   /* ── loaders ───────────────────────────────────────────────────────────── */
@@ -470,7 +471,7 @@ export default function CommissionsPage() {
   /* Shared with the Dashboard banner through lib/retailStale.ts, so the two
      cannot show different counts, the question is asked once per page load, and
      the three-months-of-history guard lives in one place. */
-  const { stale } = useStaleRates(branches);
+  const { stale, wholeSheetStale } = useStaleRates(branches);
 
   /* OPEN IT BY ITSELF, ONCE. The old app did this and it is the only reason the
      cleanup ever happened — but once per session, not once per navigation: a
@@ -857,7 +858,17 @@ export default function CommissionsPage() {
             {dhaBranch
               ? <><strong>{dhaBranch.name}</strong> is paid from the flat per-barcode sheet only: an unlisted barcode
                 earns Rs 0, and because its lines never reach a receipt or day total it <strong>never earns a bonus</strong>.</>
-              : <>No FC DHA branch was found in <code>retail_branches</code>, so every shop is on the master rate.</>}{" "}
+              : <>No Fashion Collection DHA branch was found in <code>retail_branches</code>, so every shop is on the master rate.</>}{" "}
+            {/* SAID OUT LOUD, because not saying it cost Top Shop DHA Rs 64,931.
+                Any other shop with DHA in its name is on the master rate like
+                everybody else, and this names it so nobody has to guess which
+                DHA a figure belongs to. */}
+            {otherDha.length > 0 && (
+              <><strong>{otherDha.map((b) => b.name).join(", ")}</strong>{" "}
+              {otherDha.length === 1 ? "has" : "have"} DHA in the name but {otherDha.length === 1 ? "is" : "are"} not
+              the flat-sheet shop — {otherDha.length === 1 ? "it is" : "they are"} paid the master percentage and
+              {otherDha.length === 1 ? " earns" : " earn"} the bonus, like every other shop.{" "}</>
+            )}
             The bonus slabs <strong>rupees</strong> — {money(cfg.bonus_per_slab)} per {money(cfg.bonus_slab)} of sales,
             {cfg.bonus_basis === "day" ? " on the day's total" : " on each receipt"} — never a receipt count.
             Each cell is <code>Math.round(per-piece + bonus)</code>, added up by the database
@@ -906,7 +917,13 @@ export default function CommissionsPage() {
               {dhaBranch
                 ? <Pill tone="info">{dhaBranch.name} · id {dhaBranch.id}</Pill>
                 : <Pill tone="bad">no DHA branch found</Pill>}
-              {dhaMatches.length > 1 && <Pill tone="warn">{dhaMatches.length} branches match &ldquo;DHA&rdquo;</Pill>}
+              {/* The old pill counted every branch matching "DHA" and said
+                  nothing about which one was chosen — it was showing "2
+                  branches match" while Top Shop DHA quietly held the sheet.
+                  It names them now, and says they are on the master rate. */}
+              {otherDha.map((b) => (
+                <Pill key={b.id} tone="warn">{b.name} · master rate</Pill>
+              ))}
             </div>
             <div className="flex items-center gap-2 rounded-full border border-line bg-surface px-3.5 py-2 max-md:w-full dark:border-white/10 dark:bg-white/[0.05]">
               <Search size={15} className="flex-none text-hint dark:text-[#8a8175]" />
@@ -926,6 +943,21 @@ export default function CommissionsPage() {
                 {dhaBranch?.name ?? "FC DHA"} in the last 3 months.
               </p>
               <button onClick={() => { setStaleSel([]); setStaleOpen(true); }} className={`${btnGhost} max-md:w-full`}>Review &amp; clean up</button>
+            </div>
+          )}
+
+          {/* NOT A CLEANUP — A WIRING FAULT. Nothing is offered for deletion
+              when the whole sheet looks stale, because that is what it looked
+              like when the sheet was being compared against the wrong shop. */}
+          {wholeSheetStale && (
+            <div className="mt-4 flex flex-wrap items-center gap-3 rounded-card border border-danger/30 bg-danger-soft p-4">
+              <AlertTriangle size={17} className="flex-none text-danger" />
+              <p className="flex-1 text-[13px] text-ink dark:text-[#e7e2d8]">
+                <strong>Every barcode on this sheet looks unsold.</strong> That almost always means the
+                sheet is being measured against the wrong shop rather than that the whole agreement
+                has lapsed, so nothing is being offered for deletion. Check that{" "}
+                <strong>{dhaBranch?.name ?? "the flat-rate shop"}</strong> is the shop this sheet belongs to.
+              </p>
             </div>
           )}
 

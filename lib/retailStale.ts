@@ -40,13 +40,58 @@ export type StaleRate = {
   last_sold: string | null;
 };
 
-/** FC DHA, found by name rather than by a hardcoded id — the same rule the
- *  Commissions screen uses. The old app hardcoded `11`, which was DHA's primary
- *  key in the old database and means nothing in this one. */
+/* ── WHICH SHOP IS THE FLAT-RATE SHOP ───────────────────────────────────────
+ *
+ * THE BUG THIS EXISTS TO PREVENT, because it had already happened.
+ *
+ *   The rule used to be "any branch whose name or code contains DHA, lowest id
+ *   wins". That was correct while Fashion Collection DHA was the only shop in
+ *   the company with DHA in its name. Then TOP SHOP DHA was opened — id 6
+ *   against Fashion Collection DHA's id 11 — and because 6 sorts first, Top
+ *   Shop DHA silently became "the DHA shop".
+ *
+ *   What that did: every Top Shop DHA line was priced off the Fashion
+ *   Collection flat per-barcode sheet, none of its barcodes are on that sheet,
+ *   an unlisted barcode earns exactly Rs 0 by design, and the rule also bars
+ *   the shop from the bonus. Top Shop DHA earned Rs 0 from 1 July onward while
+ *   selling Rs 2.5m — Rs 64,931 of commission that never appeared — and
+ *   nothing anywhere said why.
+ *
+ * THE RULE NOW. The flat per-barcode sheet is FASHION COLLECTION's agreement,
+ * so a shop qualifies only if it is BOTH named DHA and a Fashion Collection
+ * shop. "Top Shop DHA" is a Top Shop that happens to be in DHA, and is paid the
+ * master percentage like every other Top Shop.
+ *
+ * Still looked up from the data and not hardcoded to id 11 — a hardcoded id
+ * breaks the moment the database is migrated. But the test is now two
+ * independent signals instead of one, and anything it rejects is named on
+ * screen rather than silently dropped. See `findOtherDhaBranches`.
+ */
+const namedDha = (b: Branch) =>
+  /dha/i.test(String(b.name ?? "")) || /dha/i.test(String(b.code ?? ""));
+
+/** Fashion Collection, by chain, by name, or by the FC_ code prefix — any one
+ *  of the three, so a missing `chain` alone cannot lose the shop. */
+const isFashionCollection = (b: Branch) =>
+  /fashion/i.test(String(b.chain ?? "")) ||
+  /fashion/i.test(String(b.name ?? "")) ||
+  /^fc[\s_-]/i.test(String(b.code ?? ""));
+
+/** The one shop paid from the flat per-barcode sheet, or null if there is none.
+ *  Lowest id among the matches, as before, so two Fashion Collection DHA rows
+ *  still resolve to one answer. */
 export function findDhaBranch(branches: Branch[]): Branch | null {
   return branches
-    .filter((b) => /dha/i.test(String(b.name ?? "")) || /dha/i.test(String(b.code ?? "")))
+    .filter((b) => namedDha(b) && isFashionCollection(b))
     .sort((a, b) => a.id - b.id)[0] ?? null;
+}
+
+/** Shops with DHA in the name that are NOT the flat-sheet shop — Top Shop DHA
+ *  and anything like it. Returned so the screen can SAY it is paying them the
+ *  master rate, instead of the reader having to guess which DHA is which. */
+export function findOtherDhaBranches(branches: Branch[]): Branch[] {
+  const chosen = findDhaBranch(branches);
+  return branches.filter((b) => namedDha(b) && b.id !== chosen?.id);
 }
 
 /* One answer per page load, shared by the Dashboard banner and the Commissions
@@ -54,6 +99,9 @@ export function findDhaBranch(branches: Branch[]): Branch | null {
    different counts. */
 let cache: StaleRate[] | null = null;
 let promise: Promise<StaleRate[]> | null = null;
+/** True when every barcode on the sheet came back stale — see the guard in
+ *  fetchStale. The screen prints a warning instead of a delete list. */
+let wholeSheet = false;
 const subs = new Set<() => void>();
 
 async function fetchStale(dhaId: number): Promise<StaleRate[]> {
@@ -73,10 +121,35 @@ async function fetchStale(dhaId: number): Promise<StaleRate[]> {
   cutoff.setMonth(cutoff.getMonth() - 3);
   if (new Date(firstDay + "T00:00:00") > cutoff) { cache = []; subs.forEach((f) => f()); return []; }
 
-  const { data, error } = await db.rpc("retail_fc_dha_stale_comm", { p_branch_id: dhaId, p_months: 3 });
+  const [{ data, error }, { count: sheetRows }] = await Promise.all([
+    db.rpc("retail_fc_dha_stale_comm", { p_branch_id: dhaId, p_months: 3 }),
+    db.from("retail_fc_dha_comm").select("item_code", { count: "exact", head: true }),
+  ]);
   /* A permission error is not "nothing stale" — somebody who cannot read the
      rate sheet should see no warning rather than a confident all-clear. */
-  cache = error ? [] : ((data as StaleRate[]) ?? []);
+  const rows = error ? [] : ((data as StaleRate[]) ?? []);
+
+  /* THE SECOND GUARD, AND IT IS NOT HYPOTHETICAL.
+   *
+   * "Stale" means a barcode on the sheet that the flat-rate shop has not sold
+   * for three months. If EVERY barcode on the sheet looks stale, the far more
+   * likely explanation is that the sheet is being compared against the wrong
+   * shop's sales — not that the whole agreement died at once.
+   *
+   * That is exactly what happened. findDhaBranch used to resolve to TOP SHOP
+   * DHA, so this asked "which of Fashion Collection's barcodes has Top Shop
+   * DHA not sold?" — all of them, by definition, because it is a different
+   * shop selling different stock. The panel then offered one button to delete
+   * them, and retail_fc_dha_comm is now empty.
+   *
+   * The first guard above did not catch it: it only checks the shop has three
+   * months of history, and Top Shop DHA has had sales since 1 July.
+   *
+   * So: a list covering the entire sheet is treated as a wiring fault, not a
+   * cleanup, and nothing is offered for deletion. `wholeSheet` tells the screen
+   * to say so rather than silently showing nothing. */
+  wholeSheet = (sheetRows ?? 0) > 0 && rows.length >= (sheetRows ?? 0);
+  cache = wholeSheet ? [] : rows;
   subs.forEach((f) => f());
   return cache;
 }
@@ -90,15 +163,21 @@ export function reloadStale(dhaId: number | null) {
 }
 
 /** The stale list, or null while it is still unknown. */
-export function useStaleRates(branches: Branch[]): { stale: StaleRate[] | null; dhaId: number | null } {
+export function useStaleRates(branches: Branch[]): {
+  stale: StaleRate[] | null; dhaId: number | null;
+  /** Every barcode on the sheet looked stale, so nothing is offered for
+   *  deletion. The screen should say the comparison looks wrong. */
+  wholeSheetStale: boolean;
+} {
   const dha = findDhaBranch(branches);
   const dhaId = dha ? Number(dha.id) : null;
   const [stale, setStale] = useState<StaleRate[] | null>(() => cache);
+  const [whole, setWhole] = useState(() => wholeSheet);
 
   useEffect(() => {
     if (dhaId == null) return;
     let alive = true;
-    const sync = () => { if (alive) setStale(cache); };
+    const sync = () => { if (alive) { setStale(cache); setWhole(wholeSheet); } };
     subs.add(sync);
     if (cache) sync();
     else {
@@ -108,7 +187,7 @@ export function useStaleRates(branches: Branch[]): { stale: StaleRate[] | null; 
     return () => { alive = false; subs.delete(sync); };
   }, [dhaId]);
 
-  return { stale, dhaId };
+  return { stale, dhaId, wholeSheetStale: whole };
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
