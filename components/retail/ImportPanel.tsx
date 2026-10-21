@@ -26,7 +26,7 @@ import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { btnPrimary, btnGhost } from "@/components/Modal";
 import {
   DataTable, Pill, Select, PreviewNote, SourceNote,
-  money, unitForBranch, useIsPhone, useBranches, useEmployees, type Col,
+  money, unitForBranch, useIsPhone, useBranches, useEmployees, addDays, type Col,
 } from "@/components/retail/kit";
 import { readGrid, findHeaderRow, dropRepeatedHeaders } from "@/lib/readGrid";
 import {
@@ -36,6 +36,62 @@ import {
   type ShopGuess, type ReceiptHigh, type StampHits,
   type NimbusKind, type SaleRow, type ExpenseRow, type PaymentRow, type CommRow,
 } from "@/lib/nimbus";
+
+/* ── A DROPPED REQUEST IS NOT A BROKEN FILE ──────────────────────────────────
+ *
+ * A sales file goes up in chunks of 400 rows, so a ten-thousand-line export is
+ * twenty-five separate requests to Mumbai. On a shop's connection one of them
+ * will sometimes simply not arrive, and `fetch` rejects with the single least
+ * helpful sentence in web development:
+ *
+ *     TypeError: Failed to fetch
+ *
+ * which the panel printed verbatim. It says nothing about which request, how
+ * far the import had got, or whether anything was saved — so the honest reading
+ * is "the file is broken", and it is not: the connection blinked.
+ *
+ * So a request that fails at the NETWORK layer is retried, three times, backing
+ * off. Only network failures: a real error from Postgres — a constraint, a
+ * permission — is a fact about the data and is thrown straight through, because
+ * retrying it just fails three times more slowly.
+ */
+const isNetworkFlake = (e: unknown) => {
+  const m = (e as { message?: string })?.message ?? String(e ?? "");
+  return /failed to fetch|networkerror|network request failed|load failed|ERR_NETWORK|ERR_CONNECTION|timeout|aborted/i.test(m);
+};
+
+/* supabase-js does NOT throw when the fetch itself fails — it catches and hands
+   the failure back as `{ data: null, error }`, with the browser's message
+   inside. A retry that only watches for thrown exceptions therefore never fires
+   on the one failure it was written for, which is exactly how the first version
+   of this behaved: one dropped request, no retry, straight to the error banner.
+   So both shapes are checked. */
+type Res = { error?: { message?: string } | null };
+
+async function net<T>(fn: () => PromiseLike<T>, tries = 3): Promise<T> {
+  let last: unknown;
+  const pause = (i: number) =>
+    /* 400ms, 800ms — long enough for a wifi handover, short enough that a real
+       outage still fails while somebody is watching. */
+    new Promise((r) => setTimeout(r, 400 * 2 ** i));
+
+  for (let i = 0; i < tries; i++) {
+    try {
+      const res = await fn();
+      const err = (res as Res | null)?.error;
+      if (err && isNetworkFlake(err)) {
+        last = err;
+        if (i < tries - 1) { await pause(i); continue; }
+      }
+      return res;
+    } catch (e) {
+      if (!isNetworkFlake(e)) throw e;
+      last = e;
+      if (i < tries - 1) await pause(i);
+    }
+  }
+  throw last;
+}
 
 type Branch = { id: number; name: string; chain: string | null; nimbus_name: string | null };
 
@@ -569,16 +625,46 @@ export function ImportPanel({ onDone, inShop, inShopKey }: {
        so the migrated three years of rows still line up with what is written
        from today. Stamping the bare branch id orphans all of them and makes
        the dashboard report one missing Top Shop file as six missing days. */
-    const stamps = [...new Set(
-      pairs.filter((p) => p.date).map((p) => {
-        const b = branches.find((x) => x.id === Number(p.branch_id));
-        const u = unitForBranch(b as never);
-        return u ? `${u}|${p.date}` : "";
-      }).filter(Boolean)
-    )].map((k) => {
-      const i = k.indexOf("|");
-      return { unit: k.slice(0, i), log_date: k.slice(i + 1), kind };
+    /* A DAY WITH NO ROWS IN THE FILE IS AN ANSWER, NOT A GAP.
+     *
+     * This used to stamp only the dates that actually appear in the file, and
+     * that is wrong for the one kind of file people complain about. A Nimbus
+     * export is a continuous DATE RANGE: "all expenses, 13 to 20 October". If a
+     * shop spent nothing on the 18th, the 18th has no rows — so it was never
+     * stamped, and the dashboard asked for that day's expense file for ever,
+     * no matter how many times it was uploaded.
+     *
+     * Measured on the live log before this change: of the 63 shop-day-kind
+     * slots in the dashboard's seven-day window, exactly two were unstamped —
+     * FC DHA expenses on the 18th and Top Shop expenses on the 20th — both
+     * days inside files that had already been imported.
+     *
+     * So the whole span the file covers is stamped, for every unit the file
+     * mentions. Inside its own range a missing day means "nothing happened",
+     * which is accounted for. Outside it we still know nothing, so nothing is
+     * claimed. */
+    const units = new Set<string>();
+    const dates: string[] = [];
+    pairs.forEach((p) => {
+      if (!p.date) return;
+      dates.push(p.date);
+      const u = unitForBranch(branches.find((x) => x.id === Number(p.branch_id)) as never);
+      if (u) units.add(u);
     });
+    if (!units.size || !dates.length) return;
+    dates.sort();
+    const from = dates[0];
+    const to = dates[dates.length - 1];
+
+    const stamps: { unit: string; log_date: string; kind: string }[] = [];
+    for (const u of units) {
+      /* A sanity ceiling. A three-year export should stamp its three years, but
+         a mis-parsed date must not write ten thousand rows. */
+      let n = 0;
+      for (let d = from; d <= to && n < 800; d = addDays(d, 1), n++) {
+        stamps.push({ unit: u, log_date: d, kind });
+      }
+    }
     if (stamps.length) {
       await supabase.from("retail_upload_log")
         .upsert(stamps, { onConflict: "unit,log_date,kind", ignoreDuplicates: true });
@@ -589,6 +675,10 @@ export function ImportPanel({ onDone, inShop, inShopKey }: {
   async function run() {
     if (!supabase) return;
     setBusy(true); setFatal(""); setDone(null);
+    /* Set as the sales upload walks the file, so a connection that dies for
+       good can be reported as "it got this far" instead of as a mystery. */
+    let doneSoFar = 0;
+    let partialBatch: number | null = null;
     try {
       if (sales) {
         const ok = sales.parsed.filter((p) => p.branch_id);
@@ -608,10 +698,13 @@ export function ImportPanel({ onDone, inShop, inShopKey }: {
             void _store; void _ns;
             return { ...rest, import_batch_id: batchId };
           });
-          const { data, error } = await supabase.from("retail_sale_lines")
-            .upsert(chunk, { onConflict: "line_hash", ignoreDuplicates: true }).select("id");
+          const { data, error } = await net(() => supabase!.from("retail_sale_lines")
+            .upsert(chunk, { onConflict: "line_hash", ignoreDuplicates: true }).select("id"));
           if (error) throw error;
           inserted += (data as unknown[] | null)?.length ?? 0;
+          /* How far it got, kept outside the loop so the catch below can say so
+             if the connection goes for good. */
+          doneSoFar = inserted; partialBatch = batchId;
           /* Lines SENT, not lines inserted — the bar is how far through the file
              we are, and the duplicate guard means those two are different
              numbers on any re-import. */
@@ -768,7 +861,26 @@ export function ImportPanel({ onDone, inShop, inShopKey }: {
         });
       }
     } catch (e) {
-      setFatal((e as { message?: string })?.message ?? String(e));
+      /* "TypeError: Failed to fetch" is not a message, it is a shrug. Say what
+         was happening, how far it got, and what to do — and say the one thing
+         that actually matters, which is that nothing has been lost. Every line
+         carries a line_hash and the column is unique, so dropping the same file
+         again picks up exactly where this stopped and re-sends nothing. */
+      if (isNetworkFlake(e)) {
+        /* The batch row is left in place on purpose: the lines that DID land
+           belong to it, so "Undo a previous import" can still remove them. */
+        if (partialBatch != null) {
+          await supabase.from("retail_import_batches")
+            .update({ inserted_count: doneSoFar }).eq("id", partialBatch)
+            .then(undefined, () => {});
+        }
+        setFatal(
+          `The connection to the database dropped${doneSoFar ? ` after ${doneSoFar.toLocaleString()} line${doneSoFar === 1 ? "" : "s"} had gone in` : ""}, and did not come back after three tries. ` +
+          `This is the network, not the file. Nothing is lost and nothing is duplicated — drop the same file again and it will carry on from where it stopped.`
+        );
+      } else {
+        setFatal((e as { message?: string })?.message ?? String(e));
+      }
     }
     setProg(null);
     setBusy(false);

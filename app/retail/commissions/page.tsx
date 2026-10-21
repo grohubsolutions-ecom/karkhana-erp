@@ -51,7 +51,7 @@
  *   go through fetchAll.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Coins, Percent, Gift, Plus, Search, Save, Trash2, AlertTriangle, Pencil } from "lucide-react";
+import { Coins, Percent, Gift, Plus, Search, Save, Trash2, AlertTriangle, Pencil, Share2, LayoutGrid, ReceiptText } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import Modal, { Field, inputCls, btnPrimary, btnGhost } from "@/components/Modal";
 import {
@@ -62,6 +62,7 @@ import {
 } from "@/components/retail/kit";
 import { useStaleRates, reloadStale, staleSeen, markStaleSeen, findDhaBranch, findOtherDhaBranches } from "@/lib/retailStale";
 import { useShopScope } from "@/lib/retailShop";
+import { shareOrCopy } from "@/lib/retailShare";
 /* THE RATE SHEET ARRIVES AS A FILE, NOT AS TYPING.
  *
  * Item Rates is a table of thousands of barcodes and there was no way to get a
@@ -198,6 +199,10 @@ export default function CommissionsPage() {
   const [saving, setSaving] = useState(false);
   const [savedCfg, setSavedCfg] = useState("");
   const [importOpen, setImportOpen] = useState(false);
+  /* Statement first. The grid is still one tap away, but "what do I owe each
+     shop" is the question this screen gets opened for. */
+  const [view, setView] = useState<"statement" | "days">("statement");
+  const [shareNote, setShareNote] = useState("");
 
   /* stale DHA rates */
   const [staleOpen, setStaleOpen] = useState(false);
@@ -403,6 +408,56 @@ export default function CommissionsPage() {
     { label: "Per-piece", value: money(totals.pp), Icon: Percent },
     { label: "Bonus", value: money(totals.bonus), Icon: Gift },
   ];
+
+  /* ── THE STATEMENT ─────────────────────────────────────────────────────
+   * The grid is days down and shops across. That is the right shape for
+   * "which day was odd", and the wrong shape for the question actually asked
+   * at the end of a week: what do I owe each shop? Nobody adds up a column of
+   * a matrix in their head to find out.
+   *
+   * So this is the same numbers as a statement: a heading with the dates, one
+   * line per shop with its figure, and a total at the bottom. Every value is
+   * read off the SAME `blocks` and `cell` the grid draws — `total` is literally
+   * `blk.colTot[i]`, the grid's own column total — so the statement and the
+   * grid cannot disagree. Nothing is recalculated here. */
+  const statement = useMemo(() => blocks.map((blk) => ({
+    chain: blk.chain,
+    total: blk.grand,
+    shops: blk.brs.map((b, i) => {
+      let pp = 0, bonus = 0, dayCount = 0;
+      days.forEach((ds) => {
+        const c = cell[`${b.id}|${ds}`];
+        if (c) { pp += c.pp; bonus += c.bonus; if (c.pp + c.bonus >= 0.5) dayCount++; }
+      });
+      return { id: b.id, name: b.name, pp, bonus, dayCount, total: blk.colTot[i] };
+    }),
+  })), [blocks, days, cell]);
+
+  /** "19 Oct 2026", or "19 – 20 Oct 2026" for a range. The heading he reads
+   *  first, so it says the dates in words rather than 2026-10-19. */
+  const dayWords = (ds: string) => {
+    const [y, m, d] = ds.split("-");
+    return `${Number(d)} ${["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][Number(m) - 1]} ${y}`;
+  };
+  const rangeWords = from === qTo ? dayWords(from) : `${dayWords(from)} — ${dayWords(qTo)}`;
+
+  /* The same statement as text, for WhatsApp. The figures are taken from the
+     rendered rows, not recomputed, so what he sends is what he saw. */
+  async function shareStatement() {
+    const lines: string[] = [`*Commission*`, rangeWords, ""];
+    statement.forEach((blk) => {
+      lines.push(`*${blk.chain}*`);
+      blk.shops.forEach((s) => lines.push(`${shortName(s.name, blk.chain)}: ${money(s.total)}`));
+      if (statement.length > 1) lines.push(`${blk.chain} total: ${money(blk.total)}`);
+      lines.push("");
+    });
+    lines.push(`*Total commission: ${money(totals.total)}*`);
+    lines.push(`Per-piece ${money(totals.pp)} · Bonus ${money(totals.bonus)}`);
+    const r = await shareOrCopy(lines.join("\n"), "Commission");
+    if (r === "cancelled") return;
+    setShareNote(r === "shared" ? "Sent." : r === "copied" ? "Copied — paste it into WhatsApp." : "Could not share.");
+    setTimeout(() => setShareNote(""), 4000);
+  }
 
   /* ── drill-down: the receipts behind one cell ──────────────────────────── */
 
@@ -733,6 +788,25 @@ export default function CommissionsPage() {
             </p>
           )}
 
+          {/* STATEMENT or DAY BY DAY. Two readings of one set of numbers. */}
+          <div className="mt-4 flex flex-wrap items-center gap-2">
+            <div className="inline-flex rounded-full border border-line bg-surface p-1 dark:border-white/10 dark:bg-white/[0.06]">
+              {([["statement", "Statement", ReceiptText], ["days", "Day by day", LayoutGrid]] as const).map(([v, label, Icon]) => (
+                <button key={v} onClick={() => setView(v)}
+                  className={`inline-flex min-h-[36px] items-center gap-1.5 rounded-full px-3.5 text-[12.5px] font-semibold transition ${
+                    view === v ? "bg-ink text-white dark:bg-white dark:text-[#141414]" : "text-muted dark:text-[#a89f93]"}`}>
+                  <Icon size={14} /> {label}
+                </button>
+              ))}
+            </div>
+            {view === "statement" && !loading && blocks.length > 0 && (
+              <button onClick={shareStatement} className={`${pillCls} inline-flex items-center gap-1.5`}>
+                <Share2 size={14} /> Share
+              </button>
+            )}
+            {shareNote && <span className="text-[12.5px] font-semibold text-success">{shareNote}</span>}
+          </div>
+
           <StatCards stats={stats} loading={loading} />
 
           {!loading && master.length === 0 && (
@@ -755,7 +829,65 @@ export default function CommissionsPage() {
               question a shop actually asks about a commission figure, after the
               bonus spent a release reading zero. Tapping a day still opens the
               receipt-by-receipt audit trail. */}
-          {phone ? (
+          {view === "statement" ? (
+            loading ? (
+              <div className="mt-4 space-y-2">
+                {Array.from({ length: 5 }).map((_, i) => <div key={i} className="h-[58px] animate-pulse rounded-card bg-panel/70 dark:bg-white/[0.05]" />)}
+              </div>
+            ) : blocks.length === 0 ? (
+              <p className="mt-6 text-center text-[13px] text-muted dark:text-[#a89f93]">No shops to show for this chain filter.</p>
+            ) : (
+              <div className="mt-4 overflow-hidden rounded-card border border-line bg-surface dark:border-white/[0.06] dark:bg-[#201c17]">
+                {/* The heading says the dates in words. 2026-10-19 is a key;
+                    "19 Oct 2026" is what somebody reads out on the phone. */}
+                <div className="border-b border-line px-5 py-4 dark:border-white/[0.08]">
+                  <h2 className="text-[17px] font-extrabold tracking-tight text-ink dark:text-[#f4f1ea]">Commission</h2>
+                  <p className="mt-0.5 text-[13px] text-muted dark:text-[#a89f93]">
+                    {rangeWords}{days.length > 1 && <> · {days.length} days</>}
+                  </p>
+                </div>
+
+                {statement.map((blk) => (
+                  <div key={blk.chain} className="border-b border-line last:border-b-0 dark:border-white/[0.08]">
+                    {statement.length > 1 && (
+                      <div className="flex items-center justify-between gap-3 bg-panel/60 px-5 py-2 dark:bg-white/[0.04]">
+                        <span className="text-[11.5px] font-bold uppercase tracking-wide text-muted dark:text-[#a89f93]">{blk.chain}</span>
+                        <span className="text-[12.5px] font-bold tabular-nums text-muted dark:text-[#a89f93]">{money(blk.total)}</span>
+                      </div>
+                    )}
+                    {blk.shops.map((s) => (
+                      <button key={s.id} onClick={() => setView("days")}
+                        className="flex w-full items-center justify-between gap-3 px-5 py-3 text-left transition hover:bg-panel/60 dark:hover:bg-white/[0.04]">
+                        <span className="min-w-0">
+                          <span className="block truncate text-[14px] font-semibold text-ink dark:text-[#e7e2d8]">{s.name}</span>
+                          {/* Per-piece and bonus under the name. A commission
+                              figure nobody can break into its two halves is a
+                              figure nobody argues with — or trusts. */}
+                          <span className="mt-0.5 block text-[11.5px] text-hint dark:text-[#8a8175]">
+                            Per-piece {money(s.pp)}
+                            {s.bonus > 0 ? <> · Bonus {money(s.bonus)}</> : <> · no bonus</>}
+                            {s.dayCount > 0 && <> · {s.dayCount} day{s.dayCount === 1 ? "" : "s"}</>}
+                          </span>
+                        </span>
+                        <span className={`flex-none text-[17px] font-extrabold tabular-nums ${s.total > 0 ? "text-ink dark:text-[#f4f1ea]" : "text-hint dark:text-[#6f675c]"}`}>
+                          {money(s.total)}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                ))}
+
+                <div className="flex items-center justify-between gap-3 bg-ink px-5 py-4 text-white dark:bg-white dark:text-[#141414]">
+                  <span className="text-[13.5px] font-bold">Total commission</span>
+                  <span className="text-[22px] font-extrabold tabular-nums">{money(totals.total)}</span>
+                </div>
+                <div className="flex items-center justify-between gap-3 px-5 py-2.5 text-[12px] text-muted dark:text-[#a89f93]">
+                  <span>Per-piece {money(totals.pp)}</span>
+                  <span>Bonus {money(totals.bonus)}</span>
+                </div>
+              </div>
+            )
+          ) : phone ? (
             <>
               {phoneBranches.length > 1 && (
                 <select value={phoneSel} onChange={(e) => pickPhoneBranch(e.target.value)} aria-label="Shop"
