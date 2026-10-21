@@ -89,6 +89,7 @@ import {
   type Branch, type Row, type Col,
 } from "@/components/retail/kit";
 import { ImportPanel } from "@/components/retail/ImportPanel";
+import { StatementButton } from "@/components/retail/StatementSheet";
 import Modal from "@/components/Modal";
 import { useShopScope } from "@/lib/retailShop";
 
@@ -606,6 +607,7 @@ export default function RetailSalesPage() {
         onRefresh={load} loading={loading}>
         {/* The day's figures are short? The next move is always the same file.
             See ImportButton in the kit. */}
+        <StatementButton kind="sales" branchIds={scope.ids} branches={branches} />
         <ImportButton onClick={() => setImportOpen(true)} />
       </PageHeader>
 

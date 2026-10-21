@@ -50,6 +50,7 @@ import {
   type Row, type Col,
 } from "@/components/retail/kit";
 import { ImportPanel } from "@/components/retail/ImportPanel";
+import { StatementButton } from "@/components/retail/StatementSheet";
 import Modal from "@/components/Modal";
 import { useShopScope } from "@/lib/retailShop";
 
@@ -491,6 +492,7 @@ export default function NonCashPage() {
       <PageHeader title="Non-cash" subtitle="Card, JazzCash, online and udhaar — sales that never reached the till."
         onRefresh={refreshAll} loading={loadingCard || loadingUnc || loadingMix}>
         <ShopSelect branches={branches} scope={scope} className="max-md:hidden" />
+        <StatementButton kind="noncash" branchIds={scope.ids} branches={branches} />
         <ImportButton onClick={() => setImportOpen(true)} />
       </PageHeader>
 

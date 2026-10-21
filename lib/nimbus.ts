@@ -461,6 +461,10 @@ export type StaffForMatch = { id: number; name: string; branch_id: number | null
  *  against rows the old app wrote. */
 export type AdvRow = {
   employee_id: number; entry_date: string;
+  /** WHICH SHOP'S TILL PAID IT — the branch of the expense row this came from,
+   *  not the employee's branch. Staff move between shops; the cash does not
+   *  move with them. See migration 0135. */
+  branch_id: number | null;
   advance: number; purchase_credit: number; paid: number;
   purchase_details: string; source: "nimbus";
 };
@@ -549,6 +553,24 @@ export function linkAdvances(parsed: ExpenseRow[], staff: StaffForMatch[]): Adva
        advance note means; that is a real signal, not a coin toss, and it only
        ever decides a tie that would otherwise resolve to nobody. A leaver can
        still win outright when no active name fits, which is the whole point. */
+    /* TWO PASSES, THE SHOP'S OWN STAFF FIRST.
+     *
+     * This used to be one pass with `if (e.bid !== p.branch_id) continue;` —
+     * only people filed at the shop whose file it is were ever considered. That
+     * is right nearly always and silently wrong the moment somebody moves:
+     * a worker transferred from FC DHA to FC Paragon takes an advance at
+     * Paragon, Paragon's file names him, and because his record still says DHA
+     * he matched nobody. The row was dropped, the cash left the till, and no
+     * ledger anywhere said he owed it.
+     *
+     * So: the shop's own staff are tried first and win outright whenever one of
+     * them fits — a local ALI must never lose to an ALI at another branch. Only
+     * when NOBODY at the shop fits does it look company-wide, and there the bar
+     * is higher: the match must be unique across all eight shops AND exact
+     * (no one-character guesses at a name from another branch). Anything short
+     * of that stays unlinked and goes to the unassigned list, where a person
+     * decides. Guessing across shops is how one man's advance lands on another
+     * man's salary. */
     let best = 0, bestId = 0, bestCount = 0, bestExact = 0;
     for (const e of pool) {
       if (e.bid !== p.branch_id) continue;
@@ -564,14 +586,36 @@ export function linkAdvances(parsed: ExpenseRow[], staff: StaffForMatch[]): Adva
       else if (score === best) bestCount++;
     }
 
+    /* Nobody at this shop fits. Look across the company for an EXACT, UNIQUE
+       name — a transfer, almost always. */
+    let away = false;
+    if (best === 0) {
+      let aExact = 0, aId = 0, aCount = 0;
+      for (const e of pool) {
+        if (e.bid === p.branch_id) continue;
+        let exact = 0;
+        for (const t of e.toks) if (hay.includes(" " + t + " ")) exact++;
+        if (exact === 0) continue;
+        /* whole name in order, or every token of the name present */
+        const whole = e.toks.length > 1 && hay.includes(" " + e.toks.join(" ") + " ");
+        if (!whole && exact < e.toks.length) continue;
+        if (exact > aExact) { aExact = exact; aId = e.id; aCount = 1; }
+        else if (exact === aExact) aCount++;
+      }
+      if (aExact > 0 && aCount === 1) { best = aExact * 100; bestId = aId; bestCount = 1; bestExact = aExact; away = true; }
+    }
+
     if (best === 0) continue;
     if (bestCount > 1) { ambiguous++; continue; }
 
     matched++;
     who.set(p, bestId);
-    if (bestExact === 0) near.add(p);
+    /* A cross-shop match is flagged the same way a one-character match is: it
+       is almost certainly right, and it is still worth a human glance. */
+    if (bestExact === 0 || away) near.add(p);
     rows.push({
       employee_id: bestId, entry_date: p.expense_date,
+      branch_id: p.branch_id,
       advance: p.amount, purchase_credit: 0, paid: 0,
       purchase_details: (p.description || "Advance") + " (import)",
       source: "nimbus",

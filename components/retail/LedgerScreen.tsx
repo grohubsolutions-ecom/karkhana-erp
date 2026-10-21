@@ -61,6 +61,7 @@ import {
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import Modal, { Field, inputCls, btnPrimary, btnGhost } from "@/components/Modal";
 import { AddEmployeeButton, EmployeeRowActions, useEmployeeHistory } from "@/components/retail/EmployeeActions";
+import UnassignedAdvances from "@/components/retail/UnassignedAdvances";
 import {
   Shell, PageHeader, StatCards, DataTable, Tabs, Pill, Select, BranchPicker, MonthPicker,
   PreviewNote, SourceNote, useEmployees, isHeadOffice, money, num, text, today,
@@ -377,11 +378,16 @@ export function EmployeeStatement({ employee, branchName, onClose, onSaved }: {
 
 /* ── the screen ──────────────────────────────────────────────────────────── */
 
-type Tab = "people" | "entries" | "advances";
+type Tab = "people" | "entries" | "advances" | "unassigned";
 const TABS: { key: Tab; label: string }[] = [
   { key: "people", label: "Who owes what" },
   { key: "entries", label: "All entries" },
   { key: "advances", label: "Advances register" },
+  /* Money that left a till with nobody recorded as owing it. It lives beside
+     the ledger rather than on the import screen because it is a loose end to
+     be cleared whenever somebody knows the answer, not a step that should
+     block a file from landing. */
+  { key: "unassigned", label: "Unassigned advances" },
 ];
 
 type Roll = { e: Employee; adv: number; rep: number; bal: number };
@@ -401,7 +407,7 @@ const SOURCE_FOR: Record<string, string> = {
 };
 
 export default function LedgerScreen({ scope }: { scope: Scope }) {
-  const { employees, branches } = useEmployees(scope);
+  const { employees, everyEmployee, branches } = useEmployees(scope);
   const [tab, setTab] = useState<Tab>("people");
   const [branch, setBranch] = useState("");
   const [employeeId, setEmployeeId] = useState("");
@@ -792,6 +798,21 @@ export default function LedgerScreen({ scope }: { scope: Scope }) {
             from <strong>Nimbus</strong> are shown as such and belong to those screens.
           </SourceNote>
         </>
+      )}
+
+      {tab === "unassigned" && (
+        /* `everyEmployee`, deliberately: not `employees` (active only, and
+           scoped away from Head Office) and not `people` (this screen's branch
+           filter). Whoever took the cash owes it — they may be filed at another
+           shop, which is the case this screen exists for, and they may have
+           LEFT, which is when an unpaid advance matters most. `pickable` scopes
+           which shops' PAYMENTS are listed; that is a different question. */
+        <UnassignedAdvances
+          branchIds={pickable.map((b) => Number(b.id))}
+          employees={everyEmployee}
+          branches={branches}
+          onChanged={load}
+        />
       )}
 
       {tab === "advances" && (

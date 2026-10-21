@@ -63,6 +63,7 @@ import {
 import { useStaleRates, reloadStale, staleSeen, markStaleSeen, findDhaBranch, findOtherDhaBranches } from "@/lib/retailStale";
 import { useShopScope } from "@/lib/retailShop";
 import { shareOrCopy } from "@/lib/retailShare";
+import { StatementButton } from "@/components/retail/StatementSheet";
 /* THE RATE SHEET ARRIVES AS A FILE, NOT AS TYPING.
  *
  * Item Rates is a table of thousands of barcodes and there was no way to get a
@@ -720,6 +721,7 @@ export default function CommissionsPage() {
             sheet is looking at the commission figures it is going to change,
             and being sent to another tab to find the button is how the sheet
             stays unimported. */}
+        <StatementButton kind="commission" branchIds={shop.ids} branches={branches} />
         <ImportButton onClick={() => setImportOpen(true)} />
         {tab === "rates" && (
           <button onClick={() => setRateForm({ isEdit: false, item_code: "", item_name: "", retail_price: "", commission: "", percentage: "5" })} className={btnPrimary}>

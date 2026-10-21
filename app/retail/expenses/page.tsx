@@ -50,6 +50,7 @@ import {
   useBranches, money, num, text, today, fetchAll, type Col,
 } from "@/components/retail/kit";
 import { ImportPanel } from "@/components/retail/ImportPanel";
+import { StatementButton } from "@/components/retail/StatementSheet";
 import { useShopScope } from "@/lib/retailShop";
 
 type Exp = {
@@ -465,6 +466,7 @@ export default function ExpensesPage() {
         subtitle="Shop outgoings and the money that comes in without being a sale."
         onRefresh={load} loading={loading}
       >
+        <StatementButton kind="expenses" branchIds={shop.ids} branches={branches} />
         <ImportButton onClick={() => setImportOpen(true)} />
         <button onClick={openAdd} className={btnPrimary}><Plus size={15} /> New entry</button>
       </PageHeader>
