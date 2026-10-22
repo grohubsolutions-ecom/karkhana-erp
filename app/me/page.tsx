@@ -26,6 +26,7 @@ import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import MyWork from "@/components/MyWork";
 import MyPendingReturns from "@/components/MyPendingReturns";
 import FirstAttemptDesk from "@/components/FirstAttemptDesk";
+import ReturnsTrend from "@/components/ReturnsTrend";
 import HubSessionGuard from "@/components/HubSessionGuard";
 import HubBell from "@/components/HubBell";
 import PushToggle from "@/components/PushToggle";
@@ -349,6 +350,11 @@ export default function MyPortal() {
               </p>
             </div>
             <FirstAttemptDesk onCount={setRescueCount} />
+            {/* H298: are returns going down? Any month against any month. */}
+            <h2 className="mt-8 px-1 text-[17px] font-extrabold tracking-tight text-ink dark:text-[#f4f1ea]">
+              Returns, Month By Month
+            </h2>
+            <ReturnsTrend />
           </section>
         )}
 

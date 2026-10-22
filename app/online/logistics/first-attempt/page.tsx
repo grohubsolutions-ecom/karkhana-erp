@@ -13,6 +13,7 @@
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 import FirstAttemptDesk from "@/components/FirstAttemptDesk";
+import ReturnsTrend from "@/components/ReturnsTrend";
 
 export default function FirstAttemptPage() {
   return (
@@ -31,6 +32,9 @@ export default function FirstAttemptPage() {
         </p>
       </div>
       <FirstAttemptDesk />
+      {/* H298: are returns going down? Any month against any month. */}
+      <h2 className="mt-8 text-[17px] font-extrabold tracking-tight text-ink dark:text-[#f4f1ea]">Returns, Month By Month</h2>
+      <ReturnsTrend />
     </div>
   );
 }
