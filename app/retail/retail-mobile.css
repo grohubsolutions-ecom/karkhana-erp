@@ -138,3 +138,34 @@
 @media print {
   html.retail .rt-tabbar, html.retail .rt-topbar { display: none !important; }
 }
+
+/* ── PRINTING ONE STATEMENT ───────────────────────────────────────────────
+   The statement sheet lives inside a modal, inside the page. Printing from
+   there would otherwise put the sidebar, the grid behind it and the modal's
+   own chrome on the paper.
+
+   `visibility` and not `display`: hiding everything by display collapses the
+   layout and the sheet comes out at the wrong width. Hiding by visibility
+   leaves the boxes where they are, then the sheet is made visible again and
+   lifted to the top-left of the page on its own.
+
+   The class is added to <body> only while printing and taken off again
+   afterwards — a rule left switched on would silently break the salary slip
+   and day-book prints, which have their own portals. */
+@media print {
+  body.rt-printing * { visibility: hidden !important; }
+  body.rt-printing #rt-statement,
+  body.rt-printing #rt-statement * { visibility: visible !important; }
+  body.rt-printing #rt-statement {
+    position: absolute !important;
+    left: 0; top: 0; width: 100%;
+    margin: 0; border: 0; border-radius: 0; box-shadow: none;
+  }
+  body.rt-printing .rt-noprint { display: none !important; }
+  /* The header band is the thing people recognise the sheet by, so it has to
+     survive the browser's default "don't waste ink" behaviour. */
+  body.rt-printing #rt-statement * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+}

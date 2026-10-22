@@ -1,20 +1,28 @@
 "use client";
-/* THE RECEIPT. One component, four screens.
+/* THE STATEMENT. One component, four screens.
+ *
+ * WHAT IT IS FOR, and what it deliberately is not.
  *
  * The grids answer "which day was odd". They are the wrong shape for the thing
- * actually asked at the end of a day or a week — read me the figure — and a
- * matrix is not something anybody reads out over the phone or hands to a shop.
+ * actually asked at the end of a day — read me the figure — and a matrix is not
+ * something anybody reads out over the phone or hands to a shop.
  *
- * So: a button, a date, and a till-roll. Shop by shop, a rule, a total. It
- * fetches its OWN figures for the dates you pick, so opening it never disturbs
- * the screen behind it and you can ask about the 19th while looking at the 21st.
+ * The first version of this printed per-piece, bonus and a day count under
+ * every shop. The owner's answer was short: no details. He is right. A payout
+ * sheet is a numbered list of shops, an amount each, and a total, and every
+ * extra figure on it is something to be argued about rather than paid. The
+ * breakdown still exists one tap away on the screen behind; it is not what you
+ * hand somebody.
+ *
+ * So: a numbered list, a total, a date spelled out, and two ways to get it out
+ * of the screen — a printed page and a PNG for WhatsApp.
  *
  * Every number comes from the same database roll-ups the screens use —
  * retail_commission_calc, retail_sales_agg_m, retail_expense_rollup — so a
  * statement can never quietly disagree with the screen it was opened from.
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { ReceiptText, Printer, Share2 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ReceiptText, Printer, ImageDown, Share2 } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import Modal from "@/components/Modal";
 import { money, num, today, addDays, type Branch } from "@/components/retail/kit";
@@ -22,28 +30,32 @@ import { shareOrCopy } from "@/lib/retailShare";
 
 export type StatementKind = "commission" | "sales" | "noncash" | "expenses";
 
+const NOUN: Record<StatementKind, string> = {
+  commission: "COMMISSION",
+  sales: "SALES",
+  noncash: "NON-CASH",
+  expenses: "EXPENSES",
+};
 const TITLE: Record<StatementKind, string> = {
-  commission: "Commission",
-  sales: "Sales",
-  noncash: "Non-cash payments",
-  expenses: "Expenses",
+  commission: "Commission", sales: "Sales", noncash: "Non-cash", expenses: "Expenses",
 };
 
-type Line = { key: string; label: string; amount: number; sub?: string };
-type Block = { heading: string; lines: Line[]; total: number };
+type Line = { name: string; amount: number };
 
-const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const MON = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const DOW = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 const dayWords = (ds: string) => {
-  const [y, m, d] = ds.split("-");
-  return `${Number(d)} ${MONTHS[Number(m) - 1]} ${y}`;
+  const [y, m, d] = ds.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return `${DOW[dt.getUTCDay()]}, ${d} ${MON[m - 1]} ${y}`;
+};
+const shortDay = (ds: string) => {
+  const [y, m, d] = ds.split("-").map(Number);
+  return `${d} ${MON[m - 1]} ${y}`;
 };
 
 export function StatementButton({ kind, branchIds, branches, className }: {
-  kind: StatementKind;
-  /** The shops this screen answers for. null means every shop. */
-  branchIds: number[] | null;
-  branches: Branch[];
-  className?: string;
+  kind: StatementKind; branchIds: number[] | null; branches: Branch[]; className?: string;
 }) {
   const [open, setOpen] = useState(false);
   return (
@@ -53,7 +65,7 @@ export function StatementButton({ kind, branchIds, branches, className }: {
         <ReceiptText size={14} /> Statement
       </button>
       <Modal open={open} onClose={() => setOpen(false)} wide
-        title={`${TITLE[kind]} statement`} subtitle="Pick the days. The figures come straight from the database.">
+        title={`${TITLE[kind]} statement`} subtitle="Pick the days. Print it, save it as a picture, or send it.">
         <StatementSheet kind={kind} branchIds={branchIds} branches={branches} />
       </Modal>
     </>
@@ -66,146 +78,167 @@ export default function StatementSheet({ kind, branchIds, branches }: {
   const t0 = today();
   const [from, setFrom] = useState(t0);
   const [to, setTo] = useState(t0);
-  const [blocks, setBlocks] = useState<Block[] | null>(null);
+  const [lines, setLines] = useState<Line[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
   const [note, setNote] = useState("");
+  const sheetRef = useRef<HTMLDivElement>(null);
 
   const dTo = to > t0 ? t0 : to;
   const bad = from > dTo;
+  const oneDay = from === dTo;
 
-  const name = useMemo(() => {
+  const byId = useMemo(() => {
     const m = new Map<number, { name: string; chain: string }>();
     branches.forEach((b) => m.set(Number(b.id), { name: b.name, chain: String(b.chain ?? "").trim() || "Other" }));
     return m;
   }, [branches]);
 
+  /* The name across the top. One shop names itself, one chain names the chain,
+     anything wider is every shop. */
+  const scopeName = useMemo(() => {
+    const ids = branchIds && branchIds.length ? branchIds : [...byId.keys()];
+    if (ids.length === 1) return (byId.get(ids[0])?.name ?? "SHOP").toUpperCase();
+    const chains = new Set(ids.map((i) => byId.get(i)?.chain).filter(Boolean));
+    if (chains.size === 1) return String([...chains][0]).toUpperCase();
+    return "ALL SHOPS";
+  }, [branchIds ? branchIds.join(",") : "all", byId]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const load = useCallback(async () => {
-    if (!isSupabaseConfigured || !supabase || bad) { setBlocks(null); return; }
+    if (!isSupabaseConfigured || !supabase || bad) { setLines(null); return; }
     const db = supabase;
     setLoading(true); setErr("");
-
-    /* One request. Each of these roll-ups already groups server-side, which is
-       why a statement for a year costs the same as one for a day. */
     const ids = branchIds && branchIds.length ? branchIds : null;
-    let out: Block[] = [];
+    const per = new Map<number, number>();
+    const add = (id: unknown, v: number) => {
+      const k = Number(id);
+      if (!Number.isFinite(k)) return;
+      per.set(k, (per.get(k) ?? 0) + v);
+    };
 
     if (kind === "commission") {
       const { data, error } = await db.rpc("retail_commission_calc", { p_from: from, p_to: dTo, p_branches: ids });
       if (error) { setErr(error.message); setLoading(false); return; }
-      const per = new Map<number, { pp: number; bonus: number }>();
-      ((data as { branch_id: number; per_piece: number | null; bonus: number | null }[]) ?? []).forEach((r) => {
-        const k = Number(r.branch_id);
-        const a = per.get(k) ?? { pp: 0, bonus: 0 };
-        a.pp += num(r.per_piece); a.bonus += num(r.bonus); per.set(k, a);
-      });
-      out = groupByChain([...per.entries()].map(([id, a]) => ({
-        key: String(id), label: name.get(id)?.name ?? `Shop ${id}`,
-        amount: Math.round(a.pp + a.bonus),
-        sub: `Per-piece ${money(a.pp)}${a.bonus > 0 ? ` · Bonus ${money(a.bonus)}` : ""}`,
-        chain: name.get(id)?.chain ?? "Other",
-      })));
-    }
-
-    else if (kind === "sales" || kind === "noncash") {
+      ((data as { branch_id: number; per_piece: number | null; bonus: number | null }[]) ?? [])
+        .forEach((r) => add(r.branch_id, num(r.per_piece) + num(r.bonus)));
+    } else if (kind === "sales" || kind === "noncash") {
       const { data, error } = await db.rpc("retail_sales_agg_m", {
         p_from: from, p_to: dTo, p_branches: ids,
-        p_by: kind === "sales" ? ["branch_id", "receipts"] : ["branch_id", "payment_method"],
+        p_by: kind === "sales" ? ["branch_id"] : ["branch_id", "payment_method"],
       });
       if (error) { setErr(error.message); setLoading(false); return; }
-      type R = { branch_id: number; payment_method: string | null; sales: number | null; receipts: number | null };
-      const rows = (data as R[]) ?? [];
-      if (kind === "sales") {
-        out = groupByChain(rows.map((r) => ({
-          key: String(r.branch_id), label: name.get(Number(r.branch_id))?.name ?? `Shop ${r.branch_id}`,
-          amount: num(r.sales),
-          sub: num(r.receipts) > 0 ? `${num(r.receipts).toLocaleString()} bills` : undefined,
-          chain: name.get(Number(r.branch_id))?.chain ?? "Other",
-        })));
-      } else {
-        /* Non-cash is about HOW it was paid, so the shop is the heading and the
-           payment method is the line. Cash is left out on purpose — this is the
-           non-cash sheet, and including it would make the total read as the
-           day's takings. */
-        const byShop = new Map<number, Line[]>();
-        rows.forEach((r) => {
-          const pm = String(r.payment_method ?? "unclassified");
-          if (pm === "cash") return;
-          const k = Number(r.branch_id);
-          (byShop.get(k) ?? byShop.set(k, []).get(k)!).push({
-            key: `${k}|${pm}`, label: PM_LABEL[pm] ?? pm, amount: num(r.sales),
-          });
-        });
-        out = [...byShop.entries()]
-          .map(([id, lines]) => ({
-            heading: name.get(id)?.name ?? `Shop ${id}`,
-            lines: lines.sort((a, b) => b.amount - a.amount),
-            total: lines.reduce((a, l) => a + l.amount, 0),
-          }))
-          .filter((b) => b.lines.length > 0)
-          .sort((a, b) => a.heading.localeCompare(b.heading));
-      }
-    }
-
-    else {
+      ((data as { branch_id: number; payment_method: string | null; sales: number | null }[]) ?? [])
+        /* Non-cash means everything that did NOT go in the till as cash. */
+        .filter((r) => kind === "sales" || String(r.payment_method ?? "") !== "cash")
+        .forEach((r) => add(r.branch_id, num(r.sales)));
+    } else {
       const { data, error } = await db.rpc("retail_expense_rollup", {
-        p_from: from, p_to: dTo, p_branch: ids && ids.length === 1 ? ids[0] : null, p_by: ["branch_id", "category"],
+        p_from: from, p_to: dTo, p_branch: ids && ids.length === 1 ? ids[0] : null, p_by: ["branch_id"],
       });
       if (error) { setErr(error.message); setLoading(false); return; }
-      type R = { branch_id: number; category: string | null; expense: number | null; income: number | null };
-      const rows = ((data as R[]) ?? []).filter((r) => !ids || ids.includes(Number(r.branch_id)));
-      const byShop = new Map<number, Line[]>();
-      rows.forEach((r) => {
-        /* Income is the same table with the sign flipped, so it comes OFF the
+      ((data as { branch_id: number; expense: number | null; income: number | null }[]) ?? [])
+        .filter((r) => !ids || ids.includes(Number(r.branch_id)))
+        /* Income is the same table with the sign flipped: it comes off the
            expense rather than being listed as one. */
-        const net = num(r.expense) - num(r.income);
-        if (Math.abs(net) < 0.005) return;
-        const k = Number(r.branch_id);
-        (byShop.get(k) ?? byShop.set(k, []).get(k)!).push({
-          key: `${k}|${r.category}`, label: String(r.category ?? "Uncategorised"), amount: net,
-        });
-      });
-      out = [...byShop.entries()]
-        .map(([id, lines]) => ({
-          heading: name.get(id)?.name ?? `Shop ${id}`,
-          lines: lines.sort((a, b) => b.amount - a.amount),
-          total: lines.reduce((a, l) => a + l.amount, 0),
-        }))
-        .sort((a, b) => a.heading.localeCompare(b.heading));
+        .forEach((r) => add(r.branch_id, num(r.expense) - num(r.income)));
     }
 
-    setBlocks(out);
+    setLines(
+      [...per.entries()]
+        .map(([id, amount]) => ({ name: byId.get(id)?.name ?? `Shop ${id}`, amount: Math.round(amount) }))
+        .filter((l) => l.amount !== 0)
+        .sort((a, b) => b.amount - a.amount)
+    );
     setLoading(false);
-  }, [kind, from, dTo, bad, branchIds ? branchIds.join(",") : "all", name]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [kind, from, dTo, bad, branchIds ? branchIds.join(",") : "all", byId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { load(); }, [load]);
 
-  function groupByChain(items: (Line & { chain: string })[]): Block[] {
-    const m = new Map<string, Line[]>();
-    items.filter((i) => i.amount !== 0).forEach((i) => {
-      (m.get(i.chain) ?? m.set(i.chain, []).get(i.chain)!).push(i);
-    });
-    return [...m.entries()]
-      .map(([heading, lines]) => ({
-        heading, lines: lines.sort((a, b) => a.label.localeCompare(b.label)),
-        total: lines.reduce((a, l) => a + l.amount, 0),
-      }))
-      .sort((a, b) => a.heading.localeCompare(b.heading));
+  const total = (lines ?? []).reduce((a, l) => a + l.amount, 0);
+  const when = oneDay ? dayWords(from) : `${shortDay(from)} — ${shortDay(dTo)}`;
+  const heading = `${scopeName} — ${oneDay ? "DAILY " : ""}${NOUN[kind]}`;
+
+  /* ── PRINT ────────────────────────────────────────────────────────────
+     A class on <body> plus a print rule in retail-mobile.css that leaves only
+     the sheet visible. Set it, print, take it off again — a stylesheet that
+     stayed on would silently break every other print on the site. */
+  function print() {
+    const b = document.body;
+    b.classList.add("rt-printing");
+    const off = () => { b.classList.remove("rt-printing"); window.removeEventListener("afterprint", off); };
+    window.addEventListener("afterprint", off);
+    window.print();
+    /* Safari does not always fire afterprint. */
+    setTimeout(off, 3000);
   }
 
-  const grand = (blocks ?? []).reduce((a, b) => a + b.total, 0);
-  const when = from === dTo ? dayWords(from) : `${dayWords(from)} — ${dayWords(dTo)}`;
+  /* ── PNG ──────────────────────────────────────────────────────────────
+     Drawn on a canvas rather than screenshotting the DOM. html2canvas is
+     another dependency, it needs every font and colour inlined, and it fails
+     quietly on exactly the thing that matters here — a figure that renders a
+     pixel off is a figure somebody pays. The sheet is a list of rows: drawing
+     it directly is both smaller and exact. */
+  function png() {
+    const rows = lines ?? [];
+    const W = 1100, PAD = 48, HEAD = 190, ROW = 62, TOTAL = 86, FOOT = 64;
+    const H = HEAD + rows.length * ROW + TOTAL + FOOT;
+    const scale = 2;
+    const c = document.createElement("canvas");
+    c.width = W * scale; c.height = H * scale;
+    const x = c.getContext("2d");
+    if (!x) return;
+    x.scale(scale, scale);
+    const F = (w: number, s: number) => `${w} ${s}px ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif`;
+
+    x.fillStyle = "#ffffff"; x.fillRect(0, 0, W, H);
+
+    const g = x.createLinearGradient(0, 0, W, HEAD);
+    g.addColorStop(0, "#1d4ed8"); g.addColorStop(1, "#1e3a8a");
+    x.fillStyle = g; x.fillRect(0, 0, W, HEAD);
+    x.fillStyle = "rgba(255,255,255,0.82)"; x.font = F(700, 20);
+    x.fillText(heading, PAD, 72);
+    x.fillStyle = "#ffffff"; x.font = F(800, 46);
+    x.fillText(when, PAD, 132);
+
+    let y = HEAD;
+    rows.forEach((l, i) => {
+      if (i % 2) { x.fillStyle = "#f8fafc"; x.fillRect(0, y, W, ROW); }
+      x.fillStyle = "#94a3b8"; x.font = F(700, 20);
+      x.fillText(String(i + 1), PAD, y + ROW / 2 + 7);
+      x.fillStyle = "#0f172a"; x.font = F(700, 25);
+      x.fillText(l.name, PAD + 54, y + ROW / 2 + 8);
+      x.font = F(800, 25); x.textAlign = "right";
+      x.fillText(money(l.amount), W - PAD, y + ROW / 2 + 8);
+      x.textAlign = "left";
+      x.strokeStyle = "#e2e8f0"; x.lineWidth = 1;
+      x.beginPath(); x.moveTo(0, y + ROW - 0.5); x.lineTo(W, y + ROW - 0.5); x.stroke();
+      y += ROW;
+    });
+
+    x.fillStyle = "#0f172a"; x.fillRect(0, y, W, TOTAL);
+    x.fillStyle = "#ffffff"; x.font = F(800, 27);
+    x.fillText("TOTAL", PAD, y + TOTAL / 2 + 10);
+    x.textAlign = "right"; x.font = F(800, 34);
+    x.fillText(money(total), W - PAD, y + TOTAL / 2 + 12);
+    x.textAlign = "left";
+    y += TOTAL;
+
+    x.fillStyle = "#64748b"; x.font = F(500, 18);
+    x.fillText(`Grohub Solutions · Shops Sales · ${when}`, PAD, y + FOOT / 2 + 6);
+
+    const a = document.createElement("a");
+    a.download = `${TITLE[kind].toLowerCase()}-${oneDay ? from : `${from}_to_${dTo}`}.png`;
+    a.href = c.toDataURL("image/png");
+    a.click();
+    setNote("Picture saved.");
+    setTimeout(() => setNote(""), 4000);
+  }
 
   async function share() {
-    const lines = [`*${TITLE[kind]}*`, when, ""];
-    (blocks ?? []).forEach((b) => {
-      lines.push(`*${b.heading}*`);
-      b.lines.forEach((l) => lines.push(`${l.label}: ${money(l.amount)}`));
-      if ((blocks ?? []).length > 1) lines.push(`${b.heading} total: ${money(b.total)}`);
-      lines.push("");
-    });
-    lines.push(`*Total: ${money(grand)}*`);
-    const r = await shareOrCopy(lines.join("\n"), TITLE[kind]);
+    const t = [`*${heading}*`, when, ""];
+    (lines ?? []).forEach((l, i) => t.push(`${i + 1}. ${l.name}: ${money(l.amount)}`));
+    t.push("", `*TOTAL: ${money(total)}*`);
+    const r = await shareOrCopy(t.join("\n"), TITLE[kind]);
     if (r === "cancelled") return;
     setNote(r === "shared" ? "Sent." : r === "copied" ? "Copied — paste it into WhatsApp." : "Could not share.");
     setTimeout(() => setNote(""), 4000);
@@ -220,102 +253,80 @@ export default function StatementSheet({ kind, branchIds, branches }: {
       {label}
     </button>
   );
+  const dateCls = "min-h-[40px] rounded-full border border-line bg-surface px-3.5 text-[12.5px] font-semibold text-ink max-md:flex-1 dark:border-white/10 dark:bg-white/[0.06] dark:text-white";
+  const actionCls = "inline-flex min-h-[40px] items-center gap-1.5 rounded-full border border-line bg-surface px-3.5 text-[12.5px] font-semibold text-ink transition hover:bg-panel disabled:opacity-40 dark:border-white/10 dark:bg-white/[0.06] dark:text-white";
+  const empty = !loading && (!lines || lines.length === 0);
 
   return (
     <div className="space-y-4">
-      {/* ── pick the days ─────────────────────────────────────────────── */}
-      <div className="flex flex-wrap items-center gap-2">
+      {/* ── the days ─────────────────────────────────────────────────── */}
+      <div className="flex flex-wrap items-center gap-2 rt-noprint">
         {quick("Today", t0, t0)}
         {quick("Yesterday", addDays(t0, -1), addDays(t0, -1))}
         {quick("Last 7 days", addDays(t0, -6), t0)}
         {quick("This month", t0.slice(0, 8) + "01", t0)}
       </div>
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2 rt-noprint">
         <label className="flex items-center gap-2 max-md:w-full">
           <span className="text-[12.5px] font-semibold text-muted dark:text-[#a89f93]">From</span>
-          <input type="date" value={from} max={t0} onChange={(e) => setFrom(e.target.value)}
-            className="min-h-[40px] rounded-full border border-line bg-surface px-3.5 text-[12.5px] font-semibold text-ink max-md:flex-1 dark:border-white/10 dark:bg-white/[0.06] dark:text-white" />
+          <input type="date" value={from} max={t0} onChange={(e) => setFrom(e.target.value)} className={dateCls} />
         </label>
         <label className="flex items-center gap-2 max-md:w-full">
           <span className="text-[12.5px] font-semibold text-muted dark:text-[#a89f93]">To</span>
-          <input type="date" value={dTo} max={t0} onChange={(e) => setTo(e.target.value)}
-            className="min-h-[40px] rounded-full border border-line bg-surface px-3.5 text-[12.5px] font-semibold text-ink max-md:flex-1 dark:border-white/10 dark:bg-white/[0.06] dark:text-white" />
+          <input type="date" value={dTo} max={t0} onChange={(e) => setTo(e.target.value)} className={dateCls} />
         </label>
       </div>
 
-      {bad && <p className="text-[12.5px] font-semibold text-danger">From is after To — nothing to show.</p>}
-      {err && <p className="text-[12.5px] font-semibold text-danger">{err}</p>}
+      {bad && <p className="text-[12.5px] font-semibold text-danger rt-noprint">From is after To — nothing to show.</p>}
+      {err && <p className="text-[12.5px] font-semibold text-danger rt-noprint">{err}</p>}
 
-      {/* ── the till roll ─────────────────────────────────────────────── */}
-      <div id="rt-statement" className="overflow-hidden rounded-card border border-line bg-surface dark:border-white/[0.06] dark:bg-[#201c17]">
-        <div className="border-b border-dashed border-line px-5 py-4 text-center dark:border-white/[0.12]">
-          <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-hint dark:text-[#8a8175]">Shops Sales</div>
-          <h2 className="mt-1 text-[19px] font-extrabold tracking-tight text-ink dark:text-[#f4f1ea]">{TITLE[kind]}</h2>
-          <p className="mt-0.5 text-[13px] text-muted dark:text-[#a89f93]">{when}</p>
+      {/* ── the sheet ────────────────────────────────────────────────── */}
+      <div id="rt-statement" ref={sheetRef}
+        className="overflow-hidden rounded-card border border-line bg-white shadow-sm dark:border-white/[0.08]">
+        <div className="bg-gradient-to-br from-[#1d4ed8] to-[#1e3a8a] px-6 py-6 text-white">
+          <div className="text-[12px] font-bold uppercase tracking-[0.16em] text-white/80">{heading}</div>
+          <div className="mt-1.5 text-[26px] font-extrabold leading-tight tracking-tight">{when}</div>
         </div>
 
         {loading ? (
-          <div className="space-y-2 p-5">
-            {Array.from({ length: 4 }).map((_, i) => <div key={i} className="h-[40px] animate-pulse rounded-lg bg-panel/70 dark:bg-white/[0.05]" />)}
+          <div className="space-y-2 p-6">
+            {Array.from({ length: 5 }).map((_, i) => <div key={i} className="h-[44px] animate-pulse rounded-lg bg-slate-100" />)}
           </div>
-        ) : !blocks || blocks.length === 0 ? (
-          <p className="px-5 py-10 text-center text-[13px] text-muted dark:text-[#a89f93]">
-            Nothing recorded for {when}.
-          </p>
+        ) : empty ? (
+          <p className="px-6 py-14 text-center text-[13.5px] text-slate-500">Nothing recorded for {when}.</p>
         ) : (
           <>
-            {blocks.map((b) => (
-              <div key={b.heading} className="border-b border-dashed border-line last:border-b-0 dark:border-white/[0.12]">
-                {blocks.length > 1 && (
-                  <div className="bg-panel/60 px-5 py-2 text-[11.5px] font-bold uppercase tracking-wide text-muted dark:bg-white/[0.04] dark:text-[#a89f93]">
-                    {b.heading}
-                  </div>
-                )}
-                {b.lines.map((l) => (
-                  <div key={l.key} className="flex items-baseline justify-between gap-3 px-5 py-2.5">
-                    <span className="min-w-0">
-                      <span className="block truncate text-[13.5px] font-semibold text-ink dark:text-[#e7e2d8]">{l.label}</span>
-                      {l.sub && <span className="mt-0.5 block text-[11.5px] text-hint dark:text-[#8a8175]">{l.sub}</span>}
-                    </span>
-                    <span className="flex-none text-[15px] font-bold tabular-nums text-ink dark:text-[#f4f1ea]">{money(l.amount)}</span>
-                  </div>
-                ))}
-                {blocks.length > 1 && (
-                  <div className="flex items-baseline justify-between gap-3 border-t border-line px-5 py-2 dark:border-white/[0.08]">
-                    <span className="text-[12px] font-bold text-muted dark:text-[#a89f93]">{b.heading} total</span>
-                    <span className="text-[13.5px] font-extrabold tabular-nums text-muted dark:text-[#a89f93]">{money(b.total)}</span>
-                  </div>
-                )}
+            <div className="grid grid-cols-[46px_1fr_auto] items-center gap-3 border-b border-slate-200 bg-slate-50 px-6 py-2.5 text-[11px] font-bold uppercase tracking-wide text-slate-500">
+              <span>#</span><span>Shop</span><span className="text-right">{TITLE[kind]}</span>
+            </div>
+            {(lines ?? []).map((l, i) => (
+              <div key={l.name}
+                className={`grid grid-cols-[46px_1fr_auto] items-center gap-3 border-b border-slate-100 px-6 py-3.5 ${i % 2 ? "bg-slate-50/60" : ""}`}>
+                <span className="text-[14px] font-bold text-slate-400">{i + 1}</span>
+                <span className="truncate text-[15px] font-bold text-slate-900">{l.name}</span>
+                <span className="text-right text-[16px] font-extrabold tabular-nums text-slate-900">{money(l.amount)}</span>
               </div>
             ))}
-            <div className="flex items-center justify-between gap-3 bg-ink px-5 py-4 text-white dark:bg-white dark:text-[#141414]">
-              <span className="text-[13.5px] font-bold">Total {TITLE[kind].toLowerCase()}</span>
-              <span className="text-[22px] font-extrabold tabular-nums">{money(grand)}</span>
+            <div className="flex items-center justify-between gap-3 bg-slate-900 px-6 py-4 text-white">
+              <span className="text-[14px] font-extrabold tracking-wide">TOTAL</span>
+              <span className="text-[24px] font-extrabold tabular-nums">{money(total)}</span>
             </div>
           </>
         )}
+        <div className="px-6 py-3 text-[11.5px] text-slate-400">
+          Grohub Solutions · Shops Sales · {when}
+        </div>
       </div>
 
-      <div className="flex flex-wrap items-center justify-end gap-2">
+      <div className="flex flex-wrap items-center justify-end gap-2 rt-noprint">
         {note && <span className="mr-auto text-[12.5px] font-semibold text-success">{note}</span>}
-        <button onClick={share} disabled={!blocks || blocks.length === 0}
-          className="inline-flex min-h-[40px] items-center gap-1.5 rounded-full border border-line bg-surface px-3.5 text-[12.5px] font-semibold text-ink transition hover:bg-panel disabled:opacity-40 dark:border-white/10 dark:bg-white/[0.06] dark:text-white">
-          <Share2 size={14} /> Share
-        </button>
-        <button onClick={() => window.print()} disabled={!blocks || blocks.length === 0}
-          className="inline-flex min-h-[40px] items-center gap-1.5 rounded-full border border-line bg-surface px-3.5 text-[12.5px] font-semibold text-ink transition hover:bg-panel disabled:opacity-40 dark:border-white/10 dark:bg-white/[0.06] dark:text-white">
-          <Printer size={14} /> Print
+        <button onClick={share} disabled={empty} className={actionCls}><Share2 size={14} /> Share</button>
+        <button onClick={png} disabled={empty} className={actionCls}><ImageDown size={14} /> Download image</button>
+        <button onClick={print} disabled={empty}
+          className="inline-flex min-h-[40px] items-center gap-1.5 rounded-full bg-ink px-4 text-[12.5px] font-semibold text-white transition hover:opacity-90 disabled:opacity-40 dark:bg-white dark:text-[#141414]">
+          <Printer size={14} /> Print / PDF
         </button>
       </div>
     </div>
   );
 }
-
-const PM_LABEL: Record<string, string> = {
-  meezan_card: "Card (Meezan)",
-  card: "Card",
-  jazzcash: "JazzCash",
-  online: "Online transfer",
-  credit: "Credit (udhaar)",
-  unclassified: "Not yet classified",
-};
