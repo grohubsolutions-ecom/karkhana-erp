@@ -121,6 +121,69 @@ const TONE_TXT = {
 } as const;
 const STORE_ORDER = ["LM", "TS", "TRZ"];
 
+/* H297 — SHOPIFY SALES, one row per store + ALL, from hub_dashboard_all().
+   Straight from Shopify, each order under the day it was placed, so it lines
+   up with Shopify's own reports. Same four buckets as the cards on top:
+   Pending + Dispatched + Returned + Cancelled = Orders. */
+type ShopRow = {
+  store_code: string; is_total: boolean; orders: number;
+  gross_sales: number; discounts: number; shipping: number; taxes: number; total_sales: number;
+  pending_n: number; pending_v: number; dispatched_n: number; dispatched_v: number;
+  returned_n: number; returned_v: number; cancelled_n: number; cancelled_v: number;
+  net_sales: number; net_orders: number; avg_order: number;
+  items_ordered: number; items_net: number; paid_n: number; paid_v: number; refunds: number;
+  return_rate: number | null; cancel_rate: number | null;
+};
+type DashAll = {
+  summary: DashSummary; counts: DashCounts; cancellations: DashCancels;
+  stores: StoreRow[]; couriers: CourierRow[]; cities: { label: string; value: number }[];
+  shopify: ShopRow[];
+};
+
+/* Each line: what it shows and how to print it for one store. */
+const SHOP_ROWS: {
+  key: string; label: string; hint?: string; indent: 0 | 1; strong?: boolean;
+  tone?: "good" | "warn" | "bad" | "muted"; line?: boolean;
+  main: (r: ShopRow) => string; sub?: (r: ShopRow) => string;
+}[] = [
+  { key: "gross", label: "Gross sales", hint: "product value before discounts", indent: 0,
+    main: (r) => rs(r.gross_sales), sub: (r) => `${Number(r.items_ordered).toLocaleString()} items` },
+  { key: "disc", label: "Discounts", indent: 1, tone: "muted", main: (r) => `− ${rs(r.discounts)}` },
+  { key: "ship", label: "Shipping charged", indent: 1, main: (r) => `+ ${rs(r.shipping)}` },
+  { key: "total", label: "Total sales", hint: "what customers were charged", indent: 0, strong: true,
+    main: (r) => rs(r.total_sales), sub: (r) => `${Number(r.orders).toLocaleString()} orders` },
+  { key: "pend", label: "Pending", hint: "not fulfilled yet", indent: 1, tone: "warn", line: true,
+    main: (r) => rs(r.pending_v), sub: (r) => `${Number(r.pending_n).toLocaleString()} orders` },
+  { key: "disp", label: "Dispatched", hint: "fulfilled in Shopify", indent: 1, tone: "good",
+    main: (r) => rs(r.dispatched_v), sub: (r) => `${Number(r.dispatched_n).toLocaleString()} orders` },
+  { key: "ret", label: "Returned", hint: "fulfilled, then cancelled", indent: 1, tone: "bad",
+    main: (r) => rs(r.returned_v), sub: (r) => `${Number(r.returned_n).toLocaleString()} orders` },
+  { key: "canc", label: "Cancelled", hint: "cancelled before fulfilment", indent: 1, tone: "bad",
+    main: (r) => rs(r.cancelled_v), sub: (r) => `${Number(r.cancelled_n).toLocaleString()} orders` },
+  { key: "net", label: "Net sales", hint: "total minus returned and cancelled", indent: 0, strong: true, line: true,
+    main: (r) => rs(r.net_sales), sub: (r) => `${Number(r.net_orders).toLocaleString()} orders · ${Number(r.items_net).toLocaleString()} items` },
+  { key: "avg", label: "Average order", hint: "net sales ÷ net orders", indent: 0, main: (r) => rs(r.avg_order) },
+  { key: "paid", label: "Marked paid in Shopify", indent: 0,
+    main: (r) => rs(r.paid_v), sub: (r) => `${Number(r.paid_n).toLocaleString()} orders` },
+  { key: "refund", label: "Refunds", indent: 0, tone: "muted", main: (r) => rs(r.refunds) },
+  { key: "rr", label: "Return rate", hint: "returned ÷ fulfilled", indent: 0, tone: "bad", line: true,
+    main: (r) => (r.return_rate == null ? "—" : `${Number(r.return_rate).toFixed(1)}%`) },
+  { key: "cr", label: "Cancel rate", hint: "cancelled ÷ all orders", indent: 0, tone: "bad",
+    main: (r) => (r.cancel_rate == null ? "—" : `${Number(r.cancel_rate).toFixed(1)}%`) },
+];
+const zeroShop = (code: string): ShopRow => ({
+  store_code: code, is_total: code === "ALL", orders: 0, gross_sales: 0, discounts: 0, shipping: 0, taxes: 0,
+  total_sales: 0, pending_n: 0, pending_v: 0, dispatched_n: 0, dispatched_v: 0, returned_n: 0, returned_v: 0,
+  cancelled_n: 0, cancelled_v: 0, net_sales: 0, net_orders: 0, avg_order: 0, items_ordered: 0, items_net: 0,
+  paid_n: 0, paid_v: 0, refunds: 0, return_rate: null, cancel_rate: null,
+});
+
+/* SPEED: answers are kept for the life of the tab, keyed by dates + store.
+   Coming back to the dashboard, or flipping back to a range already seen,
+   paints instantly from memory and refreshes quietly behind it. */
+const CACHE = new Map<string, DashAll>();
+let RATES_CACHE: RateRow[] | null = null;
+
 export default function HubDashboard() {
   const phone = useIsPhone();
   /* On a phone the store columns do not fit side by side; the ladder shows one
@@ -129,7 +192,9 @@ export default function HubDashboard() {
   const [breakdown, setBreakdown] = useState<Breakdown | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
-  const [rates, setRates] = useState<RateRow[]>([]);
+  const [rates, setRates] = useState<RateRow[]>(RATES_CACHE ?? []);
+  const [shop, setShop] = useState<ShopRow[]>([]);
+  const [shopCol, setShopCol] = useState("ALL");
   // The two cards answer "is it getting worse". The months answer "what is
   // normal" — worth having, not worth pushing the rest of the page down.
   const [showMonths, setShowMonths] = useState(false);
@@ -150,33 +215,63 @@ export default function HubDashboard() {
      counted server-side, both limited to hub.dashboard.view. */
   const reqId = useRef(0);
 
+  const apply = useCallback((d: DashAll) => {
+    setSummary(d.summary ?? null);
+    setCounts(d.counts ?? null);
+    setCancels(d.cancellations ?? null);
+    setBreakdown({ stores: d.stores ?? [], couriers: d.couriers ?? [], cities: d.cities ?? [] });
+    setShop(d.shopify ?? []);
+  }, []);
+
+  /* H297: ONE request for the whole page (was four, each re-reading every order
+     and parcel). The return-rate months do not depend on the dates, so they are
+     fetched once, not on every range change. */
   const load = useCallback(async (opts?: { silent?: boolean }) => {
     if (!isSupabaseConfigured || !supabase) { setLoading(false); return; }
     const my = ++reqId.current;
-    if (!opts?.silent) setLoading(true);
-    setErr("");
     const [from, to] = rangeDates(preset, cf, ct);
     const args = { p_from: from, p_to: to, p_store: store === "ALL" ? null : store };
+    const key = `${from}|${to}|${args.p_store ?? "ALL"}`;
 
-    const [sum, br, rt, cnt, cx] = await Promise.all([
+    const hit = CACHE.get(key);
+    if (hit) { apply(hit); setLoading(false); }
+    else if (!opts?.silent) setLoading(true);
+    setErr("");
+
+    const ratesReq = RATES_CACHE && opts?.silent !== true
+      ? Promise.resolve({ data: RATES_CACHE, error: null })
+      : supabase.rpc("hub_return_rates", { p_months: 3 });
+    const [all, rt] = await Promise.all([supabase.rpc("hub_dashboard_all", args), ratesReq]);
+    if (my !== reqId.current) return;          // superseded by a newer request
+
+    if (!rt.error && rt.data) { RATES_CACHE = rt.data as RateRow[]; setRates(RATES_CACHE); }
+
+    if (!all.error && all.data) {
+      const d = all.data as DashAll;
+      CACHE.set(key, d);
+      apply(d);
+      setLoading(false);
+      return;
+    }
+
+    /* Fallback: hub_dashboard_all missing (H297 not run) — the old four calls,
+       so deploying this page before the SQL cannot break the dashboard. */
+    const [sum, br, cnt, cx] = await Promise.all([
       supabase.rpc("hub_dashboard_summary", args),
       supabase.rpc("hub_dashboard_breakdown", args),
-      supabase.rpc("hub_return_rates", { p_months: 3 }),
       supabase.rpc("hub_dashboard_counts", args),
       supabase.rpc("hub_dashboard_cancellations", args),
     ]);
-    if (my !== reqId.current) return;          // superseded by a newer request
+    if (my !== reqId.current) return;
     const firstErr = sum.error ?? br.error ?? cnt.error;
     if (firstErr) setErr(firstErr.message);
     setSummary((sum.data as DashSummary[])?.[0] ?? null);
     setCounts((cnt.data as DashCounts[])?.[0] ?? null);
-    /* A missing function (H287 not run yet) hides the row instead of
-       putting an error over the whole dashboard. */
     setCancels(cx.error ? null : ((cx.data as DashCancels[])?.[0] ?? null));
     setBreakdown((br.data as Breakdown) ?? null);
-    setRates((rt.data as RateRow[]) ?? []);
+    setShop([]);
     setLoading(false);
-  }, [preset, cf, ct, store]);
+  }, [preset, cf, ct, store, apply]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -215,12 +310,14 @@ export default function HubDashboard() {
     const codes = store === "ALL" ? [...STORE_ORDER, "ALL"] : [store];
     const storeCols = codes.map((c) => got.find((r) => r.store_code === c) ?? zero(c));
 
+    const shopCols = codes.map((c) => shop.find((r) => r.store_code === c) ?? zeroShop(c));
+
     return {
       total, pending, dispatched, returned, cancelled, delivered, transit, totalAmt, avgAmt, deliveryRate,
-      received, receivable, receivableCount, storeCols,
+      received, receivable, receivableCount, storeCols, shopCols,
       cities: breakdown?.cities ?? [], couriers: breakdown?.couriers ?? [],
     };
-  }, [summary, counts, breakdown, store]);
+  }, [summary, counts, breakdown, store, shop]);
 
   const pct = (n: number) => (M.total ? Math.round((n / M.total) * 100) : 0);
   /* Return rate per courier, this month against last. The dashboard already
@@ -330,6 +427,84 @@ export default function HubDashboard() {
           </div>
         ))}
       </div>
+
+      {/* ── SHOPIFY SALES (H297) ───────────────────────────────────────────
+          Gross → discounts → shipping → total, then the total split into the
+          same four buckets as the cards, then net. Straight from Shopify,
+          each order under the day it was placed. */}
+      {shop.length > 0 && (
+        <div className="mt-4 rounded-card border border-line bg-surface dark:border-white/[0.06] dark:bg-[#201c17]">
+          <div className="flex flex-wrap items-baseline justify-between gap-2 px-4 pb-2 pt-4 sm:px-5 sm:pt-5">
+            <h3 className="flex items-center gap-2 text-[14px] font-bold text-ink dark:text-[#f4f1ea]"><ShoppingBag size={16} /> Shopify sales</h3>
+            <span className="text-[11.5px] text-hint dark:text-[#8a8175]">from Shopify · Pending + Dispatched + Returned + Cancelled = Total</span>
+          </div>
+          {phone ? (() => {
+            const s = M.shopCols.find((x) => (shopCol === "ALL" ? x.is_total : x.store_code === shopCol)) ?? M.shopCols[M.shopCols.length - 1];
+            return (
+              <div className="px-3 pb-3">
+                {M.shopCols.length > 1 && (
+                  <Segmented value={shopCol} onChange={setShopCol}
+                    options={[{ key: "ALL", label: "All" }, ...M.shopCols.filter((x) => !x.is_total).map((x) => ({ key: x.store_code, label: x.store_code }))]} />
+                )}
+                {s && (
+                  <div className="mt-2">
+                    {SHOP_ROWS.map((row) => (
+                      <div key={row.key} className={`flex items-center gap-3 py-2.5 ${row.line ? "mt-1 border-t-2 border-line dark:border-white/[0.10]" : "border-t border-line/60 first:border-0 dark:border-white/[0.04]"}`}
+                        style={{ paddingLeft: `${4 + row.indent * 14}px` }}>
+                        <div className="min-w-0 flex-1">
+                          <div className={`text-[13.5px] ${row.strong ? "font-bold text-ink dark:text-[#f4f1ea]" : "font-medium text-ink dark:text-[#e7e2d8]"} ${row.tone ? TONE_TXT[row.tone] : ""}`}>{row.label}</div>
+                          {row.hint && <div className="truncate text-[11px] text-hint dark:text-[#8a8175]">{row.hint}</div>}
+                        </div>
+                        <div className="shrink-0 text-right tabular-nums">
+                          <div className={`whitespace-nowrap ${row.strong ? "text-[15px] font-extrabold" : "text-[13.5px] font-semibold"} ${row.tone ? TONE_TXT[row.tone] : "text-ink dark:text-[#f4f1ea]"}`}>{row.main(s)}</div>
+                          {row.sub && <div className="whitespace-nowrap text-[11px] text-hint dark:text-[#8a8175]">{row.sub(s)}</div>}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })() : (
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[640px] text-left text-[13px]">
+                <thead>
+                  <tr className="border-b border-line text-[11.5px] uppercase tracking-wide text-muted dark:border-white/[0.06] dark:text-[#a89f93]">
+                    <th className="sticky left-0 z-10 bg-surface px-5 py-2.5 font-semibold dark:bg-[#201c17]" />
+                    {M.shopCols.map((s) => {
+                      const meta = STORES.find((x) => x.code === s.store_code);
+                      return (
+                        <th key={s.store_code} className={`whitespace-nowrap px-4 py-2.5 text-right font-semibold ${s.is_total ? "bg-panel/60 text-ink dark:bg-white/[0.04] dark:text-[#f4f1ea]" : ""}`}>
+                          <span className="inline-flex items-center gap-1.5">
+                            {!s.is_total && <span className="h-2 w-2 rounded-full" style={{ background: meta?.color }} />}
+                            {meta?.label ?? s.store_code}
+                          </span>
+                        </th>
+                      );
+                    })}
+                  </tr>
+                </thead>
+                <tbody>
+                  {SHOP_ROWS.map((row) => (
+                    <tr key={row.key} className={row.line ? "border-t-2 border-line dark:border-white/[0.10]" : "border-t border-line/60 dark:border-white/[0.04]"}>
+                      <td className="sticky left-0 z-10 bg-surface py-2.5 pr-3 dark:bg-[#201c17]" style={{ paddingLeft: `${20 + row.indent * 16}px` }}>
+                        <div className={`${row.strong ? "font-bold text-ink dark:text-[#f4f1ea]" : "font-medium text-ink dark:text-[#e7e2d8]"} ${row.tone ? TONE_TXT[row.tone] : ""}`}>{row.label}</div>
+                        {row.hint && <div className="hidden text-[11px] text-hint sm:block dark:text-[#8a8175]">{row.hint}</div>}
+                      </td>
+                      {M.shopCols.map((s) => (
+                        <td key={s.store_code} className={`px-4 py-2.5 text-right tabular-nums ${s.is_total ? "bg-panel/60 dark:bg-white/[0.04]" : ""}`}>
+                          <div className={`whitespace-nowrap ${row.strong ? "text-[14px] font-extrabold" : "font-semibold"} ${row.tone ? TONE_TXT[row.tone] : "text-ink dark:text-[#f4f1ea]"}`}>{row.main(s)}</div>
+                          {row.sub && <div className="whitespace-nowrap text-[11px] text-hint dark:text-[#8a8175]">{row.sub(s)}</div>}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* RETURN RATE BY COURIER — this month against last.
           The card above counts returns. This says whether the rate is rising,
