@@ -20,7 +20,7 @@
  *   from the browser console.
  */
 import { useCallback, useEffect, useState } from "react";
-import { CalendarDays, HandCoins, Wallet, Loader2, AlertTriangle, LogOut } from "lucide-react";
+import { CalendarDays, HandCoins, Wallet, Loader2, AlertTriangle, LogOut, Eye, EyeOff } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import MyWork from "@/components/MyWork";
@@ -62,7 +62,10 @@ const dayCount = (v: unknown) => {
 
 const MONTHS = ["", "January", "February", "March", "April", "May", "June",
                 "July", "August", "September", "October", "November", "December"];
-const rs = (v: unknown) => "Rs " + Math.round(Number(v) || 0).toLocaleString("en-PK");
+/* `rs` is replaced by `money` on this page (H299 — the privacy eye toggles
+   every figure). Kept here as a no-op in case a stray caller is added. */
+const _rs = (v: unknown) => "Rs " + Math.round(Number(v) || 0).toLocaleString("en-PK");
+void _rs;
 
 export default function MyPortal() {
   useEffect(() => {
@@ -108,6 +111,24 @@ export default function MyPortal() {
   /* How many parcels are waiting on the desk — shown on its tab, so it is
      seen from the other tabs too. Reported by the desk itself. */
   const [rescueCount, setRescueCount] = useState<number | null>(null);
+  /* H299 — PRIVACY. The portal opens with the money hidden, so a colleague
+     reading over his shoulder sees no figure. The eye in the top band toggles
+     every rupee on the page. Kept this session only (sessionStorage): closing
+     the tab or signing out hides it again next time. */
+  const [showMoney, setShowMoney] = useState(false);
+  useEffect(() => {
+    try { if (sessionStorage.getItem("hub_show_money") === "1") setShowMoney(true); } catch { /* private window */ }
+  }, []);
+  function toggleMoney() {
+    setShowMoney((v) => {
+      const n = !v;
+      try { if (n) sessionStorage.setItem("hub_show_money", "1"); else sessionStorage.removeItem("hub_show_money"); } catch { /* ignore */ }
+      return n;
+    });
+  }
+  /* Rs figures everywhere on this page go through this. Hidden ones are the
+     same width so nothing jumps when the eye is pressed. */
+  const money = (v: unknown) => showMoney ? "Rs " + Math.round(Number(v) || 0).toLocaleString("en-PK") : "Rs ••••••";
 
   useEffect(() => {
     if (!isSupabaseConfigured || !supabase) { setPerms({ returns: false, rescue: false }); return; }
@@ -216,13 +237,21 @@ export default function MyPortal() {
                 {tc(me.name)}
               </h1>
               <p className="mt-1.5 text-[13px] text-white/60">
-                {me.designation ?? "—"} · {rs(me.salary)} a month
+                {me.designation ?? "—"} · {money(me.salary)} a month
               </p>
             </div>
             {/* The bell sits on the dark band, where the person is already
                 looking when the page opens. Work assigned to them is the one
                 thing here that is time-sensitive; their wages are not. */}
             <div className="flex shrink-0 items-center gap-2">
+              {/* H299: hide the money. The portal opens hidden; this eye is the
+                  only way to reveal it, and the next session hides it again. */}
+              <button onClick={toggleMoney} aria-pressed={showMoney}
+                      aria-label={showMoney ? "Hide the money" : "Show the money"}
+                      title={showMoney ? "Hide the money — the figures are private" : "Show the money"}
+                      className="flex h-11 w-11 items-center justify-center rounded-full border border-white/20 text-white/70 transition hover:bg-white/10 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white">
+                {showMoney ? <Eye size={17} /> : <EyeOff size={17} />}
+              </button>
               {/* H290: ring this phone when a bell notification arrives. */}
               <PushToggle dark />
               <HubBell dark size="lg" />
@@ -239,7 +268,7 @@ export default function MyPortal() {
                 {isCurrent ? `Earned Up To ${today.getDate()} ${MONTHS[month]}` : `Payable For ${MONTHS[month]}`}
               </div>
               <div className="mt-1 text-[42px] font-extrabold leading-none tabular-nums tracking-tight sm:text-[54px]">
-                {rs(isCurrent ? gross : (pay?.payable ?? 0))}
+                {money(isCurrent ? gross : (pay?.payable ?? 0))}
               </div>
               {/* Earned and payable are a pair: the big figure matches the label
                   above (earned this month, or payable for a past month), and the
@@ -248,8 +277,8 @@ export default function MyPortal() {
               {Number(pay?.payable ?? 0) !== gross && (
                 <div className="mt-1 text-[12.5px] font-semibold text-white/55 tabular-nums">
                   {isCurrent
-                    ? `To be paid after advances: ${rs(pay?.payable ?? 0)}`
-                    : `Earned: ${rs(gross)}`}
+                    ? `To be paid after advances: ${money(pay?.payable ?? 0)}`
+                    : `Earned: ${money(gross)}`}
                 </div>
               )}
             </div>
@@ -375,24 +404,24 @@ export default function MyPortal() {
                     </span>
                     {given > 0 && (
                       <span className="mt-0.5 block text-[11.5px] font-semibold text-emerald-700">
-                        includes {dayCount(given)} extra day{given > 1 ? "s" : ""} given (+{rs(pay?.given_pay)})
+                        includes {dayCount(given)} extra day{given > 1 ? "s" : ""} given (+{money(pay?.given_pay)})
                       </span>
                     )}
                   </dt>
-                  <dd className="shrink-0 font-semibold tabular-nums text-ink dark:text-[#e7e2d8]">{rs(gross)}</dd>
+                  <dd className="shrink-0 font-semibold tabular-nums text-ink dark:text-[#e7e2d8]">{money(gross)}</dd>
                 </div>
                 {advCut > 0 && (
                   <div className="flex items-baseline justify-between gap-4 border-b border-line px-4 py-2.5 dark:border-white/[0.06] sm:px-5">
                     <dt className="text-muted dark:text-[#a89f93]">
                       {carried > 0 ? "Advance cut from this month" : "Advances already taken"}
                     </dt>
-                    <dd className="shrink-0 font-semibold tabular-nums text-amber-700">− {rs(advCut)}</dd>
+                    <dd className="shrink-0 font-semibold tabular-nums text-amber-700">− {money(advCut)}</dd>
                   </div>
                 )}
                 <div className="flex items-baseline justify-between gap-4 bg-panel px-4 py-3 dark:bg-white/[0.04] sm:px-5">
                   <dt className="font-bold text-ink dark:text-[#f4f1ea]">Net payable</dt>
                   <dd className="shrink-0 text-[16px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">
-                    {rs(pay?.payable ?? 0)}
+                    {money(pay?.payable ?? 0)}
                   </dd>
                 </div>
                 {carried > 0 && (
@@ -401,7 +430,7 @@ export default function MyPortal() {
                       Advance carried forward to {nextMonth}
                       <span className="mt-0.5 block text-[11.5px] text-hint dark:text-[#8a8175]">not cut this month — it comes off {nextMonth}&rsquo;s pay</span>
                     </dt>
-                    <dd className="shrink-0 font-semibold tabular-nums text-amber-700">{rs(carried)}</dd>
+                    <dd className="shrink-0 font-semibold tabular-nums text-amber-700">{money(carried)}</dd>
                   </div>
                 )}
               </dl>
@@ -514,19 +543,19 @@ export default function MyPortal() {
                           {a.note && !(back && a.note === "Advance returned") && <span className="ml-2 text-muted dark:text-[#a89f93]">{a.note}</span>}
                         </dt>
                         <dd className={`shrink-0 font-semibold tabular-nums ${back ? "text-emerald-700" : ""}`}>
-                          {back ? `− ${rs(-Number(a.amount))}` : rs(a.amount)}
+                          {back ? `− ${money(-Number(a.amount))}` : money(a.amount)}
                         </dd>
                       </div>
                     );
                   })}
                   <div className="flex items-baseline justify-between gap-4 bg-panel px-4 py-3 dark:bg-white/[0.04] sm:px-5">
                     <dt className="font-bold text-ink dark:text-[#f4f1ea]">Deducted this month</dt>
-                    <dd className="shrink-0 font-extrabold tabular-nums text-amber-700">− {rs(advCut)}</dd>
+                    <dd className="shrink-0 font-extrabold tabular-nums text-amber-700">− {money(advCut)}</dd>
                   </div>
                   {carried > 0 && (
                     <div className="flex items-baseline justify-between gap-4 border-t border-line px-4 py-2.5 dark:border-white/[0.06] sm:px-5">
                       <dt className="text-muted dark:text-[#a89f93]">Carried forward to {nextMonth}</dt>
-                      <dd className="shrink-0 font-semibold tabular-nums text-ink dark:text-[#e7e2d8]">{rs(carried)}</dd>
+                      <dd className="shrink-0 font-semibold tabular-nums text-ink dark:text-[#e7e2d8]">{money(carried)}</dd>
                     </div>
                   )}
                 </dl>

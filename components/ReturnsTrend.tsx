@@ -1,20 +1,25 @@
 "use client";
 
 /* ---------------------------------------------------------------------------
-   RETURNS, MONTH BY MONTH — PostEx and OwnEx (H298, 22 Oct 2026).
+   RETURNS, MONTH BY MONTH — PostEx and OwnEx (H298 / H299, 22 Oct 2026).
 
-   The owner: "a graph of the returns from PostEx and OwnEx by dates, so he can
-   compare the returns of any month with any month — are returns being managed
-   or not."
+   The owner, 22 Oct: "a graph of the returns from PostEx and OwnEx by dates,
+   so he can compare the returns of any month with any month — are returns
+   being managed or not." Then: "bar graph, bar or pie chart, not a line
+   chart, and show a clear difference between the months."
 
-   COUNTED BY THE MONTH A PARCEL WAS SENT, so a month is always compared with a
-   month on the same parcels (hub_returns_trend). The return rate is
-   returned ÷ (delivered + returned): parcels still on their way are left out of
-   it, and the current month says how many those are — its rate is not final
-   until they land. "Returned" includes parcels already on their way back.
+   BAR GRAPH, grouped by month, with one blue bar for PostEx and one green bar
+   for OwnEx. The value sits on top of its bar, so the difference between two
+   months is a single glance rather than reading a tiny chart. "Return rate"
+   and "Returns" are the two views, switched, never drawn on two scales at
+   once.
 
-   One y-axis only. Rate and count are two views of the same months, switched,
-   never drawn on two scales at once.
+   COUNTED BY THE MONTH A PARCEL WAS SENT, so a month is always compared with
+   a month on the same parcels (hub_returns_trend). The return rate is
+   returned ÷ (delivered + returned): parcels still on their way are left out
+   of it, and the current month says how many those are — its rate is not
+   final until they land. "Returned" includes parcels already on their way
+   back. The current month's bar is drawn striped, to say so.
 --------------------------------------------------------------------------- */
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -33,14 +38,13 @@ type Metric = "rate" | "count";
 
 const COURIERS: Courier[] = ["PostEx", "OwnEx"];
 /* Categorical slots, validated together (light + dark): PostEx keeps the blue
-   and OwnEx the green the rest of the Hub already uses for them. */
-const STROKE: Record<Courier, string> = {
-  PostEx: "stroke-[#2a78d6] dark:stroke-[#3987e5]",
-  OwnEx: "stroke-[#1baf7a] dark:stroke-[#199e70]",
-};
-const FILL: Record<Courier, string> = {
-  PostEx: "fill-[#2a78d6] dark:fill-[#3987e5]",
-  OwnEx: "fill-[#1baf7a] dark:fill-[#199e70]",
+   and OwnEx the green the rest of the Hub already uses for them.
+   Normal-vision and CVD separation both pass; the current-month stripe and
+   the on-top value label are the secondary cues, so identity never leans on
+   colour alone. */
+const COLOR: Record<Courier, { solid: string; dark: string }> = {
+  PostEx: { solid: "#2a78d6", dark: "#3987e5" },
+  OwnEx: { solid: "#1baf7a", dark: "#199e70" },
 };
 const DOT: Record<Courier, string> = {
   PostEx: "bg-[#2a78d6] dark:bg-[#3987e5]",
@@ -166,6 +170,11 @@ export default function ReturnsTrend() {
 }
 
 /* ------------------------------------------------------------------- chart */
+/* GROUPED BAR CHART (H299). One group per month, one bar per courier. The
+   value sits on top of each bar — the whole point of the owner's "show a
+   clear difference between the months", which a line's small up-and-down was
+   hiding. On a phone the chart scrolls sideways so bars never get thinner
+   than a thumb. */
 function Chart({ months, series, at, valueOf, metric, current, hover, setHover }: {
   months: string[]; series: Courier[];
   at: (m: string, c: "Both" | Courier) => Stat;
@@ -183,85 +192,115 @@ function Chart({ months, series, at, valueOf, metric, current, hover, setHover }
     return () => ro.disconnect();
   }, []);
 
-  const H = 230, L = 40, R = 92, T = 14, B = 28;
-  const pw = w - L - R, ph = H - T - B;
+  const H = 260, L = 44, R = 14, T = 20, B = 32;
+  const grid = series.length === 2 ? 48 : 32;        // min space per month
+  const needed = L + R + months.length * grid;
+  const chartW = Math.max(w, needed);                 // scroll sideways on narrow screens
+  const pw = chartW - L - R, ph = H - T - B;
   const vals = series.flatMap((c) => months.map((m) => valueOf(at(m, c)))).filter((v): v is number => v != null);
   const top = metric === "rate"
     ? Math.max(10, Math.ceil(Math.max(0, ...vals) / 10) * 10)
     : Math.max(10, niceCeil(Math.max(0, ...vals)));
-  const ticks = [0, top / 2, top];
-  const x = (i: number) => L + (months.length <= 1 ? pw / 2 : (i * pw) / (months.length - 1));
+  const ticks = [0, top / 4, top / 2, (top * 3) / 4, top];
+  const groupW = pw / months.length;
+  const slotW = Math.min(26, (groupW - 6) / series.length);
+  const barW = slotW - 2;                             // 2px air between bars in a group
+  const groupX = (i: number) => L + i * groupW + (groupW - slotW * series.length) / 2;
   const y = (v: number) => T + ph - (v / top) * ph;
   const fmt = (v: number) => (metric === "rate" ? `${Math.round(v)}%` : num(v));
-  /* Line-end labels, pushed apart so two lines ending close never print over
-     each other. */
-  const ends = series.map((c) => {
-    const pts = months.map((m, i) => ({ i, v: valueOf(at(m, c)) })).filter((p) => p.v != null);
-    const e = pts[pts.length - 1];
-    return e ? { c, x: x(e.i) + 9, y: y(e.v as number) + 4, text: `${c} ${fmt(e.v as number)}` } : null;
-  }).filter((e): e is { c: Courier; x: number; y: number; text: string } => !!e).sort((p, q) => p.y - q.y);
-  for (let k = 1; k < ends.length; k++) if (ends[k].y - ends[k - 1].y < 14) ends[k].y = ends[k - 1].y + 14;
-
-  function pick(clientX: number) {
-    const el = box.current;
-    if (!el || months.length === 0) return;
-    const rx = clientX - el.getBoundingClientRect().left;
-    const i = Math.round(((rx - L) / Math.max(1, pw)) * (months.length - 1));
-    setHover(Math.min(months.length - 1, Math.max(0, i)));
-  }
+  const label = (v: number) => (metric === "rate" ? `${v.toFixed(0)}%` : num(v));
 
   return (
-    <div ref={box} className="relative mt-3 select-none" style={{ height: H }}
-      onMouseMove={(e) => pick(e.clientX)} onMouseLeave={() => setHover(null)}
-      onTouchStart={(e) => pick(e.touches[0].clientX)} onTouchMove={(e) => pick(e.touches[0].clientX)}>
-      <svg width={w} height={H} role="img" aria-label={`${metric === "rate" ? "Return rate" : "Returns"} by month, ${series.join(" and ")}`}>
-        {/* recessive grid and the one axis */}
-        {ticks.map((t) => (
-          <g key={t}>
-            <line x1={L} x2={L + pw} y1={y(t)} y2={y(t)} className="stroke-black/[0.08] dark:stroke-white/10" strokeWidth={1} />
-            <text x={L - 8} y={y(t) + 4} textAnchor="end" className="fill-current text-[10.5px] text-muted dark:text-[#a89f93]">{fmt(t)}</text>
-          </g>
-        ))}
-        {months.map((m, i) => (months.length <= 8 || i % 2 === (months.length - 1) % 2) && (
-          <text key={m} x={x(i)} y={H - 8} textAnchor="middle" className="fill-current text-[10.5px] text-muted dark:text-[#a89f93]">
-            {monthName(m)}{m.endsWith("-01") || i === 0 ? ` ${m.slice(2, 4)}` : ""}
-          </text>
-        ))}
-        {hover != null && (
-          <line x1={x(hover)} x2={x(hover)} y1={T} y2={T + ph} className="stroke-black/25 dark:stroke-white/30" strokeWidth={1} />
-        )}
-        {series.map((c) => {
-          const pts = months.map((m, i) => ({ i, m, v: valueOf(at(m, c)) }));
-          const done = pts.filter((p) => p.v != null && p.m !== current);
-          const last = pts.filter((p) => p.v != null);
-          const path = (list: typeof pts) => list.map((p, k) => `${k ? "L" : "M"}${x(p.i)},${y(p.v as number)}`).join(" ");
-          const cur = pts.find((p) => p.m === current && p.v != null);
-          const prev = done[done.length - 1];
-          const end = ends.find((e) => e.c === c);
-          return (
-            <g key={c}>
-              <path d={path(done)} fill="none" className={STROKE[c]} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
-              {/* the month still settling: dashed, it is not final */}
-              {cur && prev && (
-                <path d={`M${x(prev.i)},${y(prev.v as number)} L${x(cur.i)},${y(cur.v as number)}`} fill="none"
-                  className={STROKE[c]} strokeWidth={2} strokeDasharray="4 4" strokeLinecap="round" />
-              )}
-              {last.map((p) => (
-                <circle key={p.m} cx={x(p.i)} cy={y(p.v as number)} r={hover === p.i ? 5 : 4}
-                  className={`${FILL[c]} stroke-surface dark:stroke-[#201c17]`} strokeWidth={2} />
-              ))}
-              {end && (
-                <text x={end.x} y={end.y} className="fill-current text-[11px] font-semibold text-ink dark:text-[#f4f1ea]">
-                  {end.text}
-                </text>
-              )}
+    <div className="relative mt-3 select-none">
+      {/* vertical scroll off, sideways scroll on only when the chart is wider
+          than the box — bars stay thumb-sized on a phone */}
+      <div ref={box} className="overflow-x-auto overflow-y-hidden pb-1"
+        onMouseLeave={() => setHover(null)}>
+        <svg width={chartW} height={H} role="img"
+          aria-label={`${metric === "rate" ? "Return rate" : "Returns"} by month, ${series.join(" and ")}`}>
+          <defs>
+            {/* diagonal stripe for the current month's bars (still settling) */}
+            {series.map((c) => (
+              <pattern key={c} id={`stripe-${c}`} patternUnits="userSpaceOnUse" width="6" height="6" patternTransform="rotate(45)">
+                <rect width="6" height="6" fill={COLOR[c].solid} className="dark:hidden" />
+                <rect width="6" height="6" fill={COLOR[c].dark} className="hidden dark:block" />
+                <line x1="0" y1="0" x2="0" y2="6" stroke="white" strokeOpacity="0.55" strokeWidth="2" />
+              </pattern>
+            ))}
+          </defs>
+          {/* recessive grid and the one axis */}
+          {ticks.map((t) => (
+            <g key={t}>
+              <line x1={L} x2={L + pw} y1={y(t)} y2={y(t)} className="stroke-black/[0.08] dark:stroke-white/10" strokeWidth={1} />
+              <text x={L - 8} y={y(t) + 4} textAnchor="end" className="fill-current text-[10.5px] text-muted dark:text-[#a89f93]">{fmt(t)}</text>
             </g>
-          );
-        })}
-      </svg>
+          ))}
+          {months.map((m, i) => {
+            const isCur = m === current;
+            const highlight = hover === i;
+            return (
+              <g key={m}>
+                {/* a soft band under the month on hover, so the group lifts */}
+                {highlight && (
+                  <rect x={groupX(i) - 4} y={T - 6} width={slotW * series.length + 8} height={ph + 10}
+                    rx={6} className="fill-black/[0.04] dark:fill-white/[0.05]" />
+                )}
+                {/* a vertical rule between months, like a bar graph on paper */}
+                {i > 0 && (
+                  <line x1={L + i * groupW} x2={L + i * groupW} y1={T} y2={T + ph}
+                    className="stroke-black/[0.04] dark:stroke-white/[0.06]" strokeWidth={1} />
+                )}
+                {series.map((c, k) => {
+                  const v = valueOf(at(m, c));
+                  const x0 = groupX(i) + k * slotW + 1;
+                  if (v == null) {
+                    return (
+                      <text key={c} x={x0 + barW / 2} y={T + ph - 4} textAnchor="middle"
+                        className="fill-current text-[10px] text-hint dark:text-[#8a8175]">—</text>
+                    );
+                  }
+                  const by = y(v);
+                  const h = Math.max(2, T + ph - by);
+                  const fill = isCur ? `url(#stripe-${c})` : (undefined);
+                  const colSolid = COLOR[c].solid;
+                  const colDark = COLOR[c].dark;
+                  return (
+                    <g key={c} onMouseEnter={() => setHover(i)}
+                      onClick={() => setHover(hover === i ? null : i)}>
+                      <rect x={x0} y={by} width={barW} height={h} rx={2}
+                        fill={fill ?? colSolid}
+                        className={isCur ? "" : "dark:[fill:var(--d)]"}
+                        style={isCur ? undefined : ({ "--d": colDark } as React.CSSProperties)} />
+                      {/* value label on top — this is the "clear difference" */}
+                      <text x={x0 + barW / 2} y={Math.max(by - 4, T + 10)} textAnchor="middle"
+                        className="fill-current text-[10px] font-bold tabular-nums text-ink dark:text-[#f4f1ea]">
+                        {label(v)}
+                      </text>
+                    </g>
+                  );
+                })}
+                {/* month label under the group */}
+                <text x={groupX(i) + (slotW * series.length) / 2} y={H - 14} textAnchor="middle"
+                  className={`fill-current text-[10.5px] ${isCur
+                    ? "font-bold text-ink dark:text-[#f4f1ea]" : "text-muted dark:text-[#a89f93]"}`}>
+                  {monthName(m)}
+                </text>
+                <text x={groupX(i) + (slotW * series.length) / 2} y={H - 2} textAnchor="middle"
+                  className="fill-current text-[9.5px] text-hint dark:text-[#8a8175]">
+                  {m.slice(2, 4)}
+                </text>
+                {/* a tap pad under the group, bigger than the bars themselves */}
+                <rect x={L + i * groupW} y={T} width={groupW} height={ph} fill="transparent"
+                  onClick={() => setHover(hover === i ? null : i)}
+                  onMouseEnter={() => setHover(i)} />
+              </g>
+            );
+          })}
+        </svg>
+      </div>
       {hover != null && months[hover] && (
-        <div className="pointer-events-none absolute top-1 z-10 w-[190px] rounded-xl2 border border-line bg-surface px-3 py-2 text-[12px] shadow-lg dark:border-white/10 dark:bg-[#2a251f]"
-          style={{ left: Math.min(Math.max(0, x(hover) - 95), w - 190) }}>
+        <div className="pointer-events-none absolute top-1 z-10 w-[200px] rounded-xl2 border border-line bg-surface px-3 py-2 text-[12px] shadow-lg dark:border-white/10 dark:bg-[#2a251f]"
+          style={{ left: Math.min(Math.max(0, (hover / Math.max(1, months.length - 1)) * (w - 200)), Math.max(0, w - 200)) }}>
           <div className="font-bold text-ink dark:text-[#f4f1ea]">
             {monthName(months[hover], true)}{months[hover] === current ? " · still settling" : ""}
           </div>
