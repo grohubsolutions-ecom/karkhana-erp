@@ -24,9 +24,10 @@ export default function FirstAttemptPage() {
         </Link>
         <h1 className="mt-2 text-[22px] font-extrabold tracking-tight text-ink dark:text-[#f4f1ea]">Delivery Under Review</h1>
         <p className="mt-1 max-w-[70ch] text-[13px] text-muted dark:text-[#a89f93]">
-          Yesterday&rsquo;s and today&rsquo;s failed deliveries that PostEx or OwnEx still have under review,
-          sorted by which attempt they are on, with the courier&rsquo;s own reason. Ring the customer, copy the rows
-          into the courier&rsquo;s group, ring the rider — then press Re-attempt or Return and it moves to History.
+          Exactly the parcels on PostEx&rsquo;s Delivery Under Review and OwnEx&rsquo;s Shipper Advice, read from
+          both every 10 minutes, sorted by which try they are on, with the courier&rsquo;s own reason. Ring the
+          customer, copy the rows into the courier&rsquo;s group, ring the rider — then press Re-attempt or Return.
+          Every re-attempt is counted on the parcel; Follow-up holds the ones to ring again.
         </p>
       </div>
       <FirstAttemptDesk />

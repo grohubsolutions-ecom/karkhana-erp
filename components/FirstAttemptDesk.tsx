@@ -19,9 +19,22 @@
         and will not take an empty answer. Either way the parcel moves to
         History, with who decided and when.
 
-   DAY BY DAY (H280). The attempt tabs hold only what came under review
-   YESTERDAY OR TODAY and that PostEx or OwnEx STILL shows under review.
-   Everything else is in History, one line per failed try.
+   THE COURIERS' OWN LISTS (H297, 21 Oct 2026). The attempt tabs hold exactly
+   what PostEx lists under "Delivery Under Review" and OwnEx under "Shipper
+   Advice" — both lists read every 10 minutes (courier-review-queue) — and
+   nothing else. Until H297 the desk was built from our own status column and
+   showed PostEx's "Attempted" and OwnEx's "Verifying Reason" parcels too: 26
+   on the desk against 9 on the two portals. A parcel stays while the courier
+   lists it, decided or not; a decided one says so instead of offering the
+   buttons. Everything else is in History, one line per failed try.
+
+   OUR OWN COUNT (H297). The couriers' portals forget a parcel the moment it
+   is decided. Ours does not: every day a parcel was on a list, every
+   re-attempt — decided here, pressed on the courier's portal, or the
+   courier's own — and how many times it has been sent out. FOLLOW-UP holds
+   the parcels we re-attempted that are not delivered yet; when the customer
+   says it never came, "Re-attempt again" records it (the courier's portal
+   has no button for it then). Three times out, then it comes back.
 
    THE COURIER'S OWN WORD (H281, H283). PostEx's and OwnEx's own history is
    read every 10 minutes — the reason, the real count of tries, and any Return
@@ -51,10 +64,24 @@ import { Segmented, Sheet, Detail, useIsPhone, waNumber } from "@/components/Hub
    5 Oct 2026). */
 import { tc } from "@/lib/titleCase";
 
-/* How a failed try left the desk. "desk" = it has not: it is on today's desk. */
+/* How a failed try left the desk. "desk" = it has not: it is on today's desk.
+   "again" = a "re-attempt again" recorded here (H297). */
 type LeftAs = "desk" | "reattempt" | "return" | "done" | "failed_again" | "delivered" | "returned"
-  | "out_again" | "coming_back" | "not_worked" | "moved";
+  | "out_again" | "coming_back" | "not_worked" | "moved" | "again";
 type Decision = "reattempt" | "return";
+/* Where a line comes from (H297): the couriers' lists today, a failed try in
+   History, a "re-attempt again" in History, or the Follow-up list. */
+type Src = "desk" | "hist" | "again" | "follow";
+/* One re-attempt of a parcel, in order (hub_rescue_tries). n is ours only —
+   1st, 2nd by us — and empty for the courier's own. */
+type LogEntry = {
+  n: number | null; at: string | null; how: "desk" | "portal" | "courier" | "again";
+  try: number | null; by: string | null; note: string | null; id: number | null;
+};
+type QueueDay = { day: string; courier: string; status: string | null; first: string; last: string };
+/* Why "Re-attempt again" may not be recorded (hub_rescue_again_block); null = it may. */
+type AgainBlock = "settled" | "cancelled" | "coming_back" | "undecided" | "on_list" | "third_time" | null;
+type ListInfo = { read_at: string | null; n: number; last_at: string | null; last_ok: boolean | null; error: string | null };
 
 type Row = {
   row_key: string; attempt_no: number; left_as: LeftAs;
@@ -75,19 +102,29 @@ type Row = {
   customer_name: string | null; phone: string | null; city: string | null; address: string | null;
   waiting_hours: number | null; past_refusals: number; rider_strikes: number;
   decided_at: string | null; delivery_status: string | null;
+  /* H297 — the courier's list, and our own count */
+  src?: Src;
+  in_queue?: boolean; q_status?: string | null; q_reason?: string | null; q_at?: string | null; q_read_at?: string | null;
+  queue_days?: QueueDay[];
+  tries?: number; sent_out?: number; our_reattempts?: number; again_count?: number; courier_reattempts?: number;
+  last_ours_at?: string | null; reattempt_log?: LogEntry[];
+  can_reattempt?: boolean; again_block?: AgainBlock;
+  again_id?: number | null; again_note?: string | null;
 };
 type NotSent = { tracking_id: string; order_number: string | null; decision: Decision; courier?: string | null };
 type Summary = {
   desk: number; postex: number; ownex: number; untouched: number; no_rider: number;
-  not_worked: number; done_today: number; courier_today?: number;
+  not_worked: number; done_today: number; courier_today?: number; again_today?: number; follow?: number;
   not_sent?: number; not_sent_list?: NotSent[]; saved: number; lost: number;
 };
 type Board = {
   ok: boolean; error?: string; may_work: boolean; view: "today" | "history";
   today: string; range: { from: string; to: string };
   summary: Summary; rows: Row[];
+  lists?: Partial<Record<"PostEx" | "OwnEx", ListInfo>>;
+  follow?: Row[];
 };
-type Tab = "1" | "2" | "3" | "history";
+type Tab = "1" | "2" | "3" | "follow" | "history";
 type Span = "today" | "yesterday" | "7" | "30" | "90";
 type Kind = "all" | Exclude<LeftAs, "desk">;
 
@@ -112,13 +149,21 @@ const waited = (h: number | null) => {
 const heat = (h: number | null) =>
   h == null ? "" : h >= 120 ? "text-[#b4562f] dark:text-[#e0a183]" : h >= 48 ? "text-[#8a6218] dark:text-[#e0b77c]" : "text-muted dark:text-[#a89f93]";
 
-/* The same list as hub_is_failed_attempt() in the database: the courier still
-   has the parcel on its review screen. */
-const underReview = (raw: string | null) => {
-  const s = String(raw ?? "").trim();
-  return ["ATTEMPTED", "DELIVERY UNDER REVIEW", "UNDER VERIFICATION", "VERIFYING REASON", "WAITING FOR ADVICE"].includes(s.toUpperCase())
-    || /^reason\s*[-–:]/i.test(s) || ["failed attempt", "shipper advice", "reason"].includes(s.toLowerCase());
-};
+/* ON THE COURIER'S OWN REVIEW LIST RIGHT NOW (H297) — read from PostEx's
+   "Delivery Under Review" and OwnEx's "Shipper Advice", not guessed from a
+   status word. */
+const listed = (r: Row) => !!r.in_queue;
+/* What each courier calls its list, as its own portal does. */
+const listName = (courier: string | null) =>
+  courier === "OwnEx" ? "Shipper Advice" : courier === "PostEx" ? "Delivery Under Review" : "review list";
+/* Which try it is on: the courier's count, never less than our re-attempts say. */
+const triesOf = (r: Row) => r.tries ?? r.attempts;
+/* Three times out, then it comes back (counted by the database, every time it
+   was sent out — ours and the courier's). */
+const lastTryOf = (r: Row) => !(r.can_reattempt ?? r.attempts < 3);
+/* A line the courier lists, already decided or marked done here or on its
+   portal: it is still listed, but there is nothing left to press on it. */
+const settledOnList = (r: Row) => r.status === "done" && !r.outcome;
 
 /* THE COURIER'S REASON. PostEx's is read from its history every 15 minutes;
    until the first read, say that rather than "not given". */
@@ -164,9 +209,12 @@ const COURIER_TONE: Record<string, string> = {
 /* How each line in History left the desk, in the order the chips are shown. */
 const LEFT: { key: Exclude<LeftAs, "desk">; label: string; tone: string }[] = [
   { key: "reattempt", label: "Re-attempt", tone: "bg-periwinkle-soft text-[#38507a]" },
+  { key: "again", label: "Re-attempted again", tone: "bg-periwinkle-soft text-[#38507a]" },
   { key: "return", label: "Return", tone: "bg-danger-soft text-[#8d3328]" },
   { key: "done", label: "Marked done", tone: "bg-success-soft text-[#2f7a3d]" },
-  { key: "not_worked", label: "Not worked", tone: "bg-amber-soft text-[#7a5a28]" },
+  /* H297: a failure the courier is handling itself — PostEx "Attempted", OwnEx
+     "Verifying Reason". It is on neither review list, so nothing is decided here. */
+  { key: "not_worked", label: "Not on a review list", tone: "bg-amber-soft text-[#7a5a28]" },
   { key: "out_again", label: "Sent out again", tone: "bg-periwinkle-soft text-[#38507a]" },
   { key: "failed_again", label: "Failed again", tone: "bg-danger-soft text-[#8d3328]" },
   { key: "coming_back", label: "Coming back", tone: "bg-danger-soft text-[#8d3328]" },
@@ -205,21 +253,57 @@ function leftDetail(r: Row, today: string): string {
             ? ` · ✓ done on ${cn}`
             : r.courier_advice
               ? ` · ${cn} shows ${r.courier_advice === "return" ? "a return" : "a re-attempt"}${r.courier_advice_by === "courier" ? " (its own)" : ""} instead`
-              : underReview(r.raw_status) ? ` · not yet pressed on ${cn}` : "")
+              : listed(r) ? ` · not yet pressed on ${cn}` : "")
         : "";
       return decidedBy(r) + t + why + sent;
     }
+    case "again": {
+      /* H297: ours, from our side, when the courier listed it nowhere */
+      const t = r.done_at ? ` · ${when(r.done_at, today)}` : "";
+      const note = r.again_note ? ` · “${r.again_note}”` : "";
+      return `from our side, asked of ${cn} directly · ${r.done_by_name ?? "name not recorded"}${t}${note}`;
+    }
     case "done": return `${r.done_by_name ?? "name not recorded"}${r.done_at ? ` · ${when(r.done_at, today)}` : ""}`;
-    case "failed_again": return `went out again and failed — now on its ${ordinal(r.attempts)} try`;
+    case "failed_again": return `went out again and failed — now on its ${ordinal(triesOf(r))} try`;
     case "delivered": return "delivered in the end";
     case "returned": return "came back to the warehouse";
-    case "not_worked": return `still under review at ${cn} — nobody decided it`;
+    case "not_worked": return `${cn} says “${r.raw_status ?? "—"}” — it is not on ${cn}'s ${listName(r.courier)}, so there is nothing to decide yet`;
     default: return `${cn} now says: ${r.raw_status ?? "—"}`;
   }
 }
+
+/* ON THE LIST, ALREADY SETTLED (H297). The courier still lists it — PostEx
+   can keep a parcel listed for hours after Return is pressed — so it stays on
+   the desk, saying what was done instead of offering the buttons again. */
+function listedNote(r: Row, today: string): string {
+  const cn = r.courier ?? "the courier";
+  const t = r.decided_at ? ` ${when(r.decided_at, today)}` : "";
+  const what = r.decision === "return" ? "Return" : "Re-attempt";
+  if (r.decision && r.decided_via === "courier") {
+    return r.courier_advice_by === "courier"
+      ? `${cn} ${r.decision === "return" ? "started the return" : "sent it out again"} itself${t} — ${cn} still lists it`
+      : `${what} pressed on ${cn}'s portal${t} — ${cn} still lists it`;
+  }
+  if (r.decision) {
+    return r.courier_advice === r.decision
+      ? `${what} recorded here${t}, and pressed on ${cn}'s portal — ${cn} still lists it`
+      : `${what} recorded here${t} — now press it on ${cn}'s portal`;
+  }
+  return `Marked done here — ${cn} still lists it`;
+}
+
+/* One re-attempt in the log, in words. */
+function logLine(e: LogEntry, cn: string, today: string): { who: string; how: string; when: string } {
+  const who = e.n != null ? `${ordinal(e.n)} by us` : `${cn} itself`;
+  const how = e.how === "desk" ? `decided on this desk${e.by ? ` by ${e.by}` : ""}`
+    : e.how === "portal" ? `pressed on ${cn}'s portal`
+    : e.how === "again" ? `re-attempted again from our side${e.by ? ` by ${e.by}` : ""}`
+    : `${cn} sent it out again on its own`;
+  return { who, how, when: e.at ? when(e.at, today) : "time not recorded" };
+}
 /* A parcel decided or marked done can still end either way; say so. */
 const afterDone = (r: Row) =>
-  !["done", "reattempt", "return"].includes(r.left_as) ? null
+  !["done", "reattempt", "return", "again"].includes(r.left_as) ? null
     : r.attempt_no < r.attempts ? "then failed again"
     : r.outcome === "delivered" ? "then delivered"
     : r.outcome === "returned" ? "then came back" : null;
@@ -228,6 +312,14 @@ const VERDICTS: { key: "customer" | "rider" | "address"; label: string; Icon: ty
   { key: "customer", label: "The customer", Icon: UserRound },
   { key: "rider", label: "The rider", Icon: Bike },
   { key: "address", label: "The address", Icon: PackageX },
+];
+
+/* "Re-attempt again" — what the customer said when rung back (H297). */
+const AGAIN_REASONS = [
+  "Customer says not received yet",
+  "Customer asked to send it again",
+  "Rider did not call the customer",
+  "Customer was not home — wants it again",
 ];
 
 /* Why it should come back. A button for the usual ones; the box for anything
@@ -297,8 +389,9 @@ export default function FirstAttemptDesk({ compact = false, onCount }: {
   const [riderDraft, setRiderDraft] = useState<Record<string, string>>({});
   const [savingRider, setSavingRider] = useState("");
   const [riderErr, setRiderErr] = useState<Record<string, string>>({});
-  /* What was just moved to History, so one tap can put it back. */
-  const [undo, setUndo] = useState<{ ids: string[]; text: string; kind: "done" | "decide" } | null>(null);
+  /* What was just moved to History (or a "re-attempt again" just recorded),
+     so one tap can put it back. */
+  const [undo, setUndo] = useState<{ ids: string[]; text: string; kind: "done" | "decide" | "again"; againId?: number } | null>(null);
   const [marking, setMarking] = useState("");
   /* The parcels a Return is being asked for; the dialog is open while set. */
   const [returning, setReturning] = useState<Row[] | null>(null);
@@ -373,8 +466,9 @@ export default function FirstAttemptDesk({ compact = false, onCount }: {
     () => (desk?.rows ?? []).filter((r) => courier === "All" || r.courier === courier),
     [desk, courier]
   );
-  /* A fourth try belongs with the third, not nowhere. */
-  const tabOf = (r: Row): Tab => (r.attempts >= 3 ? "3" : r.attempts === 2 ? "2" : "1");
+  /* A fourth try belongs with the third, not nowhere. The try is ours as well
+     as the courier's count (H297): re-attempted twice means a third try. */
+  const tabOf = (r: Row): Tab => (triesOf(r) >= 3 ? "3" : triesOf(r) === 2 ? "2" : "1");
   const counts = useMemo(() => {
     const c = { "1": 0, "2": 0, "3": 0 };
     for (const r of byCourier) c[tabOf(r) as "1" | "2" | "3"]++;
@@ -383,6 +477,15 @@ export default function FirstAttemptDesk({ compact = false, onCount }: {
   const rows = useMemo(() => (view === "today" ? byCourier.filter((r) => tabOf(r) === tab) : []), [byCourier, tab, view]);
   const pickedRows = rows.filter((r) => picked.has(r.tracking_id));
   const allPicked = rows.length > 0 && pickedRows.length === rows.length;
+  /* Only lines still waiting for a decision can be decided in bulk. */
+  const pickedOpen = pickedRows.filter((r) => r.status === "open");
+  const deskTab = tab === "1" || tab === "2" || tab === "3";
+
+  /* ------------------------------------------------------------ Follow-up */
+  const followShown = useMemo(
+    () => (desk?.follow ?? []).filter((r) => courier === "All" || r.courier === courier),
+    [desk, courier]
+  );
 
   /* --------------------------------------------------------------- History */
   const histBase = useMemo(() => {
@@ -412,8 +515,9 @@ export default function FirstAttemptDesk({ compact = false, onCount }: {
   }, [histShown]);
 
   const open = useMemo(
-    () => (board?.rows ?? []).find((r) => r.row_key === openKey) ?? null,
-    [board, openKey]
+    () => [...(board?.rows ?? []), ...(view === "today" ? desk?.follow ?? [] : [])]
+      .find((r) => r.row_key === openKey) ?? null,
+    [board, desk, view, openKey]
   );
 
   async function save(tracking: string, patch: Record<string, unknown>) {
@@ -482,14 +586,49 @@ export default function FirstAttemptDesk({ compact = false, onCount }: {
   async function undoLast() {
     if (!supabase || !undo || marking) return;
     setMarking("__undo");
-    const res = undo.kind === "decide"
-      ? await supabase.rpc("hub_rescue_decide", { p_trackings: undo.ids, p_decision: "undo" })
-      : await supabase.rpc("hub_rescue_mark_done", { p_trackings: undo.ids, p_done: false });
+    const res = undo.kind === "again"
+      ? await supabase.rpc("hub_rescue_reattempt_undo", { p_id: undo.againId })
+      : undo.kind === "decide"
+        ? await supabase.rpc("hub_rescue_decide", { p_trackings: undo.ids, p_decision: "undo" })
+        : await supabase.rpc("hub_rescue_mark_done", { p_trackings: undo.ids, p_done: false });
     setMarking("");
     const r = (res.data ?? {}) as { ok?: boolean; error?: string };
     if (res.error || !r.ok) { setErr(res.error?.message ?? r.error ?? "Could not undo that."); return; }
     setUndo(null);
     await loadRef.current();
+  }
+
+  /* RE-ATTEMPT AGAIN (H297). The parcel is on no list, so the courier's portal
+     has no button for it: the agent asks the courier directly, and this keeps
+     the record — numbered, with who and why. */
+  async function again(r: Row, note: string) {
+    if (!supabase || marking) return false;
+    setMarking("__again");
+    const { data, error } = await supabase.rpc("hub_rescue_reattempt_again", { p_tracking: r.tracking_id, p_note: note || null });
+    setMarking("");
+    const res = (data ?? {}) as { ok?: boolean; error?: string; report?: string; id?: number };
+    if (error || !res.ok) { setErr(error?.message ?? res.error ?? "Could not record that."); return false; }
+    setErr("");
+    setOpenKey(null);
+    setUndo({ ids: [r.tracking_id], text: res.report ?? "Re-attempt recorded.", kind: "again", againId: res.id });
+    await loadRef.current();
+    return true;
+  }
+  /* A note written wrong is corrected; a re-attempt recorded by mistake is
+     taken back (the latest one only, so the count has no hole in it). */
+  async function againFix(id: number, note: string | null, takeBack: boolean) {
+    if (!supabase || marking) return false;
+    setMarking("__againfix");
+    const { data, error } = takeBack
+      ? await supabase.rpc("hub_rescue_reattempt_undo", { p_id: id })
+      : await supabase.rpc("hub_rescue_reattempt_note", { p_id: id, p_note: note });
+    setMarking("");
+    const res = (data ?? {}) as { ok?: boolean; error?: string };
+    if (error || !res.ok) { setErr(error?.message ?? res.error ?? "Could not change that."); return false; }
+    setErr("");
+    if (takeBack) setOpenKey(null);
+    await loadRef.current();
+    return true;
   }
 
   async function saveRider(r: Row) {
@@ -509,12 +648,16 @@ export default function FirstAttemptDesk({ compact = false, onCount }: {
     setTimeout(() => setCopied((c) => (c === key ? "" : c)), 2200);
   }
 
-  /* Refresh also asks PostEx and OwnEx again straight away (at most every two
-     minutes each), and looks once more when their answers have had time to land. */
+  /* Refresh also reads PostEx's and OwnEx's lists and histories again straight
+     away (at most every two minutes each), and looks once more when their
+     answers have had time to land — OwnEx's list takes about half a minute. */
   async function refresh() {
     if (supabase) {
       const { data } = await supabase.rpc("hub_rescue_refresh_courier");
-      if ((data as { queued?: boolean } | null)?.queued) setTimeout(() => { loadRef.current(); }, 10000);
+      if ((data as { queued?: boolean } | null)?.queued) {
+        setTimeout(() => { loadRef.current(); }, 12000);
+        setTimeout(() => { loadRef.current(); }, 35000);
+      }
     }
     await load();
   }
@@ -537,43 +680,50 @@ export default function FirstAttemptDesk({ compact = false, onCount }: {
 
   function openReturn(list: Row[]) { setErr(""); setReturning(list); }
 
-  function seeNotWorked() {
-    setTab("history"); setKind("not_worked"); setSpan("90"); setQ(""); setCourier("All");
-  }
-
   return (
     <div className="mt-1">
       {/* ------------------------------------------------------- the numbers */}
       {s && view === "today" && (
         <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
-          <Stat label="On the desk" value={String(s.desk)} sub={`${s.postex} PostEx · ${s.ownex} OwnEx`} tone="#E5786B" />
+          <Stat label="On the desk" value={String(s.desk)} sub={`${s.postex} PostEx · ${s.ownex} OwnEx — as on their portals`} tone="#E5786B" />
           <Stat label="Not yet called" value={String(s.untouched)} sub="nobody has rung the customer" tone="#E4B47E" />
           <Stat label="No rider number" value={String(s.no_rider)} sub="still to ask the group" tone="#A6C0E6" />
           <Stat label="Done today" value={String(s.done_today)}
-            sub={s.courier_today ? `+ ${s.courier_today} settled on the couriers' own portals` : "decided or marked done here"} tone="#7FC489" />
+            sub={[s.courier_today ? `+ ${s.courier_today} settled on the couriers' own portals` : "",
+                  s.again_today ? `+ ${s.again_today} re-attempted again` : ""].filter(Boolean).join(" · ")
+                 || "decided or marked done here"} tone="#7FC489" />
         </div>
       )}
 
-      {/* ------------------------------------------- attempt tabs + History */}
+      {/* ------------------------------------ attempt tabs + Follow-up + History */}
       <Segmented className="mt-3 w-full md:w-max" value={tab} onChange={(v) => { setTab(v); setOpenKey(null); }}
-        options={([["1", "1st attempt", "1st"], ["2", "2nd attempt", "2nd"], ["3", "3rd attempt", "3rd"], ["history", "History", "History"]] as const).map(([key, label, short]) => ({
+        /* "Ring" on a phone: five tabs share 358px, and "Follow" with its count
+           would not fit — the tab is the list of customers to ring again. */
+        options={([["1", "1st attempt", "1st"], ["2", "2nd attempt", "2nd"], ["3", "3rd attempt", "3rd"],
+                   ["follow", "Follow-up", "Ring"], ["history", "History", "History"]] as const).map(([key, label, short]) => ({
           key, label, short,
           badge: key === "history" ? undefined : (
             <span className={`ml-1 rounded-full px-1.5 text-[11px] font-bold tabular-nums ${tab === key
-              ? "bg-white/20 dark:bg-black/10" : "bg-black/[0.06] dark:bg-white/10"}`}>{desk ? counts[key] : "·"}</span>
+              ? "bg-white/20 dark:bg-black/10" : "bg-black/[0.06] dark:bg-white/10"}`}>
+              {!desk ? "·" : key === "follow" ? (desk.follow?.length ?? 0) : counts[key]}
+            </span>
           ),
         }))} />
 
-      {view === "today" && desk && (
+      {/* EXACTLY THE COURIERS' LISTS (H297) — and when each was last read. */}
+      {deskTab && desk && <ListsLine lists={desk.lists} today={today} />}
+      {tab === "follow" && desk && (
         <p className="mt-2 px-1 text-[12px] leading-snug text-muted dark:text-[#a89f93]">
-          Came under review <b className="font-semibold text-ink dark:text-[#f4f1ea]">yesterday or today</b>
-          {" "}({dateOf(shiftDay(today, -1))} – {dateOf(today)}) and still waiting for a decision at the courier.
+          Parcels <b className="font-semibold text-ink dark:text-[#f4f1ea]">we re-attempted</b> — on this desk or on the
+          courier&rsquo;s portal — that are on no review list now, not delivered and not on their way back. Ring the
+          customer: if it has not reached him, open it and press <b className="font-semibold text-ink dark:text-[#f4f1ea]">Re-attempt again</b>.
+          Newest first.
         </p>
       )}
       {/* DECIDED HERE, NOT YET PRESSED AT THE COURIER. The desk records; the
           courier only acts when the button is pressed on its portal. One line
           per courier, because each portal is pressed separately (H283). */}
-      {view === "today" && (["PostEx", "OwnEx"] as const).map((cname) => {
+      {deskTab && (["PostEx", "OwnEx"] as const).map((cname) => {
         const list = notSent.filter((x) => (x.courier ?? "PostEx") === cname);
         if (!list.length) return null;
         const key = `__notsent_${cname}`;
@@ -591,16 +741,6 @@ export default function FirstAttemptDesk({ compact = false, onCount }: {
           </div>
         );
       })}
-      {view === "today" && s && s.not_worked > 0 && (
-        <button onClick={seeNotWorked}
-          className="mt-2 flex min-h-[40px] w-full items-center justify-between gap-3 rounded-card border border-dashed border-line px-3 py-1.5 text-left text-[12.5px] text-muted transition hover:bg-panel md:w-auto dark:border-white/15 dark:text-[#a89f93] dark:hover:bg-white/[0.05]">
-          <span>
-            <b className="text-ink dark:text-[#f4f1ea]">{s.not_worked} older</b>{" "}
-            {s.not_worked === 1 ? "parcel is" : "parcels are"} still under review at the couriers
-          </span>
-          <span className="shrink-0 font-semibold text-ink dark:text-white">See in History →</span>
-        </button>
-      )}
 
       {/* ------------------------------------------------ narrow it down */}
       <div className={`mt-2 grid gap-2 md:flex md:flex-wrap md:items-center ${view === "history" ? "grid-cols-2" : "grid-cols-[minmax(0,1fr)_auto]"}`}>
@@ -683,16 +823,16 @@ export default function FirstAttemptDesk({ compact = false, onCount }: {
               );
             })}
             {/* Only picked rows: a whole tab decided by accident is too easy. */}
-            {mayWork && pickedRows.length > 0 && (
+            {mayWork && pickedOpen.length > 0 && (
               <>
-                {pickedRows.some((r) => r.attempts < 3) && <button onMouseDown={keepFocus} disabled={!!marking}
-                  onClick={() => decide(pickedRows.map((r) => r.tracking_id), "reattempt", "__bulk_re")}
+                {pickedOpen.some((r) => !lastTryOf(r)) && <button onMouseDown={keepFocus} disabled={!!marking}
+                  onClick={() => decide(pickedOpen.filter((r) => !lastTryOf(r)).map((r) => r.tracking_id), "reattempt", "__bulk_re")}
                   className="flex h-10 items-center gap-2 rounded-full border border-[#38507a]/30 bg-periwinkle-soft px-4 text-[13px] font-semibold text-[#38507a] disabled:opacity-50">
-                  {marking === "__bulk_re" ? <Loader2 size={15} className="animate-spin" /> : <RotateCw size={15} />} Re-attempt {pickedRows.filter((r) => r.attempts < 3).length}
+                  {marking === "__bulk_re" ? <Loader2 size={15} className="animate-spin" /> : <RotateCw size={15} />} Re-attempt {pickedOpen.filter((r) => !lastTryOf(r)).length}
                 </button>}
-                <button onMouseDown={keepFocus} disabled={!!marking} onClick={() => openReturn(pickedRows)}
+                <button onMouseDown={keepFocus} disabled={!!marking} onClick={() => openReturn(pickedOpen)}
                   className="flex h-10 items-center gap-2 rounded-full border border-[#8d3328]/30 bg-danger-soft px-4 text-[13px] font-semibold text-[#8d3328] disabled:opacity-50">
-                  <Undo2 size={15} /> Return {pickedRows.length}
+                  <Undo2 size={15} /> Return {pickedOpen.length}
                 </button>
               </>
             )}
@@ -714,10 +854,75 @@ export default function FirstAttemptDesk({ compact = false, onCount }: {
         </p>
       )}
 
-      {view === "today" && desk && rows.length === 0 && !loading && (
+      {deskTab && desk && rows.length === 0 && !loading && (
         <p className="px-4 py-14 text-center text-[13px] text-muted dark:text-[#a89f93]">
-          Nothing on its {ordinal(Number(tab))} attempt from yesterday or today{courier === "All" ? "" : ` with ${courier}`}.
+          Nothing on its {ordinal(Number(tab))} try on {courier === "All"
+            ? "PostEx's Delivery Under Review or OwnEx's Shipper Advice"
+            : `${courier}'s ${listName(courier)}`} right now.
         </p>
+      )}
+
+      {/* ---------------------------------------------------------- Follow-up */}
+      {tab === "follow" && desk && followShown.length === 0 && !loading && (
+        <p className="px-4 py-14 text-center text-[13px] text-muted dark:text-[#a89f93]">
+          Nothing to follow up{courier === "All" ? "" : ` with ${courier}`} — every parcel we re-attempted has been
+          delivered, is on its way back, or is on a review list again.
+        </p>
+      )}
+      {tab === "follow" && followShown.length > 0 && (
+        <div className="mt-3 space-y-2 md:grid md:grid-cols-2 md:gap-3 md:space-y-0 xl:grid-cols-3">
+          {followShown.map((r) => {
+            const label = r.order_number ?? r.tracking_id;
+            const lastLog = [...(r.reattempt_log ?? [])].reverse().find((e) => e.n != null);
+            const cn = r.courier ?? "the courier";
+            return (
+              <div key={r.row_key} className="rounded-xl2 border border-line bg-surface dark:border-white/[0.06] dark:bg-[#201c17]">
+                <button type="button" onClick={() => setOpenKey(r.row_key)} className="block w-full px-3 pt-3 text-left">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <span className={`rounded-full px-1.5 py-0.5 text-[10.5px] font-bold ${COURIER_TONE[r.courier ?? ""] ?? "bg-panel text-muted"}`}>{r.courier ?? "—"}</span>
+                        <span className="truncate text-[14px] font-bold text-ink dark:text-[#f4f1ea]">{label}</span>
+                        <Tag n={triesOf(r)} />
+                      </div>
+                      <div className="mt-0.5 truncate text-[12px] text-muted dark:text-[#a89f93]">
+                        {r.customer_name ?? "—"}{r.city ? ` · ${r.city}` : ""}
+                      </div>
+                    </div>
+                    <div className="shrink-0 text-right text-[14px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">{rs(r.cod_amount)}</div>
+                  </div>
+                  <div className="mt-1.5 text-[12px] font-semibold leading-snug text-[#38507a] dark:text-[#a9bde6]">
+                    Re-attempted {r.our_reattempts ?? 1}× by us
+                    {lastLog ? ` · last ${logLine(lastLog, cn, today).when} — ${logLine(lastLog, cn, today).how}` : ""}
+                  </div>
+                  <div className="mt-0.5 truncate text-[12px] text-muted dark:text-[#a89f93]">
+                    {cn} says now: {r.raw_status ?? "—"} · sent out {r.sent_out ?? triesOf(r)} {(r.sent_out ?? triesOf(r)) === 1 ? "time" : "times"}
+                  </div>
+                </button>
+                <div className="flex gap-2 px-3 pb-3 pt-2">
+                  {r.phone ? (
+                    <a href={`tel:${dial(r.phone)}`}
+                      className="flex h-10 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-full bg-panel px-2 text-[12.5px] font-semibold tabular-nums text-ink dark:bg-white/[0.07] dark:text-white">
+                      <Phone size={13} className="shrink-0" /><span className="truncate">{r.phone}</span>
+                    </a>
+                  ) : <span className="flex h-10 min-w-0 flex-1 items-center justify-center truncate rounded-full bg-panel px-2 text-[12px] text-hint dark:bg-white/[0.05]">no number</span>}
+                  {mayWork && r.again_block == null && (
+                    <button type="button" onClick={() => setOpenKey(r.row_key)}
+                      className="flex h-10 shrink-0 items-center justify-center gap-1.5 rounded-full border border-[#38507a]/30 bg-periwinkle-soft px-3 text-[12.5px] font-semibold text-[#38507a]">
+                      <RotateCw size={13} /> Re-attempt again
+                    </button>
+                  )}
+                  {/* Three times out already: no "again" — it comes back. */}
+                  {r.again_block === "third_time" && (
+                    <span className="flex h-10 shrink-0 items-center justify-center rounded-full bg-danger-soft px-3 text-[12px] font-semibold text-[#8d3328]">
+                      Out {r.sent_out ?? 3}× — return only
+                    </span>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
       )}
 
       {/* ----------------------------------------------- cards (below 1280px) */}
@@ -728,7 +933,7 @@ export default function FirstAttemptDesk({ compact = false, onCount }: {
             const riderVal = draft ?? r.rider_phone ?? "";
             const dirty = draft !== undefined && draft !== (r.rider_phone ?? "");
             const on = picked.has(r.tracking_id);
-            const lastTry = r.attempts >= 3;
+            const lastTry = lastTryOf(r);
             const label = r.order_number ?? r.tracking_id;
             return (
               <div key={r.row_key} className={`rounded-xl2 border bg-surface dark:bg-[#201c17] ${on
@@ -744,6 +949,7 @@ export default function FirstAttemptDesk({ compact = false, onCount }: {
                         <div className="flex items-center gap-1.5">
                           <span className={`rounded-full px-1.5 py-0.5 text-[10.5px] font-bold ${COURIER_TONE[r.courier ?? ""] ?? "bg-panel text-muted"}`}>{r.courier ?? "—"}</span>
                           <span className="truncate text-[14px] font-bold text-ink dark:text-[#f4f1ea]">{label}</span>
+                          <OursChip r={r} />
                         </div>
                         <div className="mt-0.5 truncate text-[12px] text-muted dark:text-[#a89f93]">
                           {r.customer_name ?? "—"}{r.city ? ` · ${r.city}` : ""}
@@ -769,8 +975,13 @@ export default function FirstAttemptDesk({ compact = false, onCount }: {
                   ) : <span className="flex h-10 min-w-0 items-center justify-center truncate rounded-full bg-panel px-2 text-[12px] text-hint dark:bg-white/[0.05]">no number</span>}
                 </div>
 
-                {/* THE TWO BUTTONS THE OWNER ASKED FOR. A third try can only come back. */}
-                {mayWork && (
+                {/* THE TWO BUTTONS THE OWNER ASKED FOR. A third try can only come back.
+                    Already settled but still listed (H297): say so instead. */}
+                {settledOnList(r) ? (
+                  <p className={`mx-3 mt-2 rounded-xl2 px-3 py-2 text-[12px] font-semibold leading-snug ${listedTone(r)}`}>
+                    {listedNote(r, today)}
+                  </p>
+                ) : mayWork && (
                   <div className={`mt-2 grid gap-2 px-3 ${lastTry ? "grid-cols-1" : "grid-cols-2"}`}>
                     {!lastTry && (
                       <button onMouseDown={keepFocus} disabled={!!marking}
@@ -841,7 +1052,7 @@ export default function FirstAttemptDesk({ compact = false, onCount }: {
                   const riderVal = draft ?? r.rider_phone ?? "";
                   const dirty = draft !== undefined && draft !== (r.rider_phone ?? "");
                   const on = picked.has(r.tracking_id);
-                  const lastTry = r.attempts >= 3;
+                  const lastTry = lastTryOf(r);
                   const label = r.order_number ?? r.tracking_id;
                   return (
                     <tr key={r.row_key} className={`border-t border-line align-top transition dark:border-white/[0.06] ${on ? "bg-panel dark:bg-white/[0.05]" : "hover:bg-panel/60 dark:hover:bg-white/[0.03]"}`}>
@@ -854,6 +1065,7 @@ export default function FirstAttemptDesk({ compact = false, onCount }: {
                           <span className="flex items-center gap-1.5">
                             <span className={`rounded-full px-1.5 py-0.5 text-[10.5px] font-bold ${COURIER_TONE[r.courier ?? ""] ?? "bg-panel text-muted"}`}>{r.courier ?? "—"}</span>
                             <span className="font-semibold text-ink underline-offset-2 group-hover:underline dark:text-[#f4f1ea]">{r.order_number ?? "—"}</span>
+                            <OursChip r={r} />
                           </span>
                           <span className="mt-0.5 block text-[11.5px] tabular-nums text-muted dark:text-[#a89f93]">{r.tracking_id}</span>
                         </button>
@@ -893,7 +1105,11 @@ export default function FirstAttemptDesk({ compact = false, onCount }: {
                         )}
                       </td>
                       <td className="px-2 py-1.5 pr-3">
-                        {mayWork ? (
+                        {settledOnList(r) ? (
+                          <p className={`w-[150px] rounded-lg px-2 py-1.5 text-[11.5px] font-semibold leading-snug ${listedTone(r)}`}>
+                            {listedNote(r, today)}
+                          </p>
+                        ) : mayWork ? (
                           <div className="flex w-[96px] flex-col gap-1">
                             <button onClick={() => decide([r.tracking_id], "reattempt", r.tracking_id + ":re", label)}
                               disabled={!!marking || lastTry} aria-label={`Re-attempt ${label}`}
@@ -977,13 +1193,15 @@ export default function FirstAttemptDesk({ compact = false, onCount }: {
 
       {!compact && board && (
         <p className="mt-4 px-1 text-[11.5px] leading-relaxed text-hint dark:text-[#8a8175]">
-          The desk holds parcels that came under review yesterday or today and that PostEx or OwnEx still show
-          under review. PostEx&rsquo;s and OwnEx&rsquo;s own history is read every 10 minutes (and when you press
-          Refresh), and this screen looks again every 2 minutes. Re-attempt or Return moves a parcel to History for
-          good; it only comes back if the courier reports a new failed try. A parcel settled on PostEx&rsquo;s or
-          OwnEx&rsquo;s portal — by your agent, or by the courier itself — leaves by itself, marked who did it.
-          The re-attempt or the return is still pressed in the courier&rsquo;s own portal — this desk decides and
-          records, it does not send anything to them.
+          The desk is exactly what PostEx lists under Delivery Under Review and OwnEx under Shipper Advice — both
+          lists, and both couriers&rsquo; own histories, are read every 10 minutes (and when you press Refresh), and
+          this screen looks again every 2 minutes. A parcel stays here as long as the courier lists it; when it
+          leaves the list its line stays in History — who decided what, and when — and every re-attempt, ours or
+          the courier&rsquo;s, is counted on the parcel. Follow-up holds the parcels we re-attempted that are not
+          delivered yet: if the customer says it never came, Re-attempt again records it, because the
+          courier&rsquo;s portal has no button for it by then. Three times out, then it comes back. The re-attempt
+          or the return is still pressed in the courier&rsquo;s own portal — this desk decides and records, it does
+          not send anything to them.
         </p>
       )}
 
@@ -996,6 +1214,9 @@ export default function FirstAttemptDesk({ compact = false, onCount }: {
           onDone={(done) => markDone([open.tracking_id], done, "__sheet", open.order_number ?? open.tracking_id)}
           onReattempt={() => decide([open.tracking_id], "reattempt", "__sheet", open.order_number ?? open.tracking_id)}
           onReturn={() => openReturn([open])}
+          onAgain={(note) => again(open, note)}
+          onAgainFix={againFix}
+          againBusy={marking === "__again" || marking === "__againfix"}
           onUndoDecision={async () => {
             if (!supabase) return;
             setMarking("__sheet");
@@ -1026,6 +1247,65 @@ export default function FirstAttemptDesk({ compact = false, onCount }: {
 }
 
 /* ------------------------------------------------------------------ pieces */
+
+/* A time on today's list reads as a clock; an older one says its day. */
+const readAt = (iso: string, today: string) => (ymdPK(new Date(iso)) === today ? clock(iso) : when(iso, today));
+
+/* EXACTLY WHAT THE COURIERS LIST (H297), and how fresh each list is. A list
+   that could not be read says so; the desk keeps the last good one. */
+function ListsLine({ lists, today }: { lists?: Board["lists"]; today: string }) {
+  const now = Date.now();
+  const parts = (["PostEx", "OwnEx"] as const).map((c) => {
+    const l = lists?.[c];
+    return { c, l, stale: !l?.read_at || now - new Date(l.read_at).getTime() > 35 * 60000 };
+  });
+  const px = parts[0].l, ox = parts[1].l;
+  return (
+    <div className="mt-2 space-y-1 px-1 text-[12px] leading-snug text-muted dark:text-[#a89f93]">
+      <p>
+        Exactly what <b className="font-semibold text-ink dark:text-[#f4f1ea]">PostEx</b> lists under Delivery Under Review
+        {px?.read_at ? ` (${px.n}, read ${readAt(px.read_at, today)})` : ""} and{" "}
+        <b className="font-semibold text-ink dark:text-[#f4f1ea]">OwnEx</b> under Shipper Advice
+        {ox?.read_at ? ` (${ox.n}, read ${readAt(ox.read_at, today)})` : ""} — both read every 10 minutes. Nothing else
+        is on the desk.
+      </p>
+      {parts.map(({ c, l, stale }) => {
+        const warn = "flex items-start gap-1.5 font-semibold text-[#8a6218] dark:text-[#e0b77c]";
+        if (!l?.read_at) {
+          return <p key={c} className={warn}><AlertTriangle size={13} className="mt-0.5 shrink-0" />{c}&rsquo;s list has not been read yet — press Refresh.</p>;
+        }
+        if (l.last_ok === false && l.last_at) {
+          return (
+            <p key={c} className={warn} title={l.error ?? ""}>
+              <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+              {c}&rsquo;s list could not be read at {readAt(l.last_at, today)}{l.error ? ` (${l.error.slice(0, 90)})` : ""} —
+              this is the list as read at {readAt(l.read_at, today)}.
+            </p>
+          );
+        }
+        if (stale) {
+          return <p key={c} className={warn}><AlertTriangle size={13} className="mt-0.5 shrink-0" />{c}&rsquo;s list was last read {when(l.read_at, today)} — press Refresh.</p>;
+        }
+        return null;
+      })}
+    </div>
+  );
+}
+
+/* Re-attempted by us before, on any try (H297). */
+const OursChip = ({ r }: { r: Row }) => ((r.our_reattempts ?? 0) > 0 ? (
+  <span title="Re-attempts by us: decided here, pressed on the courier's portal, or re-attempted again from our side"
+    className="shrink-0 rounded-full bg-periwinkle-soft px-1.5 py-0.5 text-[10.5px] font-bold text-[#38507a]">
+    {r.our_reattempts}× by us
+  </span>
+) : null);
+
+/* Settled but still listed: green when nothing is left to do, amber when it
+   was decided here and still has to be pressed on the courier's portal. */
+const listedTone = (r: Row) =>
+  r.decision && r.decided_via === "desk" && r.courier_advice !== r.decision
+    ? "bg-amber-soft text-[#7a5a28]"
+    : "bg-success-soft text-[#2f7a3d]";
 
 function Stat({ label, value, sub, tone }: { label: string; value: string; sub: string; tone: string }) {
   return (
@@ -1127,7 +1407,7 @@ function ReturnDialog({ rows, err, busy, onClose, onConfirm }: {
 
 /* The whole job for one parcel, in the order it is done. */
 function CaseSheet({ r, mayWork, phone, err, today, onClose, onDismissErr, onCopy, copied, onSave, onDone,
-  onReattempt, onReturn, onUndoDecision, busy }: {
+  onReattempt, onReturn, onUndoDecision, busy, onAgain, onAgainFix, againBusy }: {
   r: Row; mayWork: boolean; phone: boolean; err: string; today: string;
   onClose: () => void; onDismissErr: () => void;
   onCopy: () => void; copied: boolean;
@@ -1135,22 +1415,46 @@ function CaseSheet({ r, mayWork, phone, err, today, onClose, onDismissErr, onCop
   onDone: (done: boolean) => void;
   onReattempt: () => void; onReturn: () => void; onUndoDecision: () => void;
   busy: boolean;
+  onAgain: (note: string) => Promise<boolean>;
+  onAgainFix: (id: number, note: string | null, takeBack: boolean) => Promise<boolean>;
+  againBusy: boolean;
 }) {
   const cn = r.courier ?? "the courier";
   const [rider, setRider] = useState(r.rider_phone ?? "");
   const [cust, setCust] = useState(r.customer_said ?? "");
   const [ridr, setRidr] = useState(r.rider_said ?? "");
   const [saving, setSaving] = useState("");
+  /* "Re-attempt again": what the customer said, and a note being corrected. */
+  const [againPick, setAgainPick] = useState("");
+  const [againMore, setAgainMore] = useState("");
+  const [fixing, setFixing] = useState<{ id: number; note: string } | null>(null);
   /* ONLY on a different line (a parcel, or another try of it). Depending on
      the three values as well meant that saving one of them re-ran this and
      overwrote the other two with the stale server copy. */
   useEffect(() => {
     setRider(r.rider_phone ?? ""); setCust(r.customer_said ?? ""); setRidr(r.rider_said ?? "");
+    setAgainPick(""); setAgainMore(""); setFixing(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [r.row_key]);
 
   const wa = waNumber(r.phone);
-  const lastTry = r.attempts >= 3;
+  const lastTry = lastTryOf(r);
+  const log = r.reattempt_log ?? [];
+  /* the newest "again" still on record — the only one that can be taken back */
+  const latestAgainId = [...log].reverse().find((e) => e.how === "again" && e.id != null)?.id ?? null;
+  const days = r.queue_days ?? [];
+  const sentOut = r.sent_out ?? triesOf(r);
+  const againNote = [againPick, againMore.trim()].filter(Boolean).join(" — ");
+  const nextOurs = (r.our_reattempts ?? 0) + 1;
+  /* "the first, then 1 re-attempt by us, 1 by PostEx itself" — and any try
+     the courier counted with no re-attempt on record, so the parts add up. */
+  const ours = r.our_reattempts ?? 0, theirs = r.courier_reattempts ?? 0;
+  const unrecorded = Math.max(0, sentOut - 1 - ours - theirs);
+  const sentOutWords = sentOut > 1
+    ? "the first, then " + [ours ? `${ours} re-attempt${ours === 1 ? "" : "s"} by us` : "",
+                             theirs ? `${theirs} by ${cn} itself` : "",
+                             unrecorded ? `${unrecorded} with no re-attempt on record` : ""].filter(Boolean).join(", ")
+    : "";
   const repeat = r.past_refusals >= 2;
   /* An earlier try's line is read-only: the case now belongs to the try it
      is on, and an edit here would land on that one. */
@@ -1175,10 +1479,16 @@ function CaseSheet({ r, mayWork, phone, err, today, onClose, onDismissErr, onCop
         </div>
       )}
       <div className="flex flex-wrap items-center gap-1.5">
-        <Tag n={earlierTry ? r.attempt_no : r.attempts} />
+        <Tag n={earlierTry ? r.attempt_no : triesOf(r)} />
+        <OursChip r={r} />
+        {listed(r) && (
+          <span className="rounded-full bg-amber-soft px-2 py-0.5 text-[11px] font-bold text-[#7a5a28]">
+            On {cn}&rsquo;s {listName(r.courier)} now
+          </span>
+        )}
         {r.last_failed_at && !earlierTry && (
           <span className={`text-[12px] font-semibold ${heat(r.waiting_hours)}`}>
-            under review since {when(r.last_failed_at, today)}
+            failed {when(r.last_failed_at, today)}
           </span>
         )}
         {r.outcome && (
@@ -1188,15 +1498,26 @@ function CaseSheet({ r, mayWork, phone, err, today, onClose, onDismissErr, onCop
         )}
       </div>
 
-      {lf && (
+      {r.src === "follow" ? (
+        <p className="mt-2 rounded-xl2 bg-periwinkle-soft px-3 py-2 text-[12px] leading-snug text-[#38507a]">
+          <b>Follow-up — re-attempted {r.our_reattempts ?? 1}× by us, not delivered yet.</b> {cn} says now:{" "}
+          {r.raw_status ?? "—"}. Ring the customer; if it has not reached him, record it below.
+        </p>
+      ) : lf && (
         <p className="mt-2 rounded-xl2 bg-panel px-3 py-2 text-[12px] leading-snug text-ink dark:bg-white/[0.06] dark:text-[#f4f1ea]">
           <b>In History — {lf.label.toLowerCase()}.</b> {leftDetail(r, today)}
-          {earlierTry && <> This line is its {ordinal(r.attempt_no)} try; the parcel is on its {ordinal(r.attempts)} now.</>}
+          {earlierTry && <> This line is its {ordinal(r.attempt_no)} try; the parcel is on its {ordinal(triesOf(r))} now.</>}
         </p>
       )}
-      {lastTry && !earlierTry && (
+      {r.left_as === "desk" && settledOnList(r) && (
+        <p className={`mt-2 rounded-xl2 px-3 py-2 text-[12px] font-semibold leading-snug ${listedTone(r)}`}>
+          {listedNote(r, today)}
+        </p>
+      )}
+      {lastTry && !earlierTry && !r.outcome && (
         <p className="mt-2 rounded-xl2 bg-danger-soft px-3 py-2 text-[12px] font-semibold leading-snug text-[#8d3328]">
-          Third try. It comes back to the warehouse and the order is cancelled by hand — it does not go out again.
+          Sent out {sentOut} {sentOut === 1 ? "time" : "times"} already. It comes back to the warehouse and the order is
+          cancelled by hand — it does not go out again.
         </p>
       )}
       {r.rider_strikes >= 2 && r.rider_phone && (
@@ -1228,7 +1549,18 @@ function CaseSheet({ r, mayWork, phone, err, today, onClose, onDismissErr, onCop
               : `${r.courier_advice === "return" ? "Return" : "Re-attempt"} requested`} · {when(r.courier_advice_at, today)}
           </Detail>
         )}
-        <Detail label={`${cn} says now`}>{r.raw_status ?? "—"}</Detail>
+        <Detail label={`${cn} says now`}>{r.raw_status ?? r.q_status ?? "—"}</Detail>
+        {/* H297: the history the courier's portal does not keep */}
+        <Detail label={`On ${cn}'s list`}>
+          {days.length
+            ? <>{days.slice(0, 8).map((d) => dateOf(d.day)).join(", ")}{days.length > 8 ? ` and ${days.length - 8} more` : ""}
+                {listed(r) ? " · on it now" : ""}</>
+            : <span className="font-normal text-muted">not seen on it since the desk began reading the lists (21 Oct)</span>}
+        </Detail>
+        <Detail label="Sent out">
+          {sentOut} {sentOut === 1 ? "time" : "times"}
+          {sentOutWords && <span className="font-normal text-muted dark:text-[#a89f93]"> — {sentOutWords}</span>}
+        </Detail>
         <Detail label="Dispatched">{r.dispatch_date ? dateOf(r.dispatch_date) : "—"}</Detail>
         <Detail label="Customer">{r.customer_name ?? "—"}{r.city ? ` · ${r.city}` : ""}</Detail>
         {r.address && <Detail label="Address">{r.address}</Detail>}
@@ -1358,10 +1690,104 @@ function CaseSheet({ r, mayWork, phone, err, today, onClose, onDismissErr, onCop
         )}
         <p className="mt-2 text-[12px] leading-snug text-muted dark:text-[#a89f93]">
           {lastTry
-            ? "Third try — Return only, and cancel the order in Shopify; this desk does not touch Shopify."
-            : `Either one moves it to History. Then press the same on ${cn}'s own portal — this desk does not send it.`}
+            ? `Sent out ${sentOut} times — Return only, and cancel the order in Shopify; this desk does not touch Shopify.`
+            : `Either one is kept in History. Then press the same on ${cn}'s own portal — this desk does not send it.`}
         </p>
       </Block>
+
+      {/* --- 6. every re-attempt, ours and the courier's (H297) --------------- */}
+      {log.length > 0 && (
+        <section className="mt-4 border-t border-line pt-3 dark:border-white/[0.06]">
+          <h3 className="mb-2 flex items-center gap-2 text-[13.5px] font-bold text-ink dark:text-[#f4f1ea]">
+            <History size={15} className="text-muted dark:text-[#a89f93]" />
+            {tc("Re-attempts so far")}
+            <span className="ml-auto text-[12px] font-semibold tabular-nums text-muted dark:text-[#a89f93]">
+              {r.our_reattempts ?? 0} by us{(r.courier_reattempts ?? 0) > 0 ? ` · ${r.courier_reattempts} by ${cn}` : ""}
+            </span>
+          </h3>
+          <ol className="space-y-1.5">
+            {[...log].reverse().map((e, i) => {
+              const w = logLine(e, cn, today);
+              const editing = fixing && e.id != null && fixing.id === e.id;
+              return (
+                <li key={`${e.how}:${e.id ?? i}:${e.at ?? ""}`}
+                  className="rounded-xl2 bg-panel px-3 py-2 text-[12.5px] leading-snug text-ink dark:bg-white/[0.05] dark:text-[#f4f1ea]">
+                  <div className="flex flex-wrap items-baseline justify-between gap-x-2">
+                    <span><b>{w.who}</b> — {w.how}</span>
+                    <span className="text-[11.5px] tabular-nums text-muted dark:text-[#a89f93]">{w.when}{e.try ? ` · ${ordinal(e.try)} try` : ""}</span>
+                  </div>
+                  {e.note && !editing && <div className="mt-0.5 text-muted dark:text-[#a89f93]">&ldquo;{e.note}&rdquo;</div>}
+                  {editing && (
+                    <div className="mt-1.5">
+                      <textarea value={fixing.note} onChange={(ev) => setFixing({ id: fixing.id, note: ev.target.value })} rows={2} maxLength={300}
+                        aria-label="The note" className="w-full rounded-xl2 border border-line bg-surface px-3 py-2 text-[16px] text-ink outline-none md:text-[13px] dark:border-white/10 dark:bg-white/[0.05] dark:text-white" />
+                      <div className="mt-1.5 flex gap-2">
+                        <button onMouseDown={keepFocus} disabled={againBusy}
+                          onClick={async () => { if (await onAgainFix(fixing.id, fixing.note.trim() || null, false)) setFixing(null); }}
+                          className="flex h-9 items-center gap-1.5 rounded-full bg-ink px-3.5 text-[12.5px] font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-[#141414]">
+                          {againBusy ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />} Save the note
+                        </button>
+                        <button onClick={() => setFixing(null)} className="h-9 rounded-full px-3 text-[12.5px] font-semibold text-muted dark:text-[#a89f93]">Cancel</button>
+                      </div>
+                    </div>
+                  )}
+                  {mayWork && e.how === "again" && e.id != null && !editing && (
+                    <div className="mt-1 flex flex-wrap gap-3 text-[12px] font-semibold">
+                      <button onClick={() => setFixing({ id: e.id as number, note: e.note ?? "" })}
+                        className="text-[#38507a] underline-offset-2 hover:underline dark:text-[#a9bde6]">Edit the note</button>
+                      {e.id === latestAgainId && (
+                        <button disabled={againBusy} onClick={() => onAgainFix(e.id as number, null, true)}
+                          className="text-[#8d3328] underline-offset-2 hover:underline disabled:opacity-50 dark:text-[#e8a397]">
+                          Take it back — recorded by mistake
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </li>
+              );
+            })}
+          </ol>
+        </section>
+      )}
+
+      {/* --- 7. re-attempt again, from our side (H297) ------------------------ */}
+      {mayWork && r.again_block === null && (
+        <section className="mt-4 border-t border-line pt-3 dark:border-white/[0.06]">
+          <h3 className="mb-1 flex items-center gap-2 text-[13.5px] font-bold text-ink dark:text-[#f4f1ea]">
+            <RotateCw size={15} className="text-[#38507a]" /> {tc("Re-attempt again")}
+          </h3>
+          <p className="text-[12px] leading-snug text-muted dark:text-[#a89f93]">
+            Rang the customer and it has not reached him? Ask {cn} to send it out again — their group or helpline —
+            and record it here. It is on no review list now, so {cn}&rsquo;s portal has no button for it. This will be
+            the <b className="text-ink dark:text-[#f4f1ea]">{ordinal(nextOurs)} re-attempt by us</b>, and the{" "}
+            {ordinal(sentOut + 1)} time out{sentOut + 1 >= 3 ? " — the last one: after it, the parcel comes back" : ""}.
+          </p>
+          <div role="radiogroup" aria-label="What the customer said" className="mt-2 grid gap-1.5 sm:grid-cols-2">
+            {AGAIN_REASONS.map((x) => (
+              <button key={x} role="radio" aria-checked={againPick === x} onClick={() => setAgainPick(againPick === x ? "" : x)}
+                className={`min-h-[44px] rounded-xl2 border px-3 py-2 text-left text-[13px] font-semibold transition ${againPick === x
+                  ? "border-[#38507a] bg-periwinkle-soft text-[#38507a] ring-1 ring-[#38507a]"
+                  : "border-line bg-surface text-ink hover:bg-panel dark:border-white/10 dark:bg-white/[0.05] dark:text-white"}`}>
+                {againPick === x ? "✓ " : ""}{x}
+              </button>
+            ))}
+          </div>
+          <textarea value={againMore} onChange={(e) => setAgainMore(e.target.value)} rows={2} maxLength={250}
+            placeholder="Anything to add — optional" aria-label="Anything to add"
+            className="mt-2 w-full rounded-xl2 border border-line bg-surface px-3 py-2 text-ink outline-none dark:border-white/10 dark:bg-white/[0.05] dark:text-white" />
+          <button onMouseDown={keepFocus} disabled={againBusy} onClick={() => onAgain(againNote)}
+            className="mt-2 flex min-h-[48px] w-full items-center justify-center gap-2 rounded-full border border-[#38507a]/30 bg-periwinkle-soft px-3 text-[13px] font-bold text-[#38507a] disabled:opacity-50">
+            {againBusy ? <Loader2 size={15} className="animate-spin" /> : <RotateCw size={15} />}
+            Record the {ordinal(nextOurs)} re-attempt
+          </button>
+        </section>
+      )}
+      {mayWork && r.again_block === "third_time" && !earlierTry && r.status === "done" && (
+        <p className="mt-4 rounded-xl2 bg-danger-soft px-3 py-2 text-[12px] font-semibold leading-snug text-[#8d3328]">
+          Sent out {sentOut} times already — by the rule it is not re-attempted again. If the customer says it never
+          came, ask {cn} to return it.
+        </p>
+      )}
 
       {/* --- done / undo ------------------------------------------------------ */}
       {canEdit && !r.outcome && (
@@ -1383,12 +1809,14 @@ function CaseSheet({ r, mayWork, phone, err, today, onClose, onDismissErr, onCop
         {r.outcome
           ? `${cn} has settled it — ${r.outcome === "delivered" ? "delivered" : "returned"}. Nothing is left to work on this parcel.`
           : earlierTry
-            ? `To work its ${ordinal(r.attempts)} try, open that one — on the desk if it failed yesterday or today, otherwise higher up in History.`
+            ? `To work its ${ordinal(triesOf(r))} try, open that one — on the desk if ${cn} lists it now, otherwise higher up in History.`
             : r.decided_via === "courier"
               ? `Settled on ${cn}'s own portal — the desk read it from ${cn}'s history. Nothing to undo here.`
               : r.status === "open"
-                ? `It only comes back if ${cn} reports a new failed try — then it is in the next attempt tab.`
-                : `Undo puts it back on the desk if ${cn} still has it under review from yesterday or today; otherwise it stays in History.`}
+                ? (listed(r)
+                    ? `On ${cn}'s ${listName(r.courier)} now. Decide it here, then press the same on ${cn}'s portal.`
+                    : `Not on ${cn}'s ${listName(r.courier)} — when ${cn} lists it, it is on the desk by itself.`)
+                : `Undo puts it back to be decided again, while ${cn} has done nothing with it yet.`}
       </p>
       {phone && <div className="h-1" />}
     </Sheet>

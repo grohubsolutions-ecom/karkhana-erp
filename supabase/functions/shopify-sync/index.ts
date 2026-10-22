@@ -198,15 +198,16 @@ const KNOWN_DISPLAY = new Set([
 /* `note` is the field the agent actually types the reason into — cancelReason
    is only Shopify's fixed list, so on its own it explains nothing. */
 const ORDER_Q = `query($a:String,$q:String){
-  orders(first:250, after:$a, query:$q, sortKey:CREATED_AT, reverse:true){
+  orders(first:250, after:$a, query:$q, sortKey:UPDATED_AT, reverse:true){
     edges{ node{
       id name createdAt updatedAt cancelledAt cancelReason
       cancellation { staffNote }
       displayFulfillmentStatus displayFinancialStatus
       note tags
       totalPriceSet{ shopMoney{ amount } }
-      shippingAddress{ name phone city address1 }
-      billingAddress{ phone city }
+      shippingAddress{ name firstName lastName phone city address1 }
+      customer{ displayName firstName lastName }
+      billingAddress{ name phone city }
       fulfillments(first:10){
         createdAt displayStatus
         trackingInfo{ number company }
@@ -279,15 +280,25 @@ type ShopOrder = {
   displayFulfillmentStatus: string; displayFinancialStatus?: string | null;
   note?: string | null; tags?: string[];
   totalPriceSet?: { shopMoney?: { amount?: string } };
-  shippingAddress?: { name?: string; phone?: string; city?: string; address1?: string };
-  billingAddress?: { phone?: string; city?: string };
+  shippingAddress?: { name?: string; firstName?: string; lastName?: string;
+                      phone?: string; city?: string; address1?: string };
+  billingAddress?: { name?: string; phone?: string; city?: string };
+  customer?: { displayName?: string; firstName?: string; lastName?: string };
   fulfillments?: { createdAt: string; displayStatus: string; trackingInfo?: { number?: string; company?: string }[] }[];
 };
 
+/* THE ROLLING WINDOW IS BY updated_at, NOT created_at.
+   An agent cancels a return ten or twenty days after the order was placed.
+   A "last 3 days by created_at" window never sees that order again, so the
+   cancellation only arrived if the webhook caught it — and a 30-day nightly
+   sweep missed anything older. updated_at catches every order touched in the
+   window, whatever its age: cancellations, note edits, tag changes, refunds.
+   Explicit start/end windows keep created_at — those are backfills of a
+   period of orders, and a period is defined by when they were placed. */
 function dateFilter(since: string, start?: string, end?: string) {
   if (start && end) return `created_at:>='${start}' created_at:<='${end}' status:any`;
   if (start) return `created_at:>='${start}' status:any`;
-  return `created_at:>='${since}' status:any`;
+  return `updated_at:>='${since}' status:any`;
 }
 
 async function fetchOrders(call: (q: string, v?: unknown) => Promise<Record<string, unknown> | null>,
@@ -547,7 +558,21 @@ Deno.serve(async (req) => {
           tags: (o.tags ?? []).length ? o.tags : null,
 
           order_date: shopDay(o.createdAt),
-          customer_name: o.shippingAddress?.name || "Unknown",
+          /* TopShop and Trenzee orders were all landing with the ORDER NUMBER
+             as the customer name — every row read "#TS1641", "#TS1642". Those
+             stores do not always fill shippingAddress.name, and whatever was
+             passed as a fallback was the order's own name field.
+
+             Try the sources Shopify actually offers, in the order they are
+             likely to be filled, and only then admit we do not know. */
+          customer_name: o.shippingAddress?.name
+                      || [o.shippingAddress?.firstName, o.shippingAddress?.lastName]
+                           .filter(Boolean).join(" ").trim()
+                      || o.customer?.displayName
+                      || [o.customer?.firstName, o.customer?.lastName]
+                           .filter(Boolean).join(" ").trim()
+                      || o.billingAddress?.name
+                      || "Unknown",
           phone: o.shippingAddress?.phone || o.billingAddress?.phone || "0000000000",
           city: o.shippingAddress?.city || o.billingAddress?.city || "Unknown",
           address: o.shippingAddress?.address1 || null,
@@ -571,7 +596,17 @@ Deno.serve(async (req) => {
         let saved = 0;
         for (let i = 0; i < mapped.length; i += 300) {
           const { data, error: e2 } = await db.from("online_orders")
-            .upsert(mapped.slice(i, i + 300), { onConflict: "store_code,order_number" })
+            /* AN ORDER IS ITS SHOPIFY ID, NOT ITS NUMBER.
+             Upserting on (store_code, order_number) meant a shop could only
+             ever have one #1632. Little Minors has issued that number twice —
+             November 2024 and June 2026 — so the second order could never be
+             stored, its cancellation never arrived, and its parcel sat in the
+             chase list with nothing to resolve it.
+
+             H214 drops the unique constraint on the number, so this target no
+             longer exists: every upsert fails with 42P10 and saves nothing.
+             Use the id, which Shopify generates and never reuses. */
+            .upsert(mapped.slice(i, i + 300), { onConflict: "shopify_order_id" })
             .select("id");
           if (e2) { summary.push({ store: st, ok: false, error: e2.message, saved }); break; }
           saved += (data ?? []).length;
@@ -616,7 +651,15 @@ Deno.serve(async (req) => {
         let fixed = 0;
         for (const t of fixable) {
           const name = byTracking.get(t)!;
-          const store_code = /^#?TRZ/i.test(name) ? "TRZ" : /^#?TS/i.test(name) ? "TS" : /^#?LM/i.test(name) ? "LM" : st;
+          /* THE STORE IS THE STORE WE ARE PULLING FROM. FULL STOP.
+             This read the store out of the order NUMBER's prefix. TopShop
+             changed its order prefix on 19 June 2026 — #1632 was placed at
+             12:53pm with no prefix, #TS1641 a few hours later with one. Every
+             TopShop order from before that change matches no prefix and was
+             relabelled by the fallback, which is how a TopShop order came to be
+             filed under Little Minors. A prefix is a naming convention a shop
+             can change on a Tuesday; the store we authenticated to is a fact. */
+          const store_code = st;
           const { data } = await db.from("online_logistics")
             .update({ order_number: name, store_code, needs_review: false, review_status: null })
             .eq("tracking_id", t).select("id");
@@ -663,6 +706,9 @@ Deno.serve(async (req) => {
                 tracking_id: num,
                 order_number: o.name,
                 store_code: st,
+                // The order this fulfillment came from. This is the fact that
+                // makes the link correct rather than guessed.
+                shopify_order_id: orderIdFromGid(o.id),
                 courier,
                 dispatch_date: f.createdAt?.slice(0, 10) ?? null,
                 delivery_status: INFORMATIVE.has(display) ? mapDelivery(display) : "In Transit",
@@ -700,15 +746,65 @@ Deno.serve(async (req) => {
         // line; Postgres rejects a batch that hits the same conflict target twice.
         const uniqueParcels = [...new Map(parcels.map((p) => [p.tracking_id, p])).values()];
 
+        /* WRITE ONLY WHAT IS NOT ALREADY TRUE (H297, 22 Oct 2026).
+           Every run used to rewrite every parcel in its window — ~990 rows
+           every 15 minutes — although nothing about them had changed. Each
+           rewrite stamps online_logistics.updated_at (trigger), and ownex-sync
+           picks the parcels to read by that very column ("not updated in 20
+           minutes"). So an OwnEx parcel whose order had been touched in Shopify
+           in the last two days was never read by ownex-sync at all: on 21 Oct
+           61 OwnEx parcels still had no status, and #TS4893 sat on OwnEx's
+           Shipper Advice while our table knew nothing of it.
+           The rows already right are now left alone; new parcels and changed
+           links are written exactly as before. If the comparison cannot be
+           read, everything is written, as before. */
+        const same = (a: unknown, b: unknown) => String(a ?? "") === String(b ?? "");
+        const existing = new Map<string, Record<string, unknown>>();
+        let existingRead = true;
+        for (let i = 0; i < uniqueParcels.length; i += 150) {
+          const { data: ex, error: exErr } = await db.from("online_logistics")
+            .select("tracking_id, order_number, store_code, shopify_order_id, needs_order_review, delivery_status, raw_status")
+            .in("tracking_id", uniqueParcels.slice(i, i + 150).map((p) => String(p.tracking_id)));
+          if (exErr) { existingRead = false; existing.clear(); break; }
+          for (const r of (ex ?? []) as Record<string, unknown>[]) existing.set(String(r.tracking_id), r);
+        }
+        const toWrite = !existingRead ? uniqueParcels : uniqueParcels.filter((p) => {
+          const e = existing.get(String(p.tracking_id));
+          return !e || !same(e.order_number, p.order_number) || !same(e.store_code, p.store_code)
+            || !same(e.shopify_order_id, p.shopify_order_id ?? null) || e.needs_order_review !== false;
+        });
+        const leftAlone = uniqueParcels.length - toWrite.length;
+
         let inserted = 0; let writeError = "";
-        for (let i = 0; i < uniqueParcels.length; i += 300) {
+        for (let i = 0; i < toWrite.length; i += 300) {
           const { data, error: e2 } = await db.from("online_logistics")
-            .upsert(uniqueParcels.slice(i, i + 300), { onConflict: "tracking_id", ignoreDuplicates: true })
+            /* SHOPIFY DECIDES WHICH ORDER A TRACKING NUMBER BELONGS TO.
+             It is the only source that knows: a fulfillment carries the tracking
+             number AND the order that produced it. A courier only knows a
+             reference somebody typed.
+
+             This used ignoreDuplicates, so if a courier sync had already created
+             the row — guessing the store from a bare reference like "1020" —
+             Shopify's correct answer was thrown away. That is how OwnEx parcel
+             312010000766 stayed on Little Minors #1020 from 2024 when it really
+             belonged to Trenzee #TRZ1020, and how 307 parcels ended up on orders
+             whose amounts disagree by Rs 556,500.
+
+             Now the order link is corrected on every sync. Courier status,
+             dates, COD and settlement fields are NOT touched — those belong to
+             the courier syncs, which is what ignoreDuplicates was protecting. */
+            .upsert(toWrite.slice(i, i + 300).map((p) => ({
+              tracking_id: p.tracking_id,
+              order_number: p.order_number,
+              store_code: p.store_code,
+              shopify_order_id: p.shopify_order_id ?? null,
+              needs_order_review: false,
+            })), { onConflict: "tracking_id" })
             .select("id");
           if (e2) { writeError = e2.message; break; }
           inserted += (data ?? []).length;
 
-          const batch = uniqueParcels.slice(i, i + 300);
+          const batch = toWrite.slice(i, i + 300);
           const written = new Set((data ?? []).map((d: { id: string }) => d.id));
           if (batch.length !== written.size) {
             // Some rows were silently skipped: their tracking number already
@@ -724,7 +820,7 @@ Deno.serve(async (req) => {
         }
         if (writeError) { summary.push({ store: st, ok: false, error: writeError, inserted }); continue; }
 
-        let statusUpdated = 0;
+        let statusUpdated = 0; let statusAlready = 0;
         if (updateStatus) {
           for (const p of uniqueParcels) {
             if (p.courier !== "OwnEx") continue;
@@ -733,6 +829,12 @@ Deno.serve(async (req) => {
             // turn already-delivered parcels into "In Transit" and destroy the
             // OwnEx receivable figure
             if (!INFORMATIVE.has(raw)) continue;
+            /* H297: already so — nothing to write (see WRITE ONLY WHAT IS NOT
+               ALREADY TRUE above). Compared without case: ownex-sync writes
+               "Delivered" where Shopify says "DELIVERED". */
+            const e = existing.get(String(p.tracking_id));
+            if (e && same(e.delivery_status, p.delivery_status)
+                && String(e.raw_status ?? "").toUpperCase() === raw.toUpperCase()) { statusAlready++; continue; }
             const { data } = await db.from("online_logistics")
               .update({ delivery_status: p.delivery_status, raw_status: raw })
               .eq("tracking_id", p.tracking_id).eq("courier", "OwnEx").select("id");
@@ -747,7 +849,8 @@ Deno.serve(async (req) => {
         summary.push({
           store: st, ok: true, orders: rows.length, parcels: parcels.length,
           truncated: truncated || undefined,
-          new_parcels: inserted, ownex_status_updated: statusUpdated,
+          new_parcels: inserted, already_right: leftAlone, ownex_status_updated: statusUpdated,
+          ownex_status_already: statusAlready,
           by_courier: byCourier, by_status: byStatus,
           unknown_shopify_statuses: [...unknownStatuses],
         });

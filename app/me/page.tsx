@@ -342,10 +342,10 @@ export default function MyPortal() {
                 Delivery Under Review
               </h2>
               <p className="mt-1 max-w-[70ch] text-[13px] leading-snug text-muted dark:text-[#a89f93]">
-                Yesterday&rsquo;s and today&rsquo;s failed deliveries that PostEx or OwnEx still have under review,
-                sorted by which attempt they are on, with the courier&rsquo;s own reason. Ring the customer, copy the
-                tracking IDs into the courier&rsquo;s group, ring the rider — then press Re-attempt or Return and it
-                moves to History.
+                Exactly the parcels on PostEx&rsquo;s Delivery Under Review and OwnEx&rsquo;s Shipper Advice, read
+                from both every 10 minutes, sorted by which try they are on, with the courier&rsquo;s own reason. Ring
+                the customer, copy the tracking IDs into the courier&rsquo;s group, ring the rider — then press
+                Re-attempt or Return. Follow-up holds the parcels we re-attempted, to ring again.
               </p>
             </div>
             <FirstAttemptDesk onCount={setRescueCount} />
