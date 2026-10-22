@@ -171,9 +171,40 @@ async function checkUploadsCatchup(branches: Branch[]): Promise<MissDay[]> {
   }
   if (!units.length) return [];
 
-  const done = new Set(
-    ((logRes.data as Row[]) ?? []).map((l) => `${l.unit}|${l.log_date}|${l.kind}`)
-  );
+  const stamps = (logRes.data as Row[]) ?? [];
+  const done = new Set(stamps.map((l) => `${l.unit}|${l.log_date}|${l.kind}`));
+
+  /* A HOLE INSIDE A STAMPED RUN IS NOT A MISSING FILE.
+   *
+   * A stamp is written for a day only if the file had a row for it, and a shop
+   * that spent nothing on a Tuesday produces no expense rows for Tuesday. The
+   * day then went unstamped for ever and this card asked for a file that had
+   * already been uploaded — the owner reported exactly that, twice, and the two
+   * slots it was nagging about were Fashion Collection DHA expenses on 18 Oct
+   * and Top Shop expenses on the 20th. FC DHA was stamped on the 14th, 15th,
+   * 16th, 17th, 19th and 20th, and has zero expense rows on the 18th. The file
+   * plainly covered the 18th. It bought nothing that day.
+   *
+   * So a day with no stamp that sits BETWEEN two stamped days for the same unit
+   * and kind is treated as covered. Strictly inside the run, never past either
+   * end: a gap at the end is genuinely "not uploaded yet" and must still be
+   * asked about, which is the whole point of the card.
+   *
+   * The importer also stamps the whole span of the file it is given now, so new
+   * imports never create these holes. This handles the ones already in the
+   * table, and any file imported before that change. */
+  const span: Record<string, { lo: string; hi: string }> = {};
+  stamps.forEach((l) => {
+    const k = `${l.unit}|${l.kind}`;
+    const d = String(l.log_date);
+    const s = span[k];
+    if (!s) span[k] = { lo: d, hi: d };
+    else { if (d < s.lo) s.lo = d; if (d > s.hi) s.hi = d; }
+  });
+  const coveredByRun = (unit: string, kind: string, ds: string) => {
+    const s = span[`${unit}|${kind}`];
+    return !!s && ds > s.lo && ds < s.hi;
+  };
 
   /* Earliest log date per unit, taken from one ascending list: the first time a
      unit is seen is its earliest. A unit that has never been logged is only ever
@@ -192,7 +223,7 @@ async function checkUploadsCatchup(branches: Branch[]): Promise<MissDay[]> {
     units.forEach((u) => {
       if (d < firstOf[u.unit]) return;
       const miss = UPLOAD_KINDS
-        .filter(([k]) => !done.has(`${u.unit}|${d}|${k}`))
+        .filter(([k]) => !done.has(`${u.unit}|${d}|${k}`) && !coveredByRun(u.unit, k, d))
         .map(([kind, label]) => ({ kind, label }));
       if (miss.length) um.push({ unit: u.unit, label: u.label, miss });
     });

@@ -62,6 +62,7 @@ import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import Modal, { Field, inputCls, btnPrimary, btnGhost } from "@/components/Modal";
 import { AddEmployeeButton, EmployeeRowActions, useEmployeeHistory } from "@/components/retail/EmployeeActions";
 import UnassignedAdvances from "@/components/retail/UnassignedAdvances";
+import BetweenShops from "@/components/retail/BetweenShops";
 import {
   Shell, PageHeader, StatCards, DataTable, Tabs, Pill, Select, BranchPicker, MonthPicker,
   PreviewNote, SourceNote, useEmployees, isHeadOffice, money, num, text, today,
@@ -378,7 +379,7 @@ export function EmployeeStatement({ employee, branchName, onClose, onSaved }: {
 
 /* ── the screen ──────────────────────────────────────────────────────────── */
 
-type Tab = "people" | "entries" | "advances" | "unassigned";
+type Tab = "people" | "entries" | "advances" | "unassigned" | "between";
 const TABS: { key: Tab; label: string }[] = [
   { key: "people", label: "Who owes what" },
   { key: "entries", label: "All entries" },
@@ -388,6 +389,9 @@ const TABS: { key: Tab; label: string }[] = [
      be cleared whenever somebody knows the answer, not a step that should
      block a file from landing. */
   { key: "unassigned", label: "Unassigned advances" },
+  /* Somebody filed at one shop takes an advance at another. The cash and the
+     debt land in different places, so the two shops have to square up. */
+  { key: "between", label: "Between shops" },
 ];
 
 type Roll = { e: Employee; adv: number; rep: number; bal: number };
@@ -745,7 +749,7 @@ export default function LedgerScreen({ scope }: { scope: Scope }) {
             {people.map((e) => <option key={e.id} value={String(e.id)}>{e.name}</option>)}
           </Select>
         )}
-        {tab === "advances" && <MonthPicker value={month} onChange={setMonth} />}
+        {(tab === "advances" || tab === "between") && <MonthPicker value={month} onChange={setMonth} />}
         <button onClick={() => { setForm({ ...BLANK, employee_id: employeeId }); setErr(""); setOpen(true); }} className={btnPrimary}>
           <Plus size={15} /> New entry
         </button>
@@ -813,6 +817,14 @@ export default function LedgerScreen({ scope }: { scope: Scope }) {
           branches={branches}
           onChanged={load}
         />
+      )}
+
+      {tab === "between" && (
+        <BetweenShops employees={everyEmployee} branches={branches}
+          from={`${month}-01`}
+          /* Last day of the chosen month: day 0 of the next one. */
+          to={new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0))
+                .toISOString().slice(0, 10)} />
       )}
 
       {tab === "advances" && (

@@ -58,6 +58,7 @@ import {
 } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import Modal, { Field, inputCls, btnPrimary, btnGhost } from "@/components/Modal";
+import { useShopScope } from "@/lib/retailShop";
 import {
   Shell, PageHeader, StatCards, DataTable, Pill, Select, PreviewNote, SourceNote,
   useBranches, money, moneyOrDash, num, text, today, iso, Diff,
@@ -251,6 +252,24 @@ const TD = "px-2.5 py-2 text-right tabular-nums whitespace-nowrap";
 
 export default function CashBookPage() {
   const { branches } = useBranches();
+  /* THE CASH BOOK USED TO IGNORE THE SHOP YOU WERE STANDING IN.
+   *
+   * It read the raw branch list and defaulted to `branches[0]`, which is the
+   * first by name — Fashion Collection DHA. So choosing Top Shop in the menu
+   * and opening Cash Book handed you FC DHA's book, every time. Every other
+   * screen in the department honours the menu; this one did not, and a cash
+   * book showing a different shop from the one you picked is not a small
+   * annoyance, it is a wrong balance with a plausible shop name on it.
+   *
+   * Each of the eight shops keeps its own book — checked against the data,
+   * all eight have their own daily rows and their own counted cash — so one
+   * branch at a time stays right. What changes is WHICH one it lands on, and
+   * which ones the picker offers. */
+  const shop = useShopScope(branches);
+  const inScope = useMemo(
+    () => (shop.ids ? branches.filter((b) => shop.ids!.includes(Number(b.id))) : branches),
+    [branches, shop.ids ? shop.ids.join(",") : "all"], // eslint-disable-line react-hooks/exhaustive-deps
+  );
   const [bid, setBid] = useState<number | null>(null);
 
   const [days, setDays] = useState<Day[]>([]);
@@ -268,11 +287,11 @@ export default function CashBookPage() {
      gone from the list. Inactive shops are kept: a closed branch still has a
      cash book worth reading back. */
   useEffect(() => {
-    if (!branches.length) return;
-    setBid((cur) => (cur && branches.some((b) => b.id === cur) ? cur : branches[0].id));
-  }, [branches]);
+    if (!inScope.length) return;
+    setBid((cur) => (cur && inScope.some((b) => b.id === cur) ? cur : Number(inScope[0].id)));
+  }, [inScope]);
 
-  const chains = useMemo(() => [...new Set(branches.map((b) => b.chain ?? "").filter(Boolean))], [branches]);
+  const chains = useMemo(() => [...new Set(inScope.map((b) => b.chain ?? "").filter(Boolean))], [inScope]);
 
   const load = useCallback(async () => {
     if (!isSupabaseConfigured || !supabase || !bid) { setLoading(false); return; }
@@ -464,10 +483,10 @@ export default function CashBookPage() {
           {chains.length > 1
             ? chains.map((ch) => (
                 <optgroup key={ch} label={ch}>
-                  {branches.filter((b) => (b.chain ?? "") === ch).map((b) => <option key={b.id} value={String(b.id)}>{b.name}</option>)}
+                  {inScope.filter((b) => (b.chain ?? "") === ch).map((b) => <option key={b.id} value={String(b.id)}>{b.name}</option>)}
                 </optgroup>
               ))
-            : branches.map((b) => <option key={b.id} value={String(b.id)}>{b.name}</option>)}
+            : inScope.map((b) => <option key={b.id} value={String(b.id)}>{b.name}</option>)}
         </Select>
       </PageHeader>
 
