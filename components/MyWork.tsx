@@ -110,10 +110,14 @@ type Person = { id: string; name: string; designation: string | null };
 type CustomForm = { assignee: string; article: string; inventory: string; name: string; details: string; deadline: string };
 const EMPTY_FORM: CustomForm = { assignee: "", article: "", inventory: "", name: "", details: "", deadline: "" };
 
-/* H288: where each of my articles stands (hub_my_progress), and the ticks. */
+/* H288: where each of my articles stands (hub_my_progress), and the ticks.
+   H300 (23 Oct 2026): TikTok is no longer worked, so Zaid's social card does
+   not show a TikTok tick. The Platform type still allows "tiktok" so any
+   older tick already in the database still reads back cleanly (it just has
+   no button on this screen). */
 type Platform = "instagram" | "facebook" | "tiktok";
 const PLATFORMS: { key: Platform; name: string }[] = [
-  { key: "instagram", name: "Instagram" }, { key: "facebook", name: "Facebook" }, { key: "tiktok", name: "TikTok" },
+  { key: "instagram", name: "Instagram" }, { key: "facebook", name: "Facebook" },
 ];
 type Posts = Partial<Record<Platform, { at: string | null; by: string | null }>>;
 type PStep = {
