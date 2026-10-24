@@ -1,66 +1,53 @@
 // Supabase Edge Function: ownex-sync   (Karkhana — ozkhkhlwjblzgwmjbdde)
 // Deploy with --no-verify-jwt ; auth enforced manually below.
 //
-// HOW OWNEX WORKS FOR US
-//   OwnEx never sent API documentation, and their merchant portal runs on
-//   Next.js Server Actions that cannot be called from outside. But their PUBLIC
-//   tracking endpoint is open, unauthenticated, and returns clean JSON:
+// HOW OWNEX WORKS FOR US  (updated 24 Oct 2026 — H303)
+//   OwnEx locked its PUBLIC tracker on 22 Oct 22:43 UTC and now answers every
+//   server-side GET to /api/v1/public/booking/status/{id} with http 403 (the
+//   browser works because Cloudflare scores a residential IP low; our server
+//   IP is blocked). The 23 Oct ownex-sync (v41) saw the 403 on parcel #1 and
+//   short-circuited the run — correct, but no status refreshed for 24 hours.
 //
-//     GET https://shipper.ownexpress.pk/api/v1/public/booking/status/{trackingId}
+//   On 23 Oct the user generated a merchant API token in the OwnEx portal
+//   (Settings → Integrations → "HUB department") and stored it as the
+//   Supabase edge-function secret OWNEX_API_TOKEN. The token unlocks a
+//   different host:
 //
-//   Found by watching the tracker on ownexpress.pk — not by guessing. The path
-//   sits three levels deeper than any candidate we probed, which is exactly why
-//   endpoints get tested rather than assumed.
+//     GET https://ownex.courier-portal.com/api/v1/booking/{trackingId}
+//     Authorization: Bearer <OWNEX_API_TOKEN>
 //
-// WHAT THIS GIVES US
-//   * live delivery status for every OwnEx parcel, on the same nightly schedule
-//     as PostEx — no token, no support ticket
-//   * the full movement history and station routing
-//   NOT COD settlement — the public endpoint carries no money fields. Settlement
-//   still comes from the invoice export via Smart import.
+//   This authenticated endpoint returns the SAME JSON tree as the old public
+//   one — status.code, statusHistory[].code, same code vocabulary — with two
+//   small renames at the top level:
 //
-// OWNERSHIP RULE
+//       old public                  new authenticated
+//       ----------                  -----------------
+//       data.currentStatus          data.status
+//       data.history                data.statusHistory
+//
+//   The status label text ("Verifying Reason", "Out for Delivery") is NO
+//   LONGER included — only the code. That is fine for status mapping (the
+//   code is what CODE_MAP keys on), but the label is what we store in
+//   raw_status, so we synthesise it from the code via LABEL_MAP below.
+//
+//   The reason description ("UNTRACEABLE ADDRESS", "RFD", "CNA") is also not
+//   in the authenticated response. Reasons already in courier_reason_text are
+//   never cleared by this function, so they are preserved; new reasons will
+//   not come in until OwnEx exposes them or until we open their portal UI.
+//   This is a known loss — status refreshing is the primary job and that
+//   still works perfectly.
+//
+// OWNERSHIP RULE  (unchanged)
 //   The courier's own system is authoritative for WHERE a parcel is, so it may
 //   correct delivery_status. It knows nothing about money, so payment_status,
 //   cpr_number and cpr_net_amount are never touched here.
 //
-// DIRECTION IS READ FROM HISTORY, NOT FROM THE CURRENT STATUS  ← new
+// DIRECTION IS READ FROM HISTORY, NOT FROM THE CURRENT STATUS  (unchanged)
 //   OwnEx reuses `transit-received` and `in-transit` on BOTH legs. Verified on
-//   parcel 312010001714: transit-received at Karachi on 08 Aug (outbound) and
-//   transit-received at Lahore on 22 Aug (return) — same code, opposite meaning.
+//   parcel 312010001714. The return leg is derived from the history array and
+//   stored ONCE in return_leg_started_at (migration 0059).
 //
-//   Worse, the unambiguous return codes are transient. On that parcel:
-//       13:34 return_requested · 13:50 return-pbag · 14:00 in-transit
-//       15:25 transit-received
-//   The RTS signal was the current status for 16 minutes against a 45-minute
-//   stale window. Polling currentStatus alone can miss it entirely, which is
-//   exactly how 34 parcels ended up sitting in the forward bucket while the
-//   OwnEx portal counted them as returns.
-//
-//   So the return leg is now derived from the history array and stored ONCE in
-//   return_leg_started_at (migration 0059). Direction becomes a recorded fact
-//   instead of something re-guessed from whatever code happens to be current.
-//
-// THE REASON WAS ALWAYS THERE — WE WERE DISCARDING IT   (migration 0076)
-//   Every history entry carries a `description` alongside its status:
-//
-//       {"status":"Verifying Reason","code":"debrief",
-//        "description":"UNTRACEABLE ADDRESS"}
-//
-//   This function read that array for direction detection, kept "Verifying
-//   Reason" in raw_status and threw the description away. "Verifying Reason" is
-//   the courier saying it has not decided yet — the ABSENCE of a reason. The
-//   description beside it is the reason, and it now lands in
-//   online_logistics.courier_reason_text.
-//
-//   Only codes that explain something are read: debrief, reason, reattempt and
-//   the return stages. Movement codes carry station names in `description`, and
-//   "Lahore Hub" is not a reason a parcel came back.
-//
-//   The column is never nulled. A parcel that moves again after a debrief must
-//   not lose the finding — a reason once given is not un-given.
-//
-// ACTIONS
+// ACTIONS  (unchanged)
 //   discover_codes      sample parcels, report every status code AND every
 //                       reason wording seen, write nothing
 //   track               refresh parcels still in motion  (the scheduled job)
@@ -76,18 +63,68 @@ const CORS = {
 };
 const json = (o: unknown, s = 200) => new Response(JSON.stringify(o), { status: s, headers: CORS });
 
-const TRACK_URL = (id: string) =>
-  `https://shipper.ownexpress.pk/api/v1/public/booking/status/${encodeURIComponent(id)}`;
+/* The authenticated merchant endpoint. The alternate host
+   `shipper.courier-portal.com` also accepts the same bearer token at the same
+   path, so it is kept as a fallback for the day OwnEx moves the service. The
+   old public hosts are gone — a 403 from them is not useful fallback. */
+const TRACK_HOSTS = ["https://ownex.courier-portal.com", "https://shipper.courier-portal.com"];
+const TRACK_URL = (host: string, id: string) =>
+  `${host}/api/v1/booking/${encodeURIComponent(id)}`;
 
-/* `description` is the field this function used to drop on the floor. In the
-   history array it is where the courier writes what actually went wrong:
+/* The authenticated API returns codes only (no `status` label text), so we
+   synthesise the human-readable label from the code. Observed labels, taken
+   verbatim from OwnEx's own portal and from historical raw_status rows:
 
-     {"status":"Verifying Reason","code":"debrief",
-      "description":"UNTRACEABLE ADDRESS"}
+     code                    label
+     ----                    -----
+     unbooked                Unbooked
+     booked                  Booked
+     picked-up               Picked Up
+     arrived                 Arrived
+     pbag                    Preparing Transit
+     in-transit              In-Transit
+     transit-received        Transit Received
+     de-manifested           Ready for Delivery
+     en-route                Out for Delivery
+     debrief                 Verifying Reason
+     reason                  Waiting for Advice
+     reattempt               Ready for Re-Attempt
+     return_requested        Return In Progress
+     return_initiated        Return Initiated
+     return-pbag             Preparing Transit
+     return-de-manifested    Waiting for Submission
+     delivered               Delivered
+     returned                Returned
 
-   "Verifying Reason" is the status — the courier saying it has not decided.
-   "UNTRACEABLE ADDRESS" is the reason. We kept the first and discarded the
-   second, which is why the Returns page had nothing better than tags to show. */
+   The courier may invent a new code — unknown codes fall through to a
+   Title-Case rendering of the slug so review still has something readable. */
+const LABEL_MAP: Record<string, string> = {
+  "unbooked": "Unbooked",
+  "booked": "Booked",
+  "picked-up": "Picked Up",
+  "arrived": "Arrived",
+  "pbag": "Preparing Transit",
+  "in-transit": "In-Transit",
+  "transit-received": "Transit Received",
+  "de-manifested": "Ready for Delivery",
+  "en-route": "Out for Delivery",
+  "debrief": "Verifying Reason",
+  "reason": "Waiting for Advice",
+  "reattempt": "Ready for Re-Attempt",
+  "return_requested": "Return In Progress",
+  "return_initiated": "Return Initiated",
+  "return-pbag": "Preparing Transit",
+  "return-de-manifested": "Waiting for Submission",
+  "delivered": "Delivered",
+  "returned": "Returned",
+};
+function labelFor(code: string): string {
+  const c = String(code ?? "").toLowerCase();
+  if (LABEL_MAP[c]) return LABEL_MAP[c];
+  // Unknown code — turn it into a readable guess so the row isn't blank in review.
+  return c.replace(/[-_]/g, " ").replace(/\b\w/g, (ch) => ch.toUpperCase());
+}
+
 type Hist = { code: string; status: string; date: string; description?: string };
 type Tracked = {
   trackingId: string; ok: boolean;
@@ -96,34 +133,62 @@ type Tracked = {
   history?: Hist[]; error?: string;
 };
 
-async function trackOne(id: string): Promise<Tracked> {
+async function trackAt(host: string, id: string, token: string): Promise<Tracked> {
   try {
-    const r = await fetch(TRACK_URL(id), {
-      headers: { accept: "application/json" },
+    const r = await fetch(TRACK_URL(host, id), {
+      headers: {
+        accept: "application/json",
+        authorization: `Bearer ${token}`,
+      },
       signal: AbortSignal.timeout(15000),
     });
-    if (!r.ok) return { trackingId: id, ok: false, error: `http ${r.status}` };
+    if (!r.ok) return { trackingId: id, ok: false, error: `${host.replace("https://", "")}: http ${r.status}` };
     const j = await r.json();
-    if (!j?.success || !j?.data) return { trackingId: id, ok: false, error: "not found" };
+    if (!j?.success || !j?.data) return { trackingId: id, ok: false, error: `${host.replace("https://", "")}: not found` };
     const d = j.data;
-    const cs = d.currentStatus ?? {};
+    /* Field rename: the authenticated API uses `status` and `statusHistory`
+       where the old public one used `currentStatus` and `history`. Read both
+       so a future OwnEx revert does not break the sync. */
+    const cs = d.status ?? d.currentStatus ?? {};
+    const histArr = d.statusHistory ?? d.history ?? [];
     const from = cs.details?.fromStation?.name;
     const to = cs.details?.transitStation?.name ?? cs.details?.toStation?.name;
+    const code = String(cs.code ?? "").toLowerCase();
     return {
       trackingId: id, ok: true,
-      code: String(cs.code ?? "").toLowerCase(),
-      status: String(cs.status ?? ""),
+      code,
+      /* Synthesise the label from the code when the API didn't send one. */
+      status: cs.status ? String(cs.status) : (code ? labelFor(code) : ""),
       date: cs.date ?? undefined,
       route: from && to ? `${from} -> ${to}` : from || undefined,
+      /* Preserved for the fallback path; the auth API never populates it. */
       description: cs.description ? String(cs.description) : undefined,
-      history: (d.history ?? []).map((h: { code?: string; status?: string; date?: string; description?: string }) => ({
-        code: String(h.code ?? "").toLowerCase(), status: String(h.status ?? ""), date: h.date ?? "",
-        description: h.description ? String(h.description) : undefined,
-      })),
+      history: (histArr as { code?: string; status?: string; date?: string; description?: string }[])
+        .map((h) => {
+          const hc = String(h.code ?? "").toLowerCase();
+          return {
+            code: hc,
+            status: h.status ? String(h.status) : (hc ? labelFor(hc) : ""),
+            date: h.date ?? "",
+            description: h.description ? String(h.description) : undefined,
+          };
+        }),
     };
   } catch (e) {
-    return { trackingId: id, ok: false, error: String(e).slice(0, 120) };
+    return { trackingId: id, ok: false, error: `${host.replace("https://", "")}: ${String(e).slice(0, 100)}` };
   }
+}
+
+/** Each host in turn; the first real answer wins. All failing returns the
+ *  reasons from every host, so a failed run can say WHY. */
+async function trackOne(id: string, token: string): Promise<Tracked> {
+  const errors: string[] = [];
+  for (const host of TRACK_HOSTS) {
+    const t = await trackAt(host, id, token);
+    if (t.ok) return t;
+    errors.push(t.error ?? "failed");
+  }
+  return { trackingId: id, ok: false, error: errors.join(" | ") };
 }
 
 /* The complete OwnEx vocabulary, read from 150 live parcels via discover_codes
@@ -133,6 +198,7 @@ const CODE_MAP: Record<string, { status: string; attempt?: boolean }> = {
   // ---- moving (direction UNKNOWN from the code alone) -------------------
   unbooked:           { status: "In Transit" },   // Unbooked
   booked:             { status: "In Transit" },   // Booked
+  "picked-up":        { status: "In Transit" },   // Picked Up
   arrived:            { status: "In Transit" },   // Arrived
   pbag:               { status: "In Transit" },   // Preparing Transit
   "in-transit":       { status: "In Transit" },   // In-Transit        ← both legs
@@ -141,17 +207,13 @@ const CODE_MAP: Record<string, { status: string; attempt?: boolean }> = {
   "en-route":         { status: "In Transit" },   // Out for Delivery
 
   // ---- delivery was attempted and failed -------------------------------
-  // still in transit, but the customer refused or was unavailable. Flagged so
-  // these parcels surface for chasing instead of sitting quietly as "moving".
   debrief:   { status: "In Transit", attempt: true },   // Verifying Reason
   reason:    { status: "In Transit", attempt: true },   // Reason / Waiting for Advice
   reattempt: { status: "In Transit", attempt: true },   // Ready for Re-Attempt
 
   // ---- coming back -----------------------------------------------------
-  // STAGES of a return, not a completed one: the parcel is on its way back but
-  // not yet received, so it is RTS rather than Returned. These are transient —
-  // see the header note. Presence in HISTORY is what counts, not currency.
   return_requested:       { status: "RTS" },      // Return In Progress
+  return_initiated:       { status: "RTS" },      // Return Initiated
   "return-pbag":          { status: "RTS" },      // Preparing Transit (return leg)
   "return-de-manifested": { status: "RTS" },      // Waiting for Submission
 
@@ -163,17 +225,12 @@ const CODE_MAP: Record<string, { status: string; attempt?: boolean }> = {
 function mapCode(code: string): { status: string; certain: boolean; attempt: boolean } {
   const hit = CODE_MAP[code];
   if (hit) return { status: hit.status, certain: true, attempt: !!hit.attempt };
-  // OwnEx may add codes later. These patterns are a best guess, so they are
-  // marked NOT certain — the parcel still gets flagged for review rather than
-  // quietly accepted. Flag, never guess.
   if (/^deliver/.test(code)) return { status: "Delivered", certain: false, attempt: false };
   if (/^return|^rts/.test(code)) return { status: "RTS", certain: false, attempt: false };
   if (/cancel|expire/.test(code)) return { status: "Cancelled", certain: false, attempt: false };
   return { status: "In Transit", certain: false, attempt: false };
 }
 
-/* Both separators are real: `return_requested` uses an underscore,
-   `return-pbag` a hyphen. Matching one and not the other loses half the signal. */
 const isReturnCode = (c: string) => /^return[-_]/.test(c ?? "");
 
 /** The first moment the courier put this parcel on the return leg, or null. */
@@ -185,40 +242,22 @@ function returnLegStart(history?: Hist[]): string | null {
 /* ---------------------------------------------------------------------------
    THE COURIER'S REASON
 
-   Codes that carry an explanation. `debrief` is the important one — it is the
-   entry that holds "UNTRACEABLE ADDRESS" — but a return stage can carry one too.
-   Movement codes (in-transit, arrived, transit-received) describe geography, not
-   cause, and their descriptions are station names. Reading those would put
-   "Lahore Hub" in front of the team as a reason for the parcel coming back.
+   Kept for the fallback path (if OwnEx ever includes `description` again on
+   the authenticated endpoint). Today's authenticated response has no
+   description field at all, so courierReason() will return null — that is
+   fine, because the patch below only WRITES courier_reason_text when a
+   reason is present, so existing reasons are preserved.
 --------------------------------------------------------------------------- */
 const REASON_CODES = new Set([
   "debrief", "reason", "reattempt",
-  "return_requested", "return-pbag", "return-de-manifested", "returned",
+  "return_requested", "return_initiated", "return-pbag", "return-de-manifested", "returned",
 ]);
-
-/* Descriptions that are not explanations. The courier does write these, and
-   showing them is worse than showing nothing, because a placeholder in the
-   reason column reads as an answer. */
 const EMPTY_REASON = /^(n\/?a|none|null|-+|verif(y|ie)(ing|d) reason|reason|pending|no reason)$/i;
-
-/* A ROUTE IS NOT A REASON.
-   OwnEx puts the leg — "Lahore <i class="ri-arrow-right-line"></i> Karachi" —
-   into the same `description` field it uses for findings. An earlier version of
-   this function let 20 of those through into the reason column, complete with
-   the HTML. Two guards, because either alone would have missed it:
-     the markup (an <i> icon tag is never part of a written reason)
-     the shape (CITY -> CITY, with any arrow the courier chooses to use) */
 const LOOKS_LIKE_ROUTE = /^[^<>]{2,30}\s*(->|-->|→|=>|»)\s*[^<>]{2,30}$/;
-
-/* The courier prefixes its own findings: "Verified Reason CNA" is the code CNA
-   with a label in front of it. Strip the label, keep the finding. */
 const REASON_LABEL = /^\s*verif(y|ie)(ing|d)\s+reason\s*[:\-–]?\s*/i;
 
 function cleanReason(v: unknown): string {
   let s = String(v ?? "");
-  // Markup first: a description carrying an <i> icon is a route, not a finding.
-  // Detect it BEFORE stripping tags, or "Lahore <i/> Karachi" becomes the
-  // innocent-looking "Lahore Karachi" and sails through every later test.
   const hadMarkup = /<[^>]+>/.test(s);
   s = s.replace(/<[^>]+>/g, " ")
        .replace(/&amp;/g, "&").replace(/&nbsp;/g, " ")
@@ -230,38 +269,30 @@ function cleanReason(v: unknown): string {
   return s.slice(0, 200);
 }
 
-/** The courier's own explanation for this parcel, or null if it has not given
- *  one. Never invents; an absent reason stays absent. */
 function courierReason(t: Tracked): string | null {
-  // Newest first. The history array's order is the courier's, not ours, so it
-  // is sorted rather than trusted — the most recent finding is the live one.
   const hist = [...(t.history ?? [])].sort((a, b) =>
     String(b.date ?? "").localeCompare(String(a.date ?? "")));
-
   for (const h of hist) {
     if (REASON_CODES.has(h.code)) {
       const r = cleanReason(h.description);
       if (r) return r;
     }
   }
-  /* NO FALLBACK TO t.description.
-     It was here, and it is what put "Lahore -> Karachi" into 20 reason cells.
-     currentStatus.description is the leg the parcel is on — a movement, not a
-     cause — and only a history entry whose CODE says it explains something can
-     be trusted to explain something. cleanReason() would now reject that
-     particular string anyway, but a guard behind a source that is wrong by
-     nature is the wrong place to defend. Read the right field instead. */
   return null;
 }
 
-/** small waves, so we stay polite to a public endpoint */
-async function inWaves(ids: string[], size: number, deadline: number) {
+/** small waves, so we stay polite to the merchant endpoint */
+async function inWaves(ids: string[], size: number, deadline: number, token: string) {
   const out: Tracked[] = [];
   for (let i = 0; i < ids.length; i += size) {
     if (Date.now() > deadline) break;
-    out.push(...await Promise.all(ids.slice(i, i + size).map(trackOne)));
+    out.push(...await Promise.all(ids.slice(i, i + size).map((id) => trackOne(id, token))));
   }
   return out;
+}
+
+function failSamples(results: Tracked[]) {
+  return results.filter((t) => !t.ok).slice(0, 5).map((t) => ({ tracking_id: t.trackingId, error: t.error }));
 }
 
 Deno.serve(async (req) => {
@@ -280,6 +311,17 @@ Deno.serve(async (req) => {
       allowed = true;
     }
 
+    /* The authenticated endpoint will not answer without the merchant token.
+       Fail loudly if it is missing, rather than running a whole batch that
+       returns 401 on every parcel. */
+    const ownexToken = Deno.env.get("OWNEX_API_TOKEN") ?? "";
+    if (!ownexToken) {
+      return json({
+        ok: false,
+        error: "OWNEX_API_TOKEN is not set. Add it under Project Settings → Edge Functions → Secrets.",
+      }, 500);
+    }
+
     const body = await req.json().catch(() => ({}));
     const action = body.action ?? "track";
     const limit = Math.min(Number(body.limit) || 200, 1000);
@@ -290,7 +332,6 @@ Deno.serve(async (req) => {
     if (action === "discover_codes") {
       let ids: string[] = body.tracking_ids ?? [];
       if (!ids.length) {
-        // sample newest first; their history rows reveal delivered / returned
         const { data } = await db.from("online_logistics")
           .select("tracking_id")
           .eq("courier", "OwnEx").not("tracking_id", "is", null)
@@ -298,7 +339,7 @@ Deno.serve(async (req) => {
           .limit(limit);
         ids = (data ?? []).map((r: { tracking_id: string }) => r.tracking_id);
       }
-      const results = await inWaves(ids, wave, deadline);
+      const results = await inWaves(ids, wave, deadline, ownexToken);
 
       const codes: Record<string, { seen: number; label: string; reasons: Record<string, number> }> = {};
       let failed = 0;
@@ -312,9 +353,6 @@ Deno.serve(async (req) => {
           if (!h.code) continue;
           codes[h.code] = codes[h.code] ?? { seen: 0, label: h.status, reasons: {} };
           codes[h.code].seen++;
-          // The descriptions, grouped by the code that carried them. This is
-          // read-only evidence: run it and you can see "UNTRACEABLE ADDRESS"
-          // sitting under `debrief` before anything is written anywhere.
           const r = cleanReason(h.description);
           if (r) codes[h.code].reasons[r] = (codes[h.code].reasons[r] ?? 0) + 1;
         }
@@ -331,40 +369,22 @@ Deno.serve(async (req) => {
       const unmapped = table.filter((r) => !r.certain).map((r) => r.code);
 
       return json({
-        ok: true, checked: results.length, failed, codes: table, unmapped,
+        ok: true, checked: results.length, failed, fail_samples: failSamples(results), codes: table, unmapped,
         note: unmapped.length
           ? "These codes are not understood yet — send them to me and I will map them properly."
           : "Every code in circulation is understood.",
       });
     }
 
-    /* ============ track — the scheduled refresh ==========================
-       ALSO the one-off backfill: `backfill_return_leg` runs the same logic but
-       widens the selection to parcels that were already misfiled, and does not
-       apply the stale window. */
+    /* ============ track — the scheduled refresh ========================== */
     if (action === "track" || action === "backfill_return_leg") {
       const backfill = action === "backfill_return_leg";
 
-      // Every UPDATE fires a Realtime event to every open browser tab, so
-      // rewriting identical rows costs egress twice: once to the courier, once
-      // to every watching browser. Skip the write when nothing changed.
       const priorStatus = new Map<string, string | null>();
-      // ...and what reason we already hold. Without this, the "nothing changed"
-      // shortcut below would skip the write on a parcel whose status is steady
-      // but whose reason has only just arrived — which is most of them, since a
-      // debrief entry appears while the code stays put.
       const priorReason = new Map<string, string | null>();
 
       let ids: string[] = body.tracking_ids ?? [];
       if (!ids.length) {
-        // Only parcels still moving — settled ones need no re-checking.
-        //
-        // NOTE: RTS is deliberately NOT excluded. A parcel on the return leg is
-        // still travelling; excluding it meant it could never progress to
-        // Returned, so the returned count could only ever grow through imports.
-        // This is safe ONLY because direction now comes from history: without
-        // that, the next poll would read `transit-received`, call it In Transit
-        // and wipe the return flag.
         const terminal = '("Delivered","Returned","Cancelled")';
 
         let q = db.from("online_logistics")
@@ -372,9 +392,6 @@ Deno.serve(async (req) => {
           .eq("courier", "OwnEx").not("tracking_id", "is", null);
 
         if (backfill) {
-          // Everything not finally settled, plus anything already claiming to be
-          // returned that no one has physically received yet — those include the
-          // rows Smart import filed as Returned off a portal label.
           q = q.not("delivery_status", "in", '("Delivered","Cancelled")')
                .is("return_received_at", null);
         } else {
@@ -390,7 +407,26 @@ Deno.serve(async (req) => {
           .order("updated_at", { ascending: true, nullsFirst: true })
           .limit(limit);
         ids = (data ?? []).map((r: { tracking_id: string }) => r.tracking_id);
-        // remember what we already hold, so an unchanged parcel is not rewritten
+
+        /* H303 (24 Oct 2026) — ONE-PARCEL PROBE BEFORE A BATCH.
+           v41 added this probe when the public tracker 403'd every call. With
+           the merchant token in place every parcel succeeds, so the probe is
+           kept for the opposite reason: if the token is revoked or expires,
+           we want ONE 401 reported with the full error message rather than
+           180 of them each writing the same unauthorised shape. */
+        if (ids.length) {
+          const probe = await trackOne(ids[0], ownexToken);
+          if (!probe.ok && /http (401|403)/.test(probe.error ?? "")) {
+            return json({
+              ok: true, action, dry_run: body.dry_run === true, probe_only: true,
+              requested: ids.length, checked: 1, updated: 0, not_found: 0, failed: 1,
+              fail_samples: [{ tracking_id: ids[0],
+                error: `OwnEx rejected the merchant token (${probe.error}). Check OWNEX_API_TOKEN in edge-function secrets.` }],
+              now_showing: {},
+            });
+          }
+        }
+
         for (const r of (data ?? []) as
              { tracking_id: string; raw_status?: string | null; courier_reason_text?: string | null }[]) {
           priorStatus.set(r.tracking_id, r.raw_status ?? null);
@@ -399,7 +435,7 @@ Deno.serve(async (req) => {
       }
       if (!ids.length) return json({ ok: true, checked: 0, note: "Nothing due a refresh — every parcel in transit was checked recently." });
 
-      const results = await inWaves(ids, wave, deadline);
+      const results = await inWaves(ids, wave, deadline, ownexToken);
       const dryRun = body.dry_run === true;
 
       let updated = 0, unchanged = 0, flagged = 0, failed = 0, attempts = 0;
@@ -417,16 +453,9 @@ Deno.serve(async (req) => {
         const certain = m.certain;
         const attempt = m.attempt;
 
-        // ---- direction, from history ------------------------------------
         const legStart = returnLegStart(t.history);
         if (legStart) returnLegFound++;
 
-        // A parcel that has ever been put on the return leg is coming back,
-        // even though the current code (transit-received / in-transit / arrived)
-        // is identical to an outbound movement.
-        //
-        // Terminal codes still win: `delivered` means the return was cancelled
-        // and the parcel was rescued; `returned` means it is physically back.
         if (legStart && status === "In Transit") {
           status = "RTS";
           directionCorrected++;
@@ -434,13 +463,11 @@ Deno.serve(async (req) => {
         }
         if (legStart && status === "Delivered") rescued++;
 
-        // ---- the courier's own explanation, if it has given one ----------
         const reason = courierReason(t);
         if (reason) {
           reasonsFound++;
           if (reasonSamples.length < 20) reasonSamples.push({ tracking_id: t.trackingId, reason, status: t.status });
         }
-        // Only NEW information counts as a change worth writing.
         const reasonIsNew = !!reason && reason !== priorReason.get(t.trackingId);
         if (reasonIsNew) reasonsNew++;
 
@@ -449,52 +476,30 @@ Deno.serve(async (req) => {
         nowShowing[status] = (nowShowing[status] ?? 0) + 1;
         if (dryRun) continue;
 
-        // unchanged status, direction already recorded, no new reason — nothing to write
         if (priorStatus.get(t.trackingId) === (t.status ?? null) && !legStart && !reasonIsNew) {
           unchanged++; continue;
         }
 
-        /* THE EVENT IS LOGGED HERE, NOT ABOVE.
-           It used to be pushed before this check, so a parcel that had not moved
-           still wrote an event on every poll — every five minutes, forever. That
-           is 63% of online_courier_events (44,137 of 70,325 rows) saying nothing
-           that was not already known, and it is the reason the database grew
-           10-20 MB a day against an expected 1-2.
-
-           An event log is a record of CHANGE. A parcel sitting in transit is not
-           an event, it is the absence of one. */
         events.push({ tracking_id: t.trackingId, courier: "OwnEx", raw_status: t.status ?? t.code ?? "" });
 
         const patch: Record<string, unknown> = {
           delivery_status: status,
           raw_status: t.status ?? t.code ?? null,
           needs_review: !certain,
-          // Set explicitly. The stale-window rotation orders and filters on this
-          // column, so if nothing writes it the same rows are polled forever and
-          // the tail is never reached.
           updated_at: new Date().toISOString(),
         };
 
         if (legStart) {
-          // History is immutable — the first return event never changes date, so
-          // writing it every time is idempotent. It also upgrades the rows that
-          // migration 0059 seeded with an approximate timestamp.
           patch.return_leg_started_at = legStart;
           patch.return_leg_source = "history";
         }
 
-        // Only ever written when we HAVE one. A later movement that carries no
-        // description must not erase the finding that came before it — a reason
-        // once given is not un-given.
         if (reason) patch.courier_reason_text = reason;
 
         if (status === "Delivered" && t.date) patch.delivery_date = String(t.date).slice(0, 10);
         if (!certain) patch.review_status = `unmapped OwnEx code: ${t.code}`;
-        // a failed attempt is worth seeing — the team can call the customer
         if (attempt) patch.rts_reason = `OwnEx: ${t.status}${t.route ? ` (${t.route})` : ""}`;
         if (status === "RTS" || status === "Returned") patch.rts = "Yes";
-        // a rescued parcel is no longer an RTS — clear the flag rather than
-        // leaving a stale "Yes" behind it
         if (status === "Delivered") patch.rts = null;
 
         const { data } = await db.from("online_logistics")
@@ -510,13 +515,12 @@ Deno.serve(async (req) => {
         ok: true, action, dry_run: dryRun,
         requested: ids.length, checked: results.length,
         updated, not_found: unchanged, failed,
+        fail_samples: failSamples(results),
         flagged_unknown_code: flagged,
         failed_delivery_attempts: attempts,
         on_return_leg: returnLegFound,
         direction_corrected: directionCorrected,
         rescued_after_return_started: rescued,
-        // The point of this run: how many parcels the courier has actually
-        // explained, and how many of those explanations are new to us.
         courier_reasons_seen: reasonsFound,
         courier_reasons_new: reasonsNew,
         reason_samples: reasonSamples,
