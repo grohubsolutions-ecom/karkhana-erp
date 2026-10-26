@@ -35,6 +35,10 @@ export const ROUTE_PERMS: Record<string, string[] | null> = {
   "/warehouse/grn-in": ["khana.view"],
   "/warehouse/grn-out": ["khana.view"],
   "/warehouse/returns": ["khana.manage", "khana.return"],
+  /* K192 — Carrefour shop stock reports. Seeing them and uploading them are
+     separate: someone may read the sold figures without loading files. */
+  "/carrefour": ["carrefour.view", "carrefour.upload"],
+  "/carrefour/upload": ["carrefour.upload"],
   "/grn/out": ["inventory.view", "inventory.issue"],
   "/packing": ["production.view", "production.entry"],
   "/grn/stitching": ["production.view", "production.entry"],
