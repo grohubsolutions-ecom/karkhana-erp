@@ -7,8 +7,9 @@
  *   1. pick the DATE the report is for (the file does not carry one)
  *   2. pick the file — every shop column is read, and its total shown
  *   3. any shop code not matched yet is matched here, once, and remembered
- *   4. a shop that already has a report for that date is said out loud;
- *      it goes in only if "replace" is ticked
+ *   4. a shop that already has a report for that date is refused — a
+ *      report is NEVER replaced (K193). One file for the back date, one for
+ *      the date after; a wrong upload is removed below, then sent again
  *   5. Upload
  *
  * A shop column that is empty in every row is a Carrefour shop that carries
@@ -49,7 +50,13 @@ function readFile(grid: unknown[][]): { lines: Line[]; skipped: string[]; error?
   const body = grid.slice(hi + 1).filter((r) => norm(r[bi]) !== "");
 
   /* Wide: a column per shop, headed CODE_S. */
-  const shopCols = h.map((c, i) => ({ c, i })).filter(({ c }) => /_S$/i.test(c) && !/^TOTAL_S$/i.test(c));
+  /* First column of each code only: a sheet someone has worked on can repeat
+     a heading (LYL_S twice) to the right, and reading both would double it. */
+  const seen = new Set<string>();
+  const shopCols = h.map((c, i) => ({ c, i })).filter(({ c }) => {
+    if (!/_S$/i.test(c) || /^TOTAL_S$/i.test(c)) return false;
+    const k = c.toUpperCase(); if (seen.has(k)) return false; seen.add(k); return true;
+  });
   if (shopCols.length) {
     const lines: Line[] = []; const skipped: string[] = [];
     shopCols.forEach(({ c, i }) => {
@@ -81,10 +88,9 @@ export default function CarrefourUploadPage() {
   const [skipped, setSkipped] = useState<string[]>([]);
   const [cols, setCols] = useState<Col[]>([]);
   const [taken, setTaken] = useState<Set<string>>(new Set());
-  const [replace, setReplace] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
-  const [done, setDone] = useState<null | { shops: number; lines: number; unmatched: number; replaced: boolean }>(null);
+  const [done, setDone] = useState<null | { shops: number; lines: number; unmatched: number }>(null);
   const [confirmDel, setConfirmDel] = useState<string | null>(null);
 
   const loadAll = useCallback(async () => {
@@ -134,7 +140,7 @@ export default function CarrefourUploadPage() {
   const unmatched = cols.filter((c) => !c.branchId);
   const clashes = cols.filter((c) => c.branchId && taken.has(c.branchId));
   const total = useMemo(() => cols.reduce((a, c) => a + c.pieces, 0), [cols]);
-  const ready = lines.length > 0 && unmatched.length === 0 && !!date && (clashes.length === 0 || replace);
+  const ready = lines.length > 0 && unmatched.length === 0 && !!date && clashes.length === 0;
 
   async function send() {
     if (!supabase || !ready) return;
@@ -143,16 +149,16 @@ export default function CarrefourUploadPage() {
     const payload = lines.map((l) => ({ shop: l.shop, branch_id: byCode.get(l.shop) || null, barcode: l.barcode,
       name: l.name, qty: l.qty, price: l.price }));
     const { data, error } = await supabase.rpc("import_carrefour_report",
-      { p_date: date, p_file: fileName, p_rows: payload, p_replace: replace });
+      { p_date: date, p_file: fileName, p_rows: payload });
     setBusy(false);
     if (error) { setErr(error.message); return; }
-    const d = data as { ok: boolean; message?: string; shops?: number; lines?: number; unmatched_barcodes?: number; replaced?: boolean; already_uploaded?: string[]; unknown_shops?: string[] };
+    const d = data as { ok: boolean; message?: string; shops?: number; lines?: number; unmatched_barcodes?: number; already_uploaded?: string[]; unknown_shops?: string[] };
     if (!d.ok) {
       setErr([d.message, d.already_uploaded?.join(", "), d.unknown_shops?.join(", ")].filter(Boolean).join(" "));
       return;
     }
-    setDone({ shops: d.shops ?? 0, lines: d.lines ?? 0, unmatched: d.unmatched_barcodes ?? 0, replaced: !!d.replaced });
-    setLines([]); setCols([]); setSkipped([]); setReplace(false); setFileName("");
+    setDone({ shops: d.shops ?? 0, lines: d.lines ?? 0, unmatched: d.unmatched_barcodes ?? 0 });
+    setLines([]); setCols([]); setSkipped([]); setFileName("");
     if (file.current) file.current.value = "";
     loadAll();
   }
@@ -181,7 +187,7 @@ export default function CarrefourUploadPage() {
           <div className="flex items-start gap-2 rounded-xl2 border border-success/40 bg-success-soft px-4 py-3 text-[13px] text-ink">
             <CheckCircle2 size={16} className="mt-0.5 shrink-0" />
             <span>
-              <b>Uploaded{done.replaced ? " (replacing the earlier one)" : ""}:</b> {done.shops} shops, {n(done.lines)} lines for {day(date)}.
+              <b>Uploaded:</b> {done.shops} shops, {n(done.lines)} lines for {day(date)}.
               {done.unmatched > 0 && <> {done.unmatched} barcode{done.unmatched === 1 ? " is" : "s are"} not in our products and {done.unmatched === 1 ? "is" : "are"} kept as written.</>}
               {" "}<Link href="/carrefour" className="font-semibold underline">See stock &amp; sales →</Link>
             </span>
@@ -251,10 +257,11 @@ export default function CarrefourUploadPage() {
                   </p>
                 )}
                 {clashes.length > 0 && (
-                  <label className="mt-2 flex items-center gap-2 text-[12.5px] text-ink">
-                    <input type="checkbox" checked={replace} onChange={(e) => setReplace(e.target.checked)} />
-                    Replace the report already on {day(date)} for {clashes.map((c) => shopName(c.branchId)).join(", ")}
-                  </label>
+                  <p className="mt-2 flex items-start gap-1.5 text-[12.5px] text-ink">
+                    <AlertTriangle size={14} className="mt-0.5 shrink-0 text-danger" />
+                    <span>{clashes.map((c) => shopName(c.branchId)).join(", ")} already {clashes.length === 1 ? "has" : "have"} a report on <b>{day(date)}</b>.
+                      A report is never replaced — pick the right date for this file, or remove the wrong upload below first.</span>
+                  </p>
                 )}
                 <div className="mt-4 flex justify-end">
                   <button onClick={send} disabled={!ready || busy}

@@ -17,7 +17,11 @@
  * A shop with only one report has nothing to compare against yet: its
  * previous and sold columns stay empty rather than pretend.
  *
- * THREE WAYS TO LOOK AT IT
+ * FOUR WAYS TO LOOK AT IT
+ *   Shop by shop every article down the side, and for EACH shop three
+ *                columns side by side: old stock · current stock ·
+ *                difference (old − current) — the owner's own sheet layout
+ *                (27 Oct). The default.
  *   Shops        one line per shop — the totals
  *   Articles     every article in every shop (or one shop)
  *   Warehouse    one line per article across all shops, beside what the
@@ -38,7 +42,7 @@ type Row = {
   retail_price: number | null; sold_value: number | null;
 };
 type Shop = { branch_id: string; name: string; last_report: string | null; reports: number };
-type View = "shops" | "articles" | "warehouse";
+type View = "matrix" | "shops" | "articles" | "warehouse";
 type Only = "all" | "sold" | "restocked" | "out" | "unknown";
 
 const num = (v: unknown) => Number(v ?? 0) || 0;
@@ -46,6 +50,9 @@ const n = (v: number | null | undefined) => v == null ? "—" : Number(v).toLoca
 const rs = (v: number | null | undefined) => v == null ? "—" : "Rs " + Math.round(Number(v)).toLocaleString();
 const day = (v: string | null) => v ? new Date(v + "T00:00:00").toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" }) : "—";
 const today = () => new Date().toLocaleDateString("en-CA");
+const short = (v: string | null) => v ? new Date(v + "T00:00:00").toLocaleDateString("en-GB", { day: "numeric", month: "short" }) : "—";
+type Cell = { p: number | null; c: number };
+const diffOf = (x?: Cell) => x == null || x.p == null ? null : x.p - x.c;
 
 export default function CarrefourPage() {
   const { can } = usePermissions();
@@ -57,9 +64,10 @@ export default function CarrefourPage() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
 
-  const [view, setView] = useState<View>("shops");
+  const [view, setView] = useState<View>("matrix");
   const [shopId, setShopId] = useState("");          // "" = every shop
   const [asOf, setAsOf] = useState("");              // "" = latest
+  const [from, setFrom] = useState("");              // "" = the report just before
   const [q, setQ] = useState("");
   const [only, setOnly] = useState<Only>("all");
 
@@ -68,7 +76,7 @@ export default function CarrefourPage() {
     setLoading(true); setErr("");
     const [s, c, w] = await Promise.all([
       supabase.rpc("carrefour_shops"),
-      supabase.rpc("carrefour_compare", { p_branch: null, p_as_of: asOf || null }),
+      supabase.rpc("carrefour_compare", { p_branch: null, p_as_of: asOf || null, p_from: from || null }),
       supabase.from("v_khana_stock").select("item_id, quantity"),
     ]);
     if (s.error || c.error) { setErr((s.error ?? c.error)!.message); setLoading(false); return; }
@@ -83,7 +91,7 @@ export default function CarrefourPage() {
     ((w.data ?? []) as { item_id: string; quantity: number }[]).forEach((x) => { m[x.item_id] = num(x.quantity); });
     setStock(m);
     setLoading(false);
-  }, [asOf]);
+  }, [asOf, from]);
   useEffect(() => { load(); }, [load]);
 
   /* Article rows after the shop, search and "only" filters. */
@@ -131,6 +139,29 @@ export default function CarrefourPage() {
     return [...m.values()].sort((a, b) => b.sold - a.sold || String(a.article).localeCompare(String(b.article)));
   }, [lines]);
 
+  /* Shop by shop: one row per article, a cell per shop. */
+  const matrix = useMemo(() => {
+    const m = new Map<string, { key: string; barcode: string | null; article: string | null; cells: Record<string, Cell> }>();
+    lines.forEach((r) => {
+      const k = r.item_id ?? "bc:" + r.barcode;
+      const x = m.get(k) ?? { key: k, barcode: r.barcode, article: r.article, cells: {} };
+      x.cells[r.branch_id] = { p: r.prev_qty, c: r.curr_qty };
+      m.set(k, x);
+    });
+    return [...m.values()].sort((a, b) => String(a.article).localeCompare(String(b.article)));
+  }, [lines]);
+  const rowTotal = (cells: Record<string, Cell>): Cell => {
+    const xs = perShop.map((s) => cells[s.id]).filter(Boolean) as Cell[];
+    const comparable = perShop.some((s) => s.prev_date);
+    return { p: comparable ? xs.reduce((a, x) => a + num(x.p), 0) : null, c: xs.reduce((a, x) => a + x.c, 0) };
+  };
+  const colTotal = (id: string): Cell => {
+    const s = perShop.find((x) => x.id === id);
+    return { p: s?.prev ?? null, c: s?.curr ?? 0 };
+  };
+  const grand: Cell = { p: perShop.some((s) => s.prev != null) ? perShop.reduce((a, s) => a + num(s.prev), 0) : null,
+                        c: perShop.reduce((a, s) => a + s.curr, 0) };
+
   const anyCompare = lines.some((r) => r.prev_date != null);
   const tot = useMemo(() => ({
     curr: lines.reduce((a, r) => a + r.curr_qty, 0),
@@ -140,9 +171,24 @@ export default function CarrefourPage() {
   }), [lines]);
 
   const shopName = shopId ? shops.find((s) => s.branch_id === shopId)?.name ?? "" : "All shops";
-  const asOfLabel = asOf ? `as of ${day(asOf)}` : "latest reports";
+  const asOfLabel = (from ? `from ${day(from)} ` : "") + (asOf ? `to ${day(asOf)}` : "latest reports");
 
   const table = (): ExportTable => {
+    if (view === "matrix") {
+      const multi = perShop.length > 1;
+      const trio = (x: Cell | undefined) => x == null ? ["", "", ""] : [x.p ?? "", x.c, diffOf(x) ?? ""];
+      return {
+        title: `Carrefour — shop by shop — ${shopName} — ${asOfLabel}`,
+        headers: ["Barcode", "Article",
+          ...perShop.flatMap((s) => [`${s.shop} old (${short(s.prev_date)})`, `${s.shop} current (${short(s.curr_date)})`, `${s.shop} difference`]),
+          ...(multi ? ["All shops old", "All shops current", "All shops difference"] : [])],
+        rows: [
+          ...matrix.map((a) => [a.barcode ?? "", a.article ?? "",
+            ...perShop.flatMap((s) => trio(a.cells[s.id])), ...(multi ? trio(rowTotal(a.cells)) : [])]),
+          ["", "Total", ...perShop.flatMap((s) => trio(colTotal(s.id))), ...(multi ? trio(grand) : [])],
+        ],
+      };
+    }
     if (view === "shops") return {
       title: `Carrefour — shops — ${asOfLabel}`,
       headers: ["Shop", "Previous report", "Current report", "Previous stock", "Sent from warehouse", "Current stock", "Sold", "Sold value"],
@@ -205,6 +251,7 @@ export default function CarrefourPage() {
         )}
 
         <div className="flex flex-wrap items-center gap-2">
+          <button onClick={() => setView("matrix")} className={chip(view === "matrix")}>Shop by shop</button>
           <button onClick={() => setView("shops")} className={chip(view === "shops")}>Shops</button>
           <button onClick={() => setView("articles")} className={chip(view === "articles")}>Articles</button>
           <button onClick={() => setView("warehouse")} className={chip(view === "warehouse")}>Compare with warehouse</button>
@@ -215,11 +262,16 @@ export default function CarrefourPage() {
             {shops.map((s) => <option key={s.branch_id} value={s.branch_id}>{s.name}{s.reports ? "" : " (no report)"}</option>)}
           </select>
           <label className="flex items-center gap-1.5 text-[12px] text-hint">
-            as of
+            old report
+            <input type="date" value={from} max={asOf || today()} onChange={(e) => setFrom(e.target.value)}
+              className="rounded-full border border-line bg-surface px-3 py-1.5 text-[12px] text-ink outline-none" />
+          </label>
+          <label className="flex items-center gap-1.5 text-[12px] text-hint">
+            current report
             <input type="date" value={asOf} max={today()} onChange={(e) => setAsOf(e.target.value)}
               className="rounded-full border border-line bg-surface px-3 py-1.5 text-[12px] text-ink outline-none" />
           </label>
-          {asOf && <button onClick={() => setAsOf("")} className={chip(false)}>Latest</button>}
+          {(asOf || from) && <button onClick={() => { setAsOf(""); setFrom(""); }} className={chip(false)}>Latest two</button>}
           <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search article, barcode, shop…"
             className="w-full max-w-xs rounded-xl2 border border-line bg-surface px-3 py-2 text-[13px] outline-none focus:border-ink/30" />
         </div>
@@ -248,6 +300,54 @@ export default function CarrefourPage() {
             <p className="mx-auto mt-1 max-w-md text-[13px] text-muted">
               Upload Carrefour&apos;s stock file with the date it is for. The second upload is where sold figures start.
             </p>
+          </div>
+        )}
+
+        {/* ─────────── SHOP BY SHOP ─────────── */}
+        {!loading && rows.length > 0 && view === "matrix" && (
+          <div className="overflow-hidden rounded-card border border-line bg-surface">
+            <p className="border-b border-line bg-panel/50 px-4 py-2 text-[12px] text-ink/70">
+              For each shop: <b>old</b> stock on the earlier report, <b>current</b> stock on the later one, and the
+              <b> difference</b> (old − current). Positive = stock went down; <span className="text-amber-strong font-semibold">negative</span> = stock went up (restocked).
+            </p>
+            <div className="max-h-[70vh] overflow-auto"><table className="w-full text-left text-[12.5px]">
+              <thead className="sticky top-0 z-10 bg-surface">
+                <tr className="border-b border-line text-[11px] uppercase tracking-wide text-hint">
+                  <th rowSpan={2} className="sticky left-0 z-20 min-w-[240px] border-r border-line bg-surface px-3 py-2 font-bold">Article</th>
+                  {perShop.map((s) => <th key={s.id} colSpan={3} className="border-r border-line px-3 py-2 text-center font-bold text-ink">{s.shop}</th>)}
+                  {perShop.length > 1 && <th colSpan={3} className="bg-panel/60 px-3 py-2 text-center font-bold text-ink">All shops</th>}
+                </tr>
+                <tr className="border-b border-line text-[10.5px] uppercase tracking-wide text-hint">
+                  {perShop.flatMap((s) => [
+                    <th key={s.id + "o"} className="whitespace-nowrap px-2 py-1.5 text-right font-bold">Old<span className="block normal-case font-normal">{short(s.prev_date)}</span></th>,
+                    <th key={s.id + "c"} className="whitespace-nowrap px-2 py-1.5 text-right font-bold">Current<span className="block normal-case font-normal">{short(s.curr_date)}</span></th>,
+                    <th key={s.id + "d"} className="whitespace-nowrap border-r border-line px-2 py-1.5 text-right font-bold text-ink">Diff</th>,
+                  ])}
+                  {perShop.length > 1 && <>
+                    <th className="whitespace-nowrap bg-panel/60 px-2 py-1.5 text-right font-bold">Old</th>
+                    <th className="whitespace-nowrap bg-panel/60 px-2 py-1.5 text-right font-bold">Current</th>
+                    <th className="whitespace-nowrap bg-panel/60 px-2 py-1.5 text-right font-bold text-ink">Diff</th></>}
+                </tr>
+              </thead>
+              <tbody>
+                {matrix.map((a) => (
+                  <tr key={a.key} className="border-b border-line/60 last:border-0 hover:bg-panel/30">
+                    <td className="sticky left-0 border-r border-line bg-surface px-3 py-2">
+                      <span className="font-semibold text-ink">{a.article ?? "—"}</span>
+                      <span className="block font-mono text-[10.5px] text-hint">{a.barcode}</span>
+                    </td>
+                    {perShop.map((s) => <Trio key={s.id} x={a.cells[s.id]} />)}
+                    {perShop.length > 1 && <Trio x={rowTotal(a.cells)} shade />}
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot className="sticky bottom-0 bg-panel"><tr className="border-t border-line font-bold text-ink">
+                <td className="sticky left-0 border-r border-line bg-panel px-3 py-2">Total · {matrix.length} articles</td>
+                {perShop.map((s) => <Trio key={s.id} x={colTotal(s.id)} bold />)}
+                {perShop.length > 1 && <Trio x={grand} shade bold />}
+              </tr></tfoot>
+            </table></div>
+            {matrix.length === 0 && <p className="p-6 text-center text-[13px] text-muted">Nothing matches these filters.</p>}
           </div>
         )}
 
@@ -355,6 +455,22 @@ export default function CarrefourPage() {
           </div>
         )}
       </div>
+    </>
+  );
+}
+
+/* Old · current · difference for one shop, one article. */
+function Trio({ x, shade, bold }: { x?: Cell; shade?: boolean; bold?: boolean }) {
+  const d = diffOf(x);
+  const base = `px-2 py-2 text-right tnum ${shade ? "bg-panel/40" : ""} ${bold ? "font-bold" : ""}`;
+  if (!x) return <><td className={`${base} text-hint`}>·</td><td className={`${base} text-hint`}>·</td><td className={`${base} border-r border-line text-hint`}>·</td></>;
+  return (
+    <>
+      <td className={`${base} text-ink/70`}>{n(x.p)}</td>
+      <td className={`${base} text-ink`}>{n(x.c)}</td>
+      <td className={`${base} border-r border-line font-bold ${d == null || d === 0 ? "text-hint" : d < 0 ? "text-amber-strong" : "text-ink"}`}>
+        {d == null ? "—" : d > 0 ? n(d) : d < 0 ? "−" + n(-d) : "0"}
+      </td>
     </>
   );
 }
