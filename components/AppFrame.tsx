@@ -57,6 +57,17 @@ function FrameContent({ children }: { children: React.ReactNode }) {
   );
 }
 
+/* H306 (29 Oct 2026) — ON A PHONE, A COLD APP OPEN LANDS ON "/".
+   Zeeshan uses the ERP as a PWA on his phone. The last page he was on when he
+   closed the app would reload on reopen — he wanted the department chooser
+   every time instead, so he can pick where to go without first navigating out
+   of yesterday's screen. Desktop keeps the last-visited page.
+
+   This is a module-level flag so it survives client-side navigations but is
+   lost on a full page reload (cold open). SessionStorage would do the same
+   thing less reliably (private browsing throws). */
+let coldOpenHandled = false;
+
 export default function AppFrame({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
@@ -89,6 +100,19 @@ export default function AppFrame({ children }: { children: React.ReactNode }) {
       setAuthReady(true);
     });
   }, [isLogin, router]);
+
+  /* Cold-open redirect: once per fresh page load, on a phone, if the user
+     landed somewhere other than "/", send them to the department chooser. */
+  useEffect(() => {
+    if (coldOpenHandled) return;
+    if (!authReady || isLogin) return;
+    if (pathname === "/") { coldOpenHandled = true; return; }
+    coldOpenHandled = true;
+    if (typeof window === "undefined") return;
+    try {
+      if (window.matchMedia("(max-width: 767px)").matches) router.replace("/");
+    } catch { /* no matchMedia (very old browsers) — skip silently */ }
+  }, [authReady, isLogin, pathname, router]);
 
   if (isLogin) return <>{children}</>;
   if (!authReady) return null;
