@@ -42,8 +42,6 @@ type Row = {
   prev_qty: number | null; sent_qty: number | null; curr_qty: number; sold_qty: number | null;
   retail_price: number | null; sold_value: number | null;
 };
-type WRow = { branch_id: string; shop: string; report_date: string | null; item_id: string | null; barcode: string | null;
-  article: string | null; sent_qty: number; in_shop: number | null; first_sent: string | null; last_sent: string | null; invoices: number };
 type Shop = { branch_id: string; name: string; last_report: string | null; reports: number };
 type View = "matrix" | "shops" | "articles" | "warehouse";
 type Only = "all" | "sold" | "restocked" | "out" | "unknown" | "both" | "whonly" | "cfonly";
@@ -67,8 +65,6 @@ export default function CarrefourPage() {
   const [stock, setStock] = useState<Record<string, number>>({});
   const [witems, setWitems] = useState<WItem[]>([]);
   const [sortBy, setSortBy] = useState<"wh" | "cf" | "name">("wh");
-  const [wrows, setWrows] = useState<WRow[]>([]);
-  const [wErr, setWErr] = useState("");
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
 
@@ -82,15 +78,11 @@ export default function CarrefourPage() {
   const load = useCallback(async () => {
     if (!supabase || !isSupabaseConfigured) { setLoading(false); return; }
     setLoading(true); setErr("");
-    const [s, c, w, vw] = await Promise.all([
+    const [s, c, w] = await Promise.all([
       supabase.rpc("carrefour_shops"),
       supabase.rpc("carrefour_compare", { p_branch: null, p_as_of: asOf || null, p_from: from || null }),
       supabase.from("v_khana_stock").select("item_id, name, barcode, manual_barcode, quantity, is_active"),
-      supabase.rpc("carrefour_vs_warehouse", { p_as_of: asOf || null }),
     ]);
-    /* The warehouse view has its own error so the rest of the page still works. */
-    setWErr(vw.error ? vw.error.message : "");
-    setWrows(((vw.data ?? []) as WRow[]).map((r) => ({ ...r, sent_qty: num(r.sent_qty), in_shop: r.in_shop == null ? null : num(r.in_shop) })));
     if (s.error || c.error) { setErr((s.error ?? c.error)!.message); setLoading(false); return; }
     setShops((s.data ?? []) as Shop[]);
     setRows(((c.data ?? []) as Row[]).map((r) => ({
@@ -164,19 +156,20 @@ export default function CarrefourPage() {
      report — side by side, biggest first. */
   const wShops = useMemo(() => {
     const m = new Map<string, { id: string; shop: string; report_date: string | null }>();
-    wrows.forEach((r) => { if (r.report_date && (!shopId || r.branch_id === shopId)) m.set(r.branch_id, { id: r.branch_id, shop: r.shop, report_date: r.report_date }); });
+    rows.forEach((r) => { if (r.curr_date && (!shopId || r.branch_id === shopId)) m.set(r.branch_id, { id: r.branch_id, shop: r.shop, report_date: r.curr_date }); });
     return [...m.values()].sort((a, b) => a.shop.localeCompare(b.shop));
-  }, [wrows, shopId]);
+  }, [rows, shopId]);
   const wTable = useMemo(() => {
     const m = new Map<string, { key: string; item_id: string | null; article: string | null; barcode: string | null; wh: number | null; at: Record<string, number> }>();
     witems.forEach((i) => m.set(i.item_id, { key: i.item_id, item_id: i.item_id, article: i.name,
       barcode: i.manual_barcode || i.barcode, wh: i.quantity, at: {} }));
     const ids = new Set(wShops.map((s) => s.id));
-    wrows.forEach((r) => {
-      if (!ids.has(r.branch_id) || r.in_shop == null) return;
+    /* Each shop's stock on its latest report — the same rows the other tabs use. */
+    rows.forEach((r) => {
+      if (!ids.has(r.branch_id)) return;
       const k = r.item_id ?? "bc:" + r.barcode;
       const x = m.get(k) ?? { key: k, item_id: r.item_id, article: r.article, barcode: r.barcode, wh: r.item_id ? 0 : null, at: {} };
-      x.at[r.branch_id] = (x.at[r.branch_id] ?? 0) + r.in_shop;
+      x.at[r.branch_id] = (x.at[r.branch_id] ?? 0) + r.curr_qty;
       m.set(k, x);
     });
     const t = q.trim().toLowerCase();
@@ -192,7 +185,7 @@ export default function CarrefourPage() {
       return true;
     }).sort((a, b) => sortBy === "name" ? String(a.article).localeCompare(String(b.article))
       : sortBy === "cf" ? b.cf - a.cf || num(b.wh) - num(a.wh) : num(b.wh) - num(a.wh) || b.cf - a.cf);
-  }, [witems, wrows, wShops, q, only, sortBy]);
+  }, [witems, rows, wShops, q, only, sortBy]);
   const wTot = useMemo(() => ({
     wh: wTable.reduce((a, x) => a + num(x.wh), 0),
     cf: wTable.reduce((a, x) => a + x.cf, 0),
@@ -473,7 +466,6 @@ export default function CarrefourPage() {
                 {([["wh", "Warehouse ↓"], ["cf", "Carrefour ↓"], ["name", "A–Z"]] as ["wh" | "cf" | "name", string][]).map(([k, l]) =>
                   <button key={k} onClick={() => setSortBy(k)} className={chip(sortBy === k)}>{l}</button>)}
               </span>
-              {wErr && <span className="w-full font-semibold text-danger">{wErr}</span>}
               {witems.length === 0 && <span className="w-full font-semibold text-danger">Warehouse stock is not visible to you — it needs the warehouse view permission.</span>}
             </div>
             <div className="max-h-[70vh] overflow-auto"><table className="w-full text-left text-[12.5px]">
