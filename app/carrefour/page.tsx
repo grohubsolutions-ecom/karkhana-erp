@@ -56,6 +56,27 @@ const short = (v: string | null) => v ? new Date(v + "T00:00:00").toLocaleDateSt
 type Cell = { p: number | null; c: number };
 const diffOf = (x?: Cell) => x == null || x.p == null ? null : x.p - x.c;
 
+/* Supabase returns at most 1,000 rows per request. One Carrefour file is
+   ~200 lines × 7 shops = 1,400 rows, so the comparison is read in pages of
+   1,000 until an empty page comes back — in a fixed order (shop, barcode,
+   item), so no row is read twice or skipped between pages. Each next page
+   starts where the rows received end, so a server that caps lower than
+   1,000 is still read to the end. (29 Oct: without this, Packages Lahore
+   and part of Lucky 1 never arrived.) */
+async function compareAll(args: Record<string, unknown>) {
+  const PAGE = 1000;
+  const all: Row[] = [];
+  for (let guard = 0; guard < 200; guard++) {
+    const { data, error } = await supabase!.rpc("carrefour_compare", args)
+      .order("branch_id").order("barcode").order("item_id")
+      .range(all.length, all.length + PAGE - 1);
+    if (error) return { data: null, error };
+    if (!data || data.length === 0) break;
+    all.push(...(data as Row[]));
+  }
+  return { data: all, error: null };
+}
+
 export default function CarrefourPage() {
   const { can } = usePermissions();
   const canUpload = can(["carrefour.upload"]);
@@ -83,7 +104,7 @@ export default function CarrefourPage() {
     setLoading(true); setErr("");
     const [s, c, w, al] = await Promise.all([
       supabase.rpc("carrefour_shops"),
-      supabase.rpc("carrefour_compare", { p_branch: null, p_as_of: asOf || null, p_from: from || null }),
+      compareAll({ p_branch: null, p_as_of: asOf || null, p_from: from || null }),
       supabase.from("v_khana_stock").select("item_id, name, barcode, manual_barcode, quantity, is_active"),
       supabase.from("carrefour_shop_aliases").select("alias, branch_id"),
     ]);
