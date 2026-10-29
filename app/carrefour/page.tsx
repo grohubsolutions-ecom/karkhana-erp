@@ -65,6 +65,9 @@ export default function CarrefourPage() {
   const [stock, setStock] = useState<Record<string, number>>({});
   const [witems, setWitems] = useState<WItem[]>([]);
   const [sortBy, setSortBy] = useState<"wh" | "cf" | "name">("wh");
+  /* Carrefour's own short code for each shop (GUJ, WTC, EMP …), as it heads
+     the columns of Carrefour's Excel — used for column headings. */
+  const [codes, setCodes] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
 
@@ -78,11 +81,19 @@ export default function CarrefourPage() {
   const load = useCallback(async () => {
     if (!supabase || !isSupabaseConfigured) { setLoading(false); return; }
     setLoading(true); setErr("");
-    const [s, c, w] = await Promise.all([
+    const [s, c, w, al] = await Promise.all([
       supabase.rpc("carrefour_shops"),
       supabase.rpc("carrefour_compare", { p_branch: null, p_as_of: asOf || null, p_from: from || null }),
       supabase.from("v_khana_stock").select("item_id, name, barcode, manual_barcode, quantity, is_active"),
+      supabase.from("carrefour_shop_aliases").select("alias, branch_id"),
     ]);
+    {
+      const m: Record<string, string> = {};
+      ((al.data ?? []) as { alias: string; branch_id: string }[])
+        .filter((a) => /^[A-Za-z0-9]{2,5}$/.test(a.alias.trim()))
+        .forEach((a) => { const c = a.alias.trim().toUpperCase(); if (!m[a.branch_id] || c.length < m[a.branch_id].length) m[a.branch_id] = c; });
+      setCodes(m);
+    }
     if (s.error || c.error) { setErr((s.error ?? c.error)!.message); setLoading(false); return; }
     setShops((s.data ?? []) as Shop[]);
     setRows(((c.data ?? []) as Row[]).map((r) => ({
@@ -200,6 +211,7 @@ export default function CarrefourPage() {
     value: lines.reduce((a, r) => a + num(r.sold_value), 0),
   }), [lines]);
 
+  const code = (id: string, name: string) => codes[id] ?? name;
   const shopName = shopId ? shops.find((s) => s.branch_id === shopId)?.name ?? "" : "All shops";
   const asOfLabel = (from ? `from ${day(from)} ` : "") + (asOf ? `to ${day(asOf)}` : "latest reports");
 
@@ -207,11 +219,17 @@ export default function CarrefourPage() {
     if (view === "matrix") {
       const multi = perShop.length > 1;
       const trio = (x: Cell | undefined) => x == null ? ["", "", ""] : [x.p ?? "", x.c, diffOf(x) ?? ""];
+      const sameDates = perShop.length > 0 && perShop.every((s) => s.prev_date === perShop[0].prev_date && s.curr_date === perShop[0].curr_date);
       return {
-        title: `Carrefour — shop by shop — ${shopName} — ${asOfLabel}`,
+        /* The dates go in the title when every shop compares the same two
+           reports, so the column headings stay short: 24 columns must fit. */
+        title: `Carrefour — shop by shop — ${shopName} — ${sameDates
+          ? `old ${day(perShop[0].prev_date)} vs current ${day(perShop[0].curr_date)}` : asOfLabel}`,
+        look: { bold: [0], wide: [1], left: [1] },
         headers: ["Barcode", "Article",
-          ...perShop.flatMap((s) => [`${s.shop} old (${short(s.prev_date)})`, `${s.shop} current (${short(s.curr_date)})`, `${s.shop} difference`]),
-          ...(multi ? ["All shops old", "All shops current", "All shops difference"] : [])],
+          ...perShop.flatMap((s) => { const c = code(s.id, s.shop); return sameDates ? [`${c} old`, `${c} current`, `${c} diff`]
+            : [`${c} old ${short(s.prev_date)}`, `${c} current ${short(s.curr_date)}`, `${c} diff`]; }),
+          ...(multi ? ["All shops old", "All shops current", "All shops diff"] : [])],
         rows: [
           ...matrix.map((a) => [a.barcode ?? "", a.article ?? "",
             ...perShop.flatMap((s) => trio(a.cells[s.id])), ...(multi ? trio(rowTotal(a.cells)) : [])]),
@@ -224,9 +242,11 @@ export default function CarrefourPage() {
       headers: ["Shop", "Previous report", "Current report", "Previous stock", "Sent from warehouse", "Current stock", "Sold", "Sold value"],
       rows: perShop.map((s) => [s.shop, day(s.prev_date), day(s.curr_date), s.prev ?? "", s.sent ?? "", s.curr, s.sold ?? "", s.value == null ? "" : Math.round(s.value)]),
     };
+    const sameW = wShops.length > 0 && wShops.every((s) => s.report_date === wShops[0].report_date);
     if (view === "warehouse") return {
-      title: `Warehouse vs Carrefour — ${shopName} — ${asOf ? "as of " + day(asOf) : "latest reports"}`,
-      headers: ["Barcode", "Article", "Warehouse", ...wShops.map((s) => `${s.shop} (${short(s.report_date)})`), "Carrefour total", "Warehouse + Carrefour"],
+      title: `Warehouse (WH) vs Carrefour (CR) — ${shopName} — ${sameW ? "CR report " + day(wShops[0].report_date) : asOf ? "as of " + day(asOf) : "latest reports"}`,
+      look: { bold: [0], wide: [1], left: [1] },
+      headers: ["Barcode", "Article", "WH", ...wShops.map((s) => sameW ? code(s.id, s.shop) : `${code(s.id, s.shop)} ${short(s.report_date)}`), "CR total", "WH + CR"],
       rows: [
         ...wTable.map((x) => [x.barcode ?? "", x.article ?? "", x.wh ?? "", ...wShops.map((s) => x.at[s.id] ?? 0), x.cf, num(x.wh) + x.cf]),
         ["", "Total", wTot.wh, ...wShops.map((s) => wTot.at[s.id]), wTot.cf, wTot.wh + wTot.cf],
@@ -234,6 +254,7 @@ export default function CarrefourPage() {
     };
     return {
       title: `Carrefour — ${shopName} — ${asOfLabel}`,
+      look: { bold: [1], wide: [2], left: [2] },
       headers: ["Shop", "Barcode", "Article", "Previous", "Sent", "Current", "Sold", "Price", "Sold value"],
       rows: lines.map((r) => [r.shop, r.barcode ?? "", r.article ?? "", r.prev_qty ?? "", r.sent_qty ?? "", r.curr_qty,
         r.sold_qty ?? "", r.retail_price ?? "", r.sold_value == null ? "" : Math.round(r.sold_value)]),
@@ -348,7 +369,7 @@ export default function CarrefourPage() {
               <thead className="sticky top-0 z-10 bg-surface">
                 <tr className="border-b border-line text-[11px] uppercase tracking-wide text-hint">
                   <th rowSpan={2} className="sticky left-0 z-20 min-w-[240px] border-r border-line bg-surface px-3 py-2 font-bold">Article</th>
-                  {perShop.map((s) => <th key={s.id} colSpan={3} className="border-r border-line px-3 py-2 text-center font-bold text-ink">{s.shop}</th>)}
+                  {perShop.map((s) => <th key={s.id} colSpan={3} title={s.shop} className="border-r border-line px-3 py-2 text-center font-bold text-ink">{code(s.id, s.shop)}</th>)}
                   {perShop.length > 1 && <th colSpan={3} className="bg-panel/60 px-3 py-2 text-center font-bold text-ink">All shops</th>}
                 </tr>
                 <tr className="border-b border-line text-[10.5px] uppercase tracking-wide text-hint">
@@ -397,7 +418,7 @@ export default function CarrefourPage() {
               <tbody>
                 {perShop.map((s) => (
                   <tr key={s.id} className="border-b border-line/60 last:border-0 hover:bg-panel/40">
-                    <td className={`${td} font-semibold text-ink`}>{s.shop}<span className="block text-[11px] font-normal text-hint">{s.articles} articles</span></td>
+                    <td className={`${td} font-semibold text-ink`}>{s.shop}{codes[s.id] && <span className="ml-1.5 font-mono text-[11px] text-hint">{codes[s.id]}</span>}<span className="block text-[11px] font-normal text-hint">{s.articles} articles</span></td>
                     <td className={`${td} text-ink/75`}>{s.prev_date ? <>{day(s.prev_date)} → <b>{day(s.curr_date)}</b></> : <><b>{day(s.curr_date)}</b> <span className="text-hint">· first report</span></>}</td>
                     <td className={tdr}>{n(s.prev)}</td><td className={tdr}>{n(s.sent)}</td>
                     <td className={`${tdr} font-semibold`}>{n(s.curr)}</td>
@@ -461,9 +482,9 @@ export default function CarrefourPage() {
         {!loading && view === "warehouse" && (
           <div className="overflow-hidden rounded-card border border-line bg-surface">
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-line bg-panel/50 px-4 py-2 text-[12px] text-ink/70">
-              <span><b className="text-ink">Warehouse {n(wTot.wh)}</b> pcs · <b className="text-ink">Carrefour {n(wTot.cf)}</b> pcs ({wShops.length} shop{wShops.length === 1 ? "" : "s"}, latest report each) · {wTable.length} articles</span>
+              <span><b className="text-ink">WH (warehouse) {n(wTot.wh)}</b> pcs · <b className="text-ink">CR (Carrefour) {n(wTot.cf)}</b> pcs ({wShops.length} shop{wShops.length === 1 ? "" : "s"}, latest report each) · {wTable.length} articles</span>
               <span className="ml-auto flex items-center gap-1">sort
-                {([["wh", "Warehouse ↓"], ["cf", "Carrefour ↓"], ["name", "A–Z"]] as ["wh" | "cf" | "name", string][]).map(([k, l]) =>
+                {([["wh", "WH ↓"], ["cf", "CR ↓"], ["name", "A–Z"]] as ["wh" | "cf" | "name", string][]).map(([k, l]) =>
                   <button key={k} onClick={() => setSortBy(k)} className={chip(sortBy === k)}>{l}</button>)}
               </span>
               {witems.length === 0 && <span className="w-full font-semibold text-danger">Warehouse stock is not visible to you — it needs the warehouse view permission.</span>}
@@ -471,10 +492,10 @@ export default function CarrefourPage() {
             <div className="max-h-[70vh] overflow-auto"><table className="w-full text-left text-[12.5px]">
               <thead className="sticky top-0 z-10 bg-surface"><tr className="border-b border-line text-[11px] uppercase tracking-wide text-hint">
                 <th className="sticky left-0 z-20 min-w-[240px] border-r border-line bg-surface px-3 py-2 font-bold">Article</th>
-                <th className="whitespace-nowrap border-r border-line bg-periwinkle-soft/60 px-3 py-2 text-right font-bold text-ink">Warehouse</th>
-                {wShops.map((s) => <th key={s.id} className="whitespace-nowrap px-3 py-2 text-right font-bold">{s.shop}<span className="block normal-case font-normal">{short(s.report_date)}</span></th>)}
-                <th className="whitespace-nowrap border-l border-line bg-panel/60 px-3 py-2 text-right font-bold text-ink">Carrefour total</th>
-                <th className="whitespace-nowrap bg-panel/60 px-3 py-2 text-right font-bold">Warehouse + Carrefour</th>
+                <th className="whitespace-nowrap border-r border-line bg-periwinkle-soft/60 px-3 py-2 text-right font-bold text-ink">WH</th>
+                {wShops.map((s) => <th key={s.id} title={s.shop} className="whitespace-nowrap px-3 py-2 text-right font-bold">{code(s.id, s.shop)}<span className="block normal-case font-normal">{short(s.report_date)}</span></th>)}
+                <th className="whitespace-nowrap border-l border-line bg-panel/60 px-3 py-2 text-right font-bold text-ink">CR total</th>
+                <th className="whitespace-nowrap bg-panel/60 px-3 py-2 text-right font-bold">WH + CR</th>
               </tr></thead>
               <tbody>
                 {wTable.map((x) => (

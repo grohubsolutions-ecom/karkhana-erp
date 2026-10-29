@@ -17,7 +17,18 @@
  * Numbers line up on the right in PDF and print, as they do in Excel, so
  * units sit under units and a column can be run down by eye.
  */
-export type ExportTable = { title: string; headers: string[]; rows: (string | number | null | undefined)[][] };
+export type ExportTable = { title: string; headers: string[]; rows: (string | number | null | undefined)[][]; look?: ExportLook };
+
+/* OPTIONAL LOOK for one report — column numbers, 0-based. A table without it
+   prints exactly as before; FS Traders' classic layout ignores it.
+     bold   a code that has to be read off the paper (a barcode): bold and a
+            size larger, in print, PDF and Excel
+     wide   a long name: one line, never wrapped or trimmed — its column is as
+            wide as the longest name, and the other columns give way instead
+     left   text read from the left (a name) rather than centred
+   With a look, column HEADINGS may break onto two lines, so a shop name in
+   the heading does not make its column of small numbers wide. (29 Oct) */
+export type ExportLook = { bold?: number[]; wide?: number[]; left?: number[] };
 
 /* TWO LAYOUTS.
  *
@@ -90,7 +101,7 @@ export function exportCSV({ title, headers, rows }: ExportTable) {
  * is a barcode, not a number: it goes in as text, so 2000003127726 is never
  * shown as 2.00E+12 and a code with a leading zero keeps it.
  */
-export function exportExcel({ title, headers, rows }: ExportTable) {
+export function exportExcel({ title, headers, rows, look }: ExportTable) {
   const xml = (v: string) => v
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "")
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -105,7 +116,17 @@ export function exportExcel({ title, headers, rows }: ExportTable) {
      are stored as numbers and only DISPLAYED as "Rs 2,797,746" or "12%", so
      a column of them can be totalled in Excel; as text it could not. */
   const codes = codeColumns(headers, rows);
+  const lk = !classic() && look ? look : null;
   const cellXml = (v: unknown, ref: string, ci: number) => {
+    /* Look: 10 = bold, larger code; 11 = long name, left, one line. */
+    if (lk?.bold?.includes(ci)) {
+      const t = cell(v);
+      return `<c r="${ref}" t="inlineStr" s="10"><is><t xml:space="preserve">${xml(t)}</t></is></c>`;
+    }
+    if (lk?.wide?.includes(ci) && typeof v !== "number") {
+      const t = cell(v);
+      return `<c r="${ref}" t="inlineStr" s="11"><is><t xml:space="preserve">${xml(t)}</t></is></c>`;
+    }
     if (codes[ci]) {
       const t = cell(v);
       return `<c r="${ref}" t="inlineStr" s="3"><is><t xml:space="preserve">${xml(t)}</t></is></c>`;
@@ -137,8 +158,14 @@ export function exportExcel({ title, headers, rows }: ExportTable) {
   /* Compact: a column is as wide as its longest entry and no wider than 42
      characters — past that a name wraps inside its cell instead of pushing
      every other column off the sheet. */
-  const widths = headers.map((h, ci) => Math.min(compact ? 42 : 60, Math.max(compact ? 6 : 8,
-    String(h).length + 2, ...rows.map((r) => cell(r[ci]).length + 2))));
+  const widths = headers.map((h, ci) => {
+    const longest = Math.max(...rows.map((r) => cell(r[ci]).length), 0);
+    if (lk?.wide?.includes(ci)) return Math.min(90, Math.max(12, longest + 3));
+    if (lk?.bold?.includes(ci)) return Math.max(12, Math.round(longest * 1.25) + 3);
+    /* With a look the heading may wrap, so it does not set the width. */
+    const head = lk ? Math.min(String(h).length + 2, 14) : String(h).length + 2;
+    return Math.min(compact ? 42 : 60, Math.max(compact ? 6 : 8, head, longest + 2));
+  });
   const narrow = widths.reduce((a, b) => a + b, 0) <= 95;
   const al = compact ? `<alignment horizontal="center" vertical="center" wrapText="1"/>` : `<alignment vertical="top"/>`;
   const alHead = compact ? `<alignment horizontal="center" vertical="center" wrapText="1"/>` : `<alignment vertical="center"/>`;
@@ -172,14 +199,14 @@ export function exportExcel({ title, headers, rows }: ExportTable) {
     `<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">` +
     `<numFmts count="2"><numFmt numFmtId="164" formatCode="&quot;Rs &quot;#,##0"/>` +
     `<numFmt numFmtId="165" formatCode="&quot;Rs &quot;#,##0.00"/></numFmts>` +
-    `<fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts>` +
+    `<fonts count="3"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="13"/><name val="Calibri"/></font></fonts>` +
     `<fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill>` +
     `<fill><patternFill patternType="solid"><fgColor rgb="FFE7E5E4"/><bgColor indexed="64"/></patternFill></fill></fills>` +
     `<borders count="2"><border><left/><right/><top/><bottom/><diagonal/></border>` +
     `<border><left style="thin"><color rgb="FF44403C"/></left><right style="thin"><color rgb="FF44403C"/></right>` +
     `<top style="thin"><color rgb="FF44403C"/></top><bottom style="thin"><color rgb="FF44403C"/></bottom><diagonal/></border></borders>` +
     `<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>` +
-    `<cellXfs count="10">` +
+    `<cellXfs count="12">` +
     `<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>` +
     `<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1">${al}</xf>` +
     `<xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1">${alHead}</xf>` +
@@ -190,6 +217,8 @@ export function exportExcel({ title, headers, rows }: ExportTable) {
     `<xf numFmtId="165" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1" applyAlignment="1">${al}</xf>` +
     `<xf numFmtId="9" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1" applyAlignment="1">${al}</xf>` +
     `<xf numFmtId="10" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1" applyAlignment="1">${al}</xf>` +
+    `<xf numFmtId="49" fontId="2" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>` +
+    `<xf numFmtId="0" fontId="1" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="left" vertical="center"/></xf>` +
     `</cellXfs>` +
     `<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>` +
     `</styleSheet>`;
@@ -302,7 +331,7 @@ const textW = (t: string, font: "F1" | "F2", size: number) =>
     return a + (c >= 32 && c <= 126 ? HELV[font][c - 32] : 556);
   }, 0) / 1000 * size;
 
-export function exportPDF({ title, headers, rows }: ExportTable) {
+export function exportPDF({ title, headers, rows, look }: ExportTable) {
   /* A real PDF, written by hand and downloaded — not the print dialog wearing
      a PDF label. Landscape A4, Helvetica, and a ruled table: a shaded header,
      a line under every row, a line between every column, a box round it all.
@@ -311,8 +340,14 @@ export function exportPDF({ title, headers, rows }: ExportTable) {
   const compact = !classic();
   const M = 28;                               // page margin, points
   const PAD = compact ? 5 : 3.5;              // text inset inside each cell
-  const RH = 13, HH = 15;                     // row and header heights
-  const FS = 8;                               // font size, body and header
+  const lk = compact && look ? look : null;
+  const isBold = (ci: number) => !!lk?.bold?.includes(ci);
+  const isWide = (ci: number) => !!lk?.wide?.includes(ci);
+  const isLeft = (ci: number) => !!lk?.left?.includes(ci);
+  let FS = 8;                                 // font size, body and header (a wide report may shrink it)
+  const BIG = 1.6;                            // a bold code column prints this many points larger
+  let RH = lk ? 14 : 13;                      // row height
+  let HH = lk ? 24 : 15;                      // header height (two lines with a look)
   const right = numericColumns(headers, rows);
 
   /* PDF base fonts carry Latin-1 only. The marks this app uses most become
@@ -340,14 +375,64 @@ export function exportPDF({ title, headers, rows }: ExportTable) {
   const hdr = headers.map((h) => ascii(h).toUpperCase());
   const codes = codeColumns(headers, rows);
   const body = rows.map((r) => headers.map((_, ci) => ascii(display(r[ci], codes[ci]))));
-  const natural = headers.map((_, ci) => Math.max(34,
-    textW(hdr[ci], "F2", FS) + PAD * 2,
-    ...body.map((r) => textW(r[ci], "F1", FS) + PAD * 2)));
-  const total = natural.reduce((a, b) => a + b, 0);
+  const bodyFont = (ci: number): "F1" | "F2" => (isBold(ci) ? "F2" : "F1");
+  const bodySize = (ci: number) => (isBold(ci) ? FS + BIG : FS);
+  /* With a look, a heading wraps word by word to the width of what is under
+     it (never narrower than its longest word), up to three lines — so
+     "EMPORIUM LAHORE (26 OCT)" sits over a narrow column of numbers instead
+     of making that column as wide as the shop's name. */
+  const bodyW = (ci: number) => Math.max(0, ...body.map((r) => textW(r[ci], bodyFont(ci), bodySize(ci))));
+  let headLines: string[][] = hdr.map((h) => [h]);
+  const wrapHeads = () => {
+    headLines = hdr.map((h, ci) => {
+      if (!lk || isWide(ci) || !h.includes(" ")) return [h];
+      const words = h.split(" ");
+      const room = Math.max(bodyW(ci), ...words.map((w) => textW(w, "F2", FS)));
+      const out: string[] = [];
+      words.forEach((w) => {
+        const last = out[out.length - 1];
+        if (last != null && textW(last + " " + w, "F2", FS) <= room + 0.01) out[out.length - 1] = last + " " + w;
+        else out.push(w);
+      });
+      while (out.length > 4) { const tail = out.pop()!; out[out.length - 1] += " " + tail; }
+      return out;
+    });
+  };
+  const naturalAt = () => headers.map((_, ci) => Math.max(lk ? 26 : 34,
+    ...headLines[ci].map((l) => textW(l, "F2", FS) + PAD * 2),
+    bodyW(ci) + PAD * 2));
+  wrapHeads();
+  let natural = naturalAt();
+  let total = natural.reduce((a, b) => a + b, 0);
+  const headH = () => Math.max(15, Math.max(...headLines.map((l) => l.length)) * FS * 1.2 + 6);
+  if (lk) HH = headH();
+  /* A look never trims a name or a barcode: if the table is wider than an
+     A4 landscape page, the whole table is set smaller (not below 5.5 pt);
+     if it still does not fit, the page becomes A3 landscape — a printer set
+     to "fit to page" puts that on A4 — starting again from 8 pt. */
+  let pageL = 842;                            // landscape width in points: A4, or A3 for a very wide look
+  if (lk) {
+    const shrink = (floor: number) => {
+      for (let guard = 0; guard < 12 && total > pageL - M * 2 && FS > floor; guard++) {
+        FS = Math.max(floor, FS * Math.max(0.85, (pageL - M * 2) / total));
+        RH = Math.max(9, FS * 1.75);
+        wrapHeads(); natural = naturalAt(); total = natural.reduce((a, b) => a + b, 0);
+        HH = headH();
+      }
+    };
+    shrink(5.5);
+    /* A little over is taken up by the other columns narrowing (below);
+       a lot over goes to A3. */
+    if (total > (pageL - M * 2) * 1.08) {
+      pageL = 1191; FS = 8; RH = 14;
+      wrapHeads(); natural = naturalAt(); total = natural.reduce((a, b) => a + b, 0); HH = headH();
+      shrink(5.5);
+    }
+  }
   /* Compact: portrait when the table fits across it — more rows to a sheet,
      so a normal invoice or day's list is one page — landscape otherwise. */
   const portrait = compact && total <= 595 - M * 2;
-  const W = portrait ? 595 : 842, H = portrait ? 842 : 595;   // A4, points
+  const W = portrait ? 595 : pageL, H = portrait ? 842 : (pageL === 842 ? 595 : 842);   // A4 (or A3 landscape), points
   const usable = W - M * 2;
   let cw: number[];
   if (total <= usable) {
@@ -357,12 +442,17 @@ export function exportPDF({ title, headers, rows }: ExportTable) {
     cw = compact ? natural.slice() : natural.map((w) => w * (usable / total));
   } else {
     const FLOOR = 90;
-    const give = natural.map((w) => Math.max(0, w - FLOOR));
+    const give = natural.map((w, ci) => (isWide(ci) || isBold(ci) ? 0 : Math.max(0, w - FLOOR)));
     const giveTotal = give.reduce((a, b) => a + b, 0);
     const excess = total - usable;
+    /* Look: the barcode and the name keep their full width; only the other
+       columns narrow (a long heading may then be shortened, never a code). */
+    const keep = natural.reduce((a, w, ci) => a + (isWide(ci) || isBold(ci) ? w : 0), 0);
     cw = giveTotal >= excess
       ? natural.map((w, ci) => w - give[ci] * (excess / giveTotal))
-      : natural.map((w) => w * (usable / total));
+      : lk && keep < usable
+        ? natural.map((w, ci) => (isWide(ci) || isBold(ci) ? w : w * ((usable - keep) / (total - keep))))
+        : natural.map((w) => w * (usable / total));
   }
   const tableW = cw.reduce((a, b) => a + b, 0);
   const x0 = compact ? M + Math.max(0, (usable - tableW) / 2) : M;
@@ -377,12 +467,13 @@ export function exportPDF({ title, headers, rows }: ExportTable) {
 
   const text = (x: number, y: number, font: "F1" | "F2", size: number, s: string) =>
     `BT /${font} ${size} Tf ${x.toFixed(2)} ${y.toFixed(2)} Td (${pdfStr(s)}) Tj ET\n`;
-  const put = (v: string, ci: number, rowTop: number, h: number, font: "F1" | "F2") => {
-    const s = fit(v, cw[ci] - PAD * 2, font);
-    const y = rowTop - h / 2 - FS * 0.35;     // vertically centred in the row
-    const x = compact ? edge[ci] + (cw[ci] - textW(s, font, FS)) / 2
-            : right[ci] ? edge[ci + 1] - PAD - textW(s, font, FS) : edge[ci] + PAD;
-    return text(x, y, font, FS, s);
+  const put = (v: string, ci: number, rowTop: number, h: number, font: "F1" | "F2", size = FS, dy = 0, left = false) => {
+    const s = fit(v, cw[ci] - PAD * 2, font, size);
+    const y = rowTop - h / 2 - size * 0.35 + dy;   // vertically centred in the row
+    const x = left ? edge[ci] + PAD
+            : compact ? edge[ci] + (cw[ci] - textW(s, font, size)) / 2
+            : right[ci] ? edge[ci + 1] - PAD - textW(s, font, size) : edge[ci] + PAD;
+    return text(x, y, font, size, s);
   };
 
   const streams = pages.map((pageRows, pi) => {
@@ -397,10 +488,14 @@ export function exportPDF({ title, headers, rows }: ExportTable) {
 
     /* Header band first, so its text and the grid sit on top of it. */
     t += `0.88 g ${x0.toFixed(2)} ${(top - HH).toFixed(2)} ${tableW.toFixed(2)} ${HH} re f 0 g\n`;
-    hdr.forEach((h, ci) => { t += put(h, ci, top, HH, "F2"); });
+    headLines.forEach((ls, ci) => {
+      ls.forEach((l, li) => { t += put(l, ci, top, HH, "F2", FS, ((ls.length - 1) / 2 - li) * FS * 1.2, isLeft(ci)); });
+    });
     pageRows.forEach((r, ri) => {
       const rowTop = top - HH - ri * RH;
-      r.forEach((v, ci) => { t += put(v, ci, rowTop, RH, "F1"); });
+      /* A total line prints bold all the way across. */
+      const tot = lk && /^(sub)?total\b/i.test(r.find((v) => v.trim() !== "") ?? "");
+      r.forEach((v, ci) => { t += put(v, ci, rowTop, RH, tot ? "F2" : bodyFont(ci), bodySize(ci), 0, isLeft(ci)); });
     });
 
     /* The grid: a line under every row and between every column. */
@@ -453,21 +548,23 @@ export function exportPDF({ title, headers, rows }: ExportTable) {
  */
 export function printTable(t: ExportTable) {
   if (classic()) { printClassic(t); return; }
-  const { title, headers, rows } = t;
+  const { title, headers, rows, look } = t;
   const codes = codeColumns(headers, rows);
   const shown = rows.map((r) => headers.map((_, ci) => display(r[ci], codes[ci])));
+  const cls = (ci: number) => [look?.bold?.includes(ci) ? "bc" : "", look?.wide?.includes(ci) ? "nm" : "",
+    look?.left?.includes(ci) ? "l" : ""].filter(Boolean).join(" ");
   /* A column whose longest entry is long (a product name) may wrap inside its
      cell; every other column stays on one line at its own width. That is
      what keeps the columns from being "too large": none is stretched to fill
      the page, and none is widened by one long name in another. */
-  const wraps = headers.map((_, ci) => Math.max(0, ...shown.map((r) => r[ci].length)) > 34);
+  const wraps = headers.map((_, ci) => !look?.wide?.includes(ci) && Math.max(0, ...shown.map((r) => r[ci].length)) > 34);
   const strong = (r: string[]) => /^(sub)?total\b/i.test(r.find((v) => v.trim() !== "") ?? "");
   const td = (v: string, ci: number) =>
-    `<td>${wraps[ci] ? `<span class="w">${escapeHtml(v)}</span>` : escapeHtml(v)}</td>`;
+    `<td${cls(ci) ? ` class="${cls(ci)}"` : ""}>${wraps[ci] ? `<span class="w">${escapeHtml(v)}</span>` : escapeHtml(v)}</td>`;
   printSheet(title,
     `<div class="head"><h1>${escapeHtml(title)}</h1>` +
     `<p class="meta">${escapeHtml(new Date().toLocaleString())} &middot; ${rows.length} row(s)</p></div>` +
-    `<table><thead><tr>${headers.map((h) => `<th>${escapeHtml(h)}</th>`).join("")}</tr></thead>` +
+    `<table${look ? ` class="look"` : ""}><thead><tr>${headers.map((h, ci) => `<th${look?.left?.includes(ci) ? ` class="l"` : ""}>${escapeHtml(h)}</th>`).join("")}</tr></thead>` +
     `<tbody>${shown.map((r) => `<tr${strong(r) ? ` class="tot"` : ""}>${r.map(td).join("")}</tr>`).join("")}</tbody></table>`);
 }
 
@@ -499,6 +596,10 @@ export function printSheet(title: string, bodyHtml: string) {
       th{background:#e7e5e4;font-size:9px;text-transform:uppercase;letter-spacing:.03em;border-bottom:1.3px solid #111}
       td .w{display:inline-block;max-width:62mm;white-space:normal}
       tr.tot td{font-weight:bold;background:#f5f5f4}
+      td.bc{font-weight:bold;font-size:12px;letter-spacing:.04em;color:#000}
+      td.nm{white-space:nowrap;font-weight:600}
+      td.l,th.l{text-align:left}
+      table.look th{white-space:normal;max-width:26mm;line-height:1.2}
       thead{display:table-header-group}
       tr{break-inside:avoid}
       .box{border:1.3px solid #111;padding:6px 10px;margin:0 auto 8px;display:inline-block}
