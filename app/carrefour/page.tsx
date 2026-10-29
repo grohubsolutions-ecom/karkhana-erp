@@ -24,10 +24,9 @@
  *                (27 Oct). The default.
  *   Shops        one line per shop — the totals
  *   Articles     every article in every shop (or one shop)
- *   Warehouse vs Carrefour (K194) — per shop: everything the warehouse has
- *                sent (all STR, since the first delivery) · what Carrefour's
- *                latest report says is there · the difference; plus what the
- *                warehouse itself still holds. (27 Oct)
+ *   Warehouse vs Carrefour — every article in the warehouse: what the
+ *                warehouse holds now, and what each Carrefour shop holds on
+ *                its latest report, side by side, biggest first. (29 Oct)
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
@@ -47,7 +46,8 @@ type WRow = { branch_id: string; shop: string; report_date: string | null; item_
   article: string | null; sent_qty: number; in_shop: number | null; first_sent: string | null; last_sent: string | null; invoices: number };
 type Shop = { branch_id: string; name: string; last_report: string | null; reports: number };
 type View = "matrix" | "shops" | "articles" | "warehouse";
-type Only = "all" | "sold" | "restocked" | "out" | "unknown";
+type Only = "all" | "sold" | "restocked" | "out" | "unknown" | "both" | "whonly" | "cfonly";
+type WItem = { item_id: string; name: string | null; barcode: string | null; manual_barcode: string | null; quantity: number; is_active: boolean | null };
 
 const num = (v: unknown) => Number(v ?? 0) || 0;
 const n = (v: number | null | undefined) => v == null ? "—" : Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 });
@@ -65,6 +65,8 @@ export default function CarrefourPage() {
   const [shops, setShops] = useState<Shop[]>([]);
   const [rows, setRows] = useState<Row[]>([]);
   const [stock, setStock] = useState<Record<string, number>>({});
+  const [witems, setWitems] = useState<WItem[]>([]);
+  const [sortBy, setSortBy] = useState<"wh" | "cf" | "name">("wh");
   const [wrows, setWrows] = useState<WRow[]>([]);
   const [wErr, setWErr] = useState("");
   const [loading, setLoading] = useState(true);
@@ -83,7 +85,7 @@ export default function CarrefourPage() {
     const [s, c, w, vw] = await Promise.all([
       supabase.rpc("carrefour_shops"),
       supabase.rpc("carrefour_compare", { p_branch: null, p_as_of: asOf || null, p_from: from || null }),
-      supabase.from("v_khana_stock").select("item_id, quantity"),
+      supabase.from("v_khana_stock").select("item_id, name, barcode, manual_barcode, quantity, is_active"),
       supabase.rpc("carrefour_vs_warehouse", { p_as_of: asOf || null }),
     ]);
     /* The warehouse view has its own error so the rest of the page still works. */
@@ -98,8 +100,9 @@ export default function CarrefourPage() {
       retail_price: r.retail_price == null ? null : num(r.retail_price), sold_value: r.sold_value == null ? null : num(r.sold_value),
     })));
     const m: Record<string, number> = {};
-    ((w.data ?? []) as { item_id: string; quantity: number }[]).forEach((x) => { m[x.item_id] = num(x.quantity); });
+    ((w.data ?? []) as WItem[]).forEach((x) => { m[x.item_id] = num(x.quantity); });
     setStock(m);
+    setWitems(((w.data ?? []) as WItem[]).map((x) => ({ ...x, quantity: num(x.quantity) })));
     setLoading(false);
   }, [asOf, from]);
   useEffect(() => { load(); }, [load]);
@@ -156,44 +159,45 @@ export default function CarrefourPage() {
   const grand: Cell = { p: perShop.some((s) => s.prev != null) ? perShop.reduce((a, s) => a + num(s.prev), 0) : null,
                         c: perShop.reduce((a, s) => a + s.curr, 0) };
 
-  /* Warehouse vs Carrefour: everything sent against what the shop holds. */
-  const wlines = useMemo(() => {
-    const t = q.trim().toLowerCase();
-    return wrows.filter((r) => {
-      if (shopId && r.branch_id !== shopId) return false;
-      if (t && ![r.article, r.barcode, r.shop].some((x) => String(x ?? "").toLowerCase().includes(t))) return false;
-      const d = r.sent_qty - num(r.in_shop);
-      if (only === "sold" && !(d > 0)) return false;
-      if (only === "restocked" && !(r.sent_qty > 0)) return false;
-      if (only === "out" && !(num(r.in_shop) <= 0 && r.sent_qty > 0)) return false;
-      if (only === "unknown" && r.item_id) return false;
-      return true;
-    });
-  }, [wrows, shopId, q, only]);
+  /* Warehouse vs Carrefour: every article in the warehouse, how many the
+     warehouse holds, and how many each Carrefour shop holds on its latest
+     report — side by side, biggest first. */
   const wShops = useMemo(() => {
-    const m = new Map<string, { id: string; shop: string; report_date: string | null; sent: number; inShop: number }>();
-    wlines.forEach((r) => {
-      const x = m.get(r.branch_id) ?? { id: r.branch_id, shop: r.shop, report_date: r.report_date, sent: 0, inShop: 0 };
-      x.sent += r.sent_qty; x.inShop += num(r.in_shop); m.set(r.branch_id, x);
-    });
+    const m = new Map<string, { id: string; shop: string; report_date: string | null }>();
+    wrows.forEach((r) => { if (r.report_date && (!shopId || r.branch_id === shopId)) m.set(r.branch_id, { id: r.branch_id, shop: r.shop, report_date: r.report_date }); });
     return [...m.values()].sort((a, b) => a.shop.localeCompare(b.shop));
-  }, [wlines]);
-  const wMatrix = useMemo(() => {
-    const m = new Map<string, { key: string; item_id: string | null; barcode: string | null; article: string | null; cells: Record<string, Cell> }>();
-    wlines.forEach((r) => {
+  }, [wrows, shopId]);
+  const wTable = useMemo(() => {
+    const m = new Map<string, { key: string; item_id: string | null; article: string | null; barcode: string | null; wh: number | null; at: Record<string, number> }>();
+    witems.forEach((i) => m.set(i.item_id, { key: i.item_id, item_id: i.item_id, article: i.name,
+      barcode: i.manual_barcode || i.barcode, wh: i.quantity, at: {} }));
+    const ids = new Set(wShops.map((s) => s.id));
+    wrows.forEach((r) => {
+      if (!ids.has(r.branch_id) || r.in_shop == null) return;
       const k = r.item_id ?? "bc:" + r.barcode;
-      const x = m.get(k) ?? { key: k, item_id: r.item_id, barcode: r.barcode, article: r.article, cells: {} };
-      x.cells[r.branch_id] = { p: r.sent_qty, c: num(r.in_shop) };
+      const x = m.get(k) ?? { key: k, item_id: r.item_id, article: r.article, barcode: r.barcode, wh: r.item_id ? 0 : null, at: {} };
+      x.at[r.branch_id] = (x.at[r.branch_id] ?? 0) + r.in_shop;
       m.set(k, x);
     });
-    return [...m.values()].sort((a, b) => (b.item_id ? 1 : 0) - (a.item_id ? 1 : 0) || String(a.article).localeCompare(String(b.article)));
-  }, [wlines]);
-  const wRowTotal = (cells: Record<string, Cell>): Cell => {
-    const xs = wShops.map((s) => cells[s.id]).filter(Boolean) as Cell[];
-    return { p: xs.reduce((a, x) => a + num(x.p), 0), c: xs.reduce((a, x) => a + x.c, 0) };
-  };
-  const wGrand: Cell = { p: wShops.reduce((a, s) => a + s.sent, 0), c: wShops.reduce((a, s) => a + s.inShop, 0) };
-  const wHolds = wMatrix.reduce((a, r) => a + (r.item_id ? stock[r.item_id] ?? 0 : 0), 0);
+    const t = q.trim().toLowerCase();
+    const cfOf = (x: { at: Record<string, number> }) => Object.values(x.at).reduce((a, v) => a + v, 0);
+    return [...m.values()].map((x) => ({ ...x, cf: cfOf(x) })).filter((x) => {
+      if (only === "unknown") { if (x.item_id) return false; }
+      else if (!x.item_id) return false;
+      if (num(x.wh) === 0 && x.cf === 0) return false;
+      if (t && ![x.article, x.barcode].some((v) => String(v ?? "").toLowerCase().includes(t))) return false;
+      if (only === "both" && !(num(x.wh) > 0 && x.cf > 0)) return false;
+      if (only === "whonly" && !(num(x.wh) > 0 && x.cf <= 0)) return false;
+      if (only === "cfonly" && !(x.cf > 0 && num(x.wh) <= 0)) return false;
+      return true;
+    }).sort((a, b) => sortBy === "name" ? String(a.article).localeCompare(String(b.article))
+      : sortBy === "cf" ? b.cf - a.cf || num(b.wh) - num(a.wh) : num(b.wh) - num(a.wh) || b.cf - a.cf);
+  }, [witems, wrows, wShops, q, only, sortBy]);
+  const wTot = useMemo(() => ({
+    wh: wTable.reduce((a, x) => a + num(x.wh), 0),
+    cf: wTable.reduce((a, x) => a + x.cf, 0),
+    at: Object.fromEntries(wShops.map((s) => [s.id, wTable.reduce((a, x) => a + (x.at[s.id] ?? 0), 0)])) as Record<string, number>,
+  }), [wTable, wShops]);
 
   const anyCompare = lines.some((r) => r.prev_date != null);
   const tot = useMemo(() => ({
@@ -227,22 +231,14 @@ export default function CarrefourPage() {
       headers: ["Shop", "Previous report", "Current report", "Previous stock", "Sent from warehouse", "Current stock", "Sold", "Sold value"],
       rows: perShop.map((s) => [s.shop, day(s.prev_date), day(s.curr_date), s.prev ?? "", s.sent ?? "", s.curr, s.sold ?? "", s.value == null ? "" : Math.round(s.value)]),
     };
-    if (view === "warehouse") {
-      const multi = wShops.length > 1;
-      const trio = (x: Cell | undefined) => x == null ? ["", "", ""] : [x.p ?? "", x.c, diffOf(x) ?? ""];
-      return {
-        title: `Warehouse vs Carrefour — ${shopName} — ${asOf ? "as of " + day(asOf) : "latest reports"}`,
-        headers: ["Barcode", "Article",
-          ...wShops.flatMap((s) => [`${s.shop} sent`, `${s.shop} in Carrefour (${short(s.report_date)})`, `${s.shop} difference`]),
-          ...(multi ? ["All shops sent", "All shops in Carrefour", "All shops difference"] : []), "Warehouse holds now"],
-        rows: [
-          ...wMatrix.map((a) => [a.barcode ?? "", a.article ?? "",
-            ...wShops.flatMap((s) => trio(a.cells[s.id])), ...(multi ? trio(wRowTotal(a.cells)) : []),
-            a.item_id ? stock[a.item_id] ?? 0 : ""]),
-          ["", "Total", ...wShops.flatMap((s) => trio({ p: s.sent, c: s.inShop })), ...(multi ? trio(wGrand) : []), wHolds],
-        ],
-      };
-    }
+    if (view === "warehouse") return {
+      title: `Warehouse vs Carrefour — ${shopName} — ${asOf ? "as of " + day(asOf) : "latest reports"}`,
+      headers: ["Barcode", "Article", "Warehouse", ...wShops.map((s) => `${s.shop} (${short(s.report_date)})`), "Carrefour total", "Warehouse + Carrefour"],
+      rows: [
+        ...wTable.map((x) => [x.barcode ?? "", x.article ?? "", x.wh ?? "", ...wShops.map((s) => x.at[s.id] ?? 0), x.cf, num(x.wh) + x.cf]),
+        ["", "Total", wTot.wh, ...wShops.map((s) => wTot.at[s.id]), wTot.cf, wTot.wh + wTot.cf],
+      ],
+    };
     return {
       title: `Carrefour — ${shopName} — ${asOfLabel}`,
       headers: ["Shop", "Barcode", "Article", "Previous", "Sent", "Current", "Sold", "Price", "Sold value"],
@@ -294,10 +290,10 @@ export default function CarrefourPage() {
         )}
 
         <div className="flex flex-wrap items-center gap-2">
-          <button onClick={() => setView("matrix")} className={chip(view === "matrix")}>Shop by shop</button>
-          <button onClick={() => setView("shops")} className={chip(view === "shops")}>Shops</button>
-          <button onClick={() => setView("articles")} className={chip(view === "articles")}>Articles</button>
-          <button onClick={() => setView("warehouse")} className={chip(view === "warehouse")}>Warehouse vs Carrefour</button>
+          <button onClick={() => { setView("matrix"); if (["both", "whonly", "cfonly"].includes(only)) setOnly("all"); }} className={chip(view === "matrix")}>Shop by shop</button>
+          <button onClick={() => { setView("shops"); if (["both", "whonly", "cfonly"].includes(only)) setOnly("all"); }} className={chip(view === "shops")}>Shops</button>
+          <button onClick={() => { setView("articles"); if (["both", "whonly", "cfonly"].includes(only)) setOnly("all"); }} className={chip(view === "articles")}>Articles</button>
+          <button onClick={() => { setView("warehouse"); setOnly("all"); }} className={chip(view === "warehouse")}>Warehouse vs Carrefour</button>
           <span className="mx-1 h-5 w-px bg-line" />
           <select value={shopId} onChange={(e) => setShopId(e.target.value)}
             className="rounded-full border border-line bg-surface px-3 py-1.5 text-[12px] outline-none">
@@ -320,7 +316,9 @@ export default function CarrefourPage() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {([["all", "Everything"], ["sold", "Sold something"], ["restocked", "Restocked"], ["out", "Sold out"], ["unknown", "Barcode not in system"]] as [Only, string][])
+          {((view === "warehouse"
+            ? [["all", "Everything"], ["both", "In warehouse & Carrefour"], ["whonly", "Only in warehouse"], ["cfonly", "Only in Carrefour"], ["unknown", "Barcode not in system"]]
+            : [["all", "Everything"], ["sold", "Sold something"], ["restocked", "Restocked"], ["out", "Sold out"], ["unknown", "Barcode not in system"]]) as [Only, string][])
             .map(([k, l]) => <button key={k} onClick={() => setOnly(k)} className={chip(only === k)}>{l}</button>)}
           <span className="ml-auto" />
           <button onClick={() => exportCSV(table())} className="flex items-center gap-1 rounded-full border border-line px-3 py-2 text-[12px] font-semibold text-ink/70 hover:bg-panel"><Download size={13} /> CSV</button>
@@ -469,63 +467,49 @@ export default function CarrefourPage() {
         {/* ─────────── WAREHOUSE vs CARREFOUR ─────────── */}
         {!loading && view === "warehouse" && (
           <div className="overflow-hidden rounded-card border border-line bg-surface">
-            <div className="border-b border-line bg-panel/50 px-4 py-2 text-[12px] text-ink/70">
-              <b>Sent</b> = every STR the warehouse has invoiced to that shop, from the first delivery up to the shop&apos;s report date.
-              <b> In Carrefour</b> = what that report says is on the shelf. <b>Diff</b> = sent − in Carrefour: gone from the shelf (sold).
-              <span className="text-amber-strong font-semibold"> Negative</span> = Carrefour shows more than our invoices explain.
-              {wErr && <span className="mt-1 block font-semibold text-danger">{wErr}</span>}
-              {!wErr && wShops.length > 0 && (
-                <span className="mt-1 block font-semibold text-ink">
-                  {shopName}: sent {n(wGrand.p)} · in Carrefour {n(wGrand.c)} · diff {n(diffOf(wGrand))} · warehouse holds {n(wHolds)}
-                </span>
-              )}
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-line bg-panel/50 px-4 py-2 text-[12px] text-ink/70">
+              <span><b className="text-ink">Warehouse {n(wTot.wh)}</b> pcs · <b className="text-ink">Carrefour {n(wTot.cf)}</b> pcs ({wShops.length} shop{wShops.length === 1 ? "" : "s"}, latest report each) · {wTable.length} articles</span>
+              <span className="ml-auto flex items-center gap-1">sort
+                {([["wh", "Warehouse ↓"], ["cf", "Carrefour ↓"], ["name", "A–Z"]] as ["wh" | "cf" | "name", string][]).map(([k, l]) =>
+                  <button key={k} onClick={() => setSortBy(k)} className={chip(sortBy === k)}>{l}</button>)}
+              </span>
+              {wErr && <span className="w-full font-semibold text-danger">{wErr}</span>}
+              {witems.length === 0 && <span className="w-full font-semibold text-danger">Warehouse stock is not visible to you — it needs the warehouse view permission.</span>}
             </div>
-            {wShops.length > 0 && (
             <div className="max-h-[70vh] overflow-auto"><table className="w-full text-left text-[12.5px]">
-              <thead className="sticky top-0 z-10 bg-surface">
-                <tr className="border-b border-line text-[11px] uppercase tracking-wide text-hint">
-                  <th rowSpan={2} className="sticky left-0 z-20 min-w-[240px] border-r border-line bg-surface px-3 py-2 font-bold">Article</th>
-                  {wShops.map((s) => <th key={s.id} colSpan={3} className="border-r border-line px-3 py-2 text-center font-bold text-ink">{s.shop}</th>)}
-                  {wShops.length > 1 && <th colSpan={3} className="border-r border-line bg-panel/60 px-3 py-2 text-center font-bold text-ink">All shops</th>}
-                  <th rowSpan={2} className="whitespace-nowrap bg-periwinkle-soft/60 px-3 py-2 text-right font-bold text-ink">Warehouse<span className="block">holds now</span></th>
-                </tr>
-                <tr className="border-b border-line text-[10.5px] uppercase tracking-wide text-hint">
-                  {wShops.flatMap((s) => [
-                    <th key={s.id + "s"} className="whitespace-nowrap px-2 py-1.5 text-right font-bold">Sent</th>,
-                    <th key={s.id + "c"} className="whitespace-nowrap px-2 py-1.5 text-right font-bold">In Carrefour<span className="block normal-case font-normal">{short(s.report_date)}</span></th>,
-                    <th key={s.id + "d"} className="whitespace-nowrap border-r border-line px-2 py-1.5 text-right font-bold text-ink">Diff</th>,
-                  ])}
-                  {wShops.length > 1 && <>
-                    <th className="whitespace-nowrap bg-panel/60 px-2 py-1.5 text-right font-bold">Sent</th>
-                    <th className="whitespace-nowrap bg-panel/60 px-2 py-1.5 text-right font-bold">In Carrefour</th>
-                    <th className="whitespace-nowrap border-r border-line bg-panel/60 px-2 py-1.5 text-right font-bold text-ink">Diff</th></>}
-                </tr>
-              </thead>
+              <thead className="sticky top-0 z-10 bg-surface"><tr className="border-b border-line text-[11px] uppercase tracking-wide text-hint">
+                <th className="sticky left-0 z-20 min-w-[240px] border-r border-line bg-surface px-3 py-2 font-bold">Article</th>
+                <th className="whitespace-nowrap border-r border-line bg-periwinkle-soft/60 px-3 py-2 text-right font-bold text-ink">Warehouse</th>
+                {wShops.map((s) => <th key={s.id} className="whitespace-nowrap px-3 py-2 text-right font-bold">{s.shop}<span className="block normal-case font-normal">{short(s.report_date)}</span></th>)}
+                <th className="whitespace-nowrap border-l border-line bg-panel/60 px-3 py-2 text-right font-bold text-ink">Carrefour total</th>
+                <th className="whitespace-nowrap bg-panel/60 px-3 py-2 text-right font-bold">Warehouse + Carrefour</th>
+              </tr></thead>
               <tbody>
-                {wMatrix.map((a) => (
-                  <tr key={a.key} className="border-b border-line/60 last:border-0 hover:bg-panel/30">
+                {wTable.map((x) => (
+                  <tr key={x.key} className="border-b border-line/60 last:border-0 hover:bg-panel/30">
                     <td className="sticky left-0 border-r border-line bg-surface px-3 py-2">
-                      <span className="font-semibold text-ink">{a.article ?? "—"}</span>
-                      <span className="block font-mono text-[10.5px] text-hint">{a.barcode}
-                        {!a.item_id && <span className="ml-1.5 rounded-full bg-amber-soft px-1.5 py-0.5 font-sans text-[10px] font-semibold text-ink/70">not in our products</span>}
+                      <span className="font-semibold text-ink">{x.article ?? "—"}</span>
+                      <span className="block font-mono text-[10.5px] text-hint">{x.barcode}
+                        {!x.item_id && <span className="ml-1.5 rounded-full bg-amber-soft px-1.5 py-0.5 font-sans text-[10px] font-semibold text-ink/70">not in our products</span>}
                       </span>
                     </td>
-                    {wShops.map((s) => <Trio key={s.id} x={a.cells[s.id]} />)}
-                    {wShops.length > 1 && <Trio x={wRowTotal(a.cells)} shade />}
-                    <td className={`px-3 py-2 text-right tnum font-semibold ${a.item_id && (stock[a.item_id] ?? 0) <= 0 ? "text-danger" : "text-ink"}`}>
-                      {a.item_id ? n(stock[a.item_id] ?? 0) : "—"}</td>
+                    <td className={`border-r border-line bg-periwinkle-soft/30 px-3 py-2 text-right tnum font-bold ${x.wh != null && x.wh <= 0 ? "text-danger" : "text-ink"}`}>{x.wh == null ? "—" : n(x.wh)}</td>
+                    {wShops.map((s) => { const v = x.at[s.id] ?? 0;
+                      return <td key={s.id} className={`px-3 py-2 text-right tnum ${v ? "text-ink" : "text-hint"}`}>{n(v)}</td>; })}
+                    <td className="border-l border-line bg-panel/40 px-3 py-2 text-right tnum font-bold text-ink">{n(x.cf)}</td>
+                    <td className="bg-panel/40 px-3 py-2 text-right tnum text-ink/75">{n(num(x.wh) + x.cf)}</td>
                   </tr>
                 ))}
               </tbody>
               <tfoot className="sticky bottom-0 bg-panel"><tr className="border-t border-line font-bold text-ink">
-                <td className="sticky left-0 border-r border-line bg-panel px-3 py-2">Total · {wMatrix.length} articles</td>
-                {wShops.map((s) => <Trio key={s.id} x={{ p: s.sent, c: s.inShop }} bold />)}
-                {wShops.length > 1 && <Trio x={wGrand} shade bold />}
-                <td className="px-3 py-2 text-right tnum">{n(wHolds)}</td>
+                <td className="sticky left-0 border-r border-line bg-panel px-3 py-2">Total · {wTable.length} articles</td>
+                <td className="border-r border-line px-3 py-2 text-right tnum">{n(wTot.wh)}</td>
+                {wShops.map((s) => <td key={s.id} className="px-3 py-2 text-right tnum">{n(wTot.at[s.id])}</td>)}
+                <td className="border-l border-line px-3 py-2 text-right tnum">{n(wTot.cf)}</td>
+                <td className="px-3 py-2 text-right tnum">{n(wTot.wh + wTot.cf)}</td>
               </tr></tfoot>
             </table></div>
-            )}
-            {!wErr && wMatrix.length === 0 && <p className="p-6 text-center text-[13px] text-muted">Nothing matches these filters.</p>}
+            {wTable.length === 0 && <p className="p-6 text-center text-[13px] text-muted">Nothing matches these filters.</p>}
           </div>
         )}
       </div>
