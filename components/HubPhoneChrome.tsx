@@ -46,12 +46,22 @@ export function HubTopBar() {
           bell's full-screen sheet is measured against. */}
       <header className="hub-topbar sticky top-0 z-[45] border-b border-line bg-surface pt-[env(safe-area-inset-top)] md:hidden dark:border-white/[0.06] dark:bg-[#201c17]">
         <div className="flex h-14 items-center gap-1 px-2">
+          {/* H307 (30 Oct 2026): universal Back button. On an article page the
+              old "Back to articles" button is kept, because browser history
+              from an article often points back to a search in another tab;
+              elsewhere, Back is the browser's own back — the department
+              chooser is one step away from any top-level page. */}
           {isArticle ? (
             <button type="button" onClick={() => router.push("/online/articles")} aria-label="Back to articles"
               className="flex h-11 w-11 items-center justify-center rounded-full text-ink active:bg-panel dark:text-white dark:active:bg-white/[0.08]">
               <ArrowLeft size={20} />
             </button>
-          ) : <span className="w-2" />}
+          ) : (
+            <button type="button" onClick={() => router.back()} aria-label="Back"
+              className="flex h-11 w-11 items-center justify-center rounded-full text-ink active:bg-panel dark:text-white dark:active:bg-white/[0.08]">
+              <ArrowLeft size={20} />
+            </button>
+          )}
           <h1 className="min-w-0 flex-1 truncate text-[17px] font-extrabold tracking-tight text-ink dark:text-[#f4f1ea]">{hubTitle(path)}</h1>
           <HubBell size="lg" />
           <button type="button" onClick={() => setMore(true)} aria-label="More"

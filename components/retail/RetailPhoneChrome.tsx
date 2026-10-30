@@ -44,6 +44,7 @@ import { useShopKey, setShopKey, findShop } from "@/lib/retailShop";
    ───────────────────────────────────────────────────────────────────────────── */
 export function RetailTopBar({ onMore }: { onMore: () => void }) {
   const pathname = usePathname();
+  const router = useRouter();
   const { can } = usePermissions();
   const { branches } = useBranches();
   const shopKey = useShopKey();
@@ -62,13 +63,21 @@ export function RetailTopBar({ onMore }: { onMore: () => void }) {
   return (
     <>
       <header className="rt-topbar sticky top-0 z-[45] border-b border-line bg-surface md:hidden dark:border-white/[0.06] dark:bg-[#201c17]">
-        <div className="flex items-center gap-2.5 px-3 py-2.5">
+        <div className="flex items-center gap-2 px-2 py-2.5">
+          {/* H307 (30 Oct 2026): universal Back button to the left of the shop
+              badge. One tap steps out of any FS Traders page to the previous
+              one — which, after the mobile cold-open, is the department
+              chooser from a top-level page. */}
+          <button type="button" onClick={() => router.back()} aria-label="Back"
+            className="flex h-10 w-10 flex-none items-center justify-center rounded-xl2 text-ink transition active:bg-panel dark:text-white dark:active:bg-white/[0.08]">
+            <ArrowLeft size={20} />
+          </button>
           <span className="flex h-9 w-9 flex-none items-center justify-center rounded-xl bg-ink text-white dark:bg-white dark:text-[#141414]">
             <Store size={17} />
           </span>
           <div className="min-w-0 flex-1 leading-tight">
             <div className="truncate text-[15.5px] font-extrabold tracking-tight text-ink dark:text-[#f4f1ea]">{title}</div>
-            <div className="text-[10.5px] uppercase tracking-wide text-hint dark:text-[#8a8175]">Shops Sales</div>
+            <div className="text-[10.5px] uppercase tracking-wide text-hint dark:text-[#8a8175]">FS Traders</div>
           </div>
           {showShop && (
             <button onClick={() => setPick(true)}
@@ -223,7 +232,7 @@ export function RetailMoreSheet({ open, onClose }: { open: boolean; onClose: () 
   async function logout() { if (supabase) await supabase.auth.signOut(); router.replace("/login"); }
 
   return (
-    <Sheet open={open} onClose={onClose} title="Shops Sales" subtitle="Everything in this department">
+    <Sheet open={open} onClose={onClose} title="FS Traders" subtitle="Everything in this department">
       <div className="space-y-4">
         {can(ROUTE_PERMS[DASHBOARD.href] ?? null) && (
           <div className="grid grid-cols-2 gap-2">
