@@ -108,3 +108,67 @@ body {
 .dark ::-webkit-scrollbar-thumb {
   background: #2e2a24;
 }
+
+/* ---- H306 (30 Oct 2026): mobile tightening across the whole app -----------
+
+   The ERP's pages were laid out for a laptop and look generous on a phone —
+   too much padding around cards, too much space between sections. Zeeshan runs
+   the app as a PWA on his phone and wanted every department (Hub, Karkhana,
+   FS Traders, Administration, the /me portal) tightened at once, rather than
+   file-by-file. This block does that in one place.
+
+   WHY (max-width: 639px), NOT 767px.
+     Tailwind's `sm:` breakpoint is >=640px. Scoping to (max-width: 639px)
+     means NO `sm:` class is active, so a `p-4 sm:p-6` pattern tightens on a
+     phone (the override wins) and keeps the sm: value on a tablet (the sm:
+     rule lives inside its own min-width media query, which is unaffected).
+
+   WHY !important.
+     Tailwind utility classes are plain selectors with no stacking context.
+     Without !important a later-rendered Tailwind class could win. The overrides
+     target well-known utility names only, so there is no mystery about which
+     rule wins where.
+
+   WHAT'S DELIBERATELY LEFT ALONE.
+     Button min-heights, modals, forms, tap targets — none of those shrink, so
+     nothing becomes harder to press. `gap-3` and smaller stay as they are
+     (12px → 8px would be too cramped). Headings keep their class-set sizes,
+     because most pages override via `text-[Npx]` and we trust those.
+
+   DASHBOARD TIGHTENING (H306 part 1) IS PRESERVED.
+     That used smaller utilities (p-2.5, p-3, gap-2, mt-3) which none of these
+     overrides match. The dashboard stays as it was tuned. */
+@media (max-width: 639px) {
+  /* Card and section paddings — the biggest space eater on a phone. */
+  .p-4 { padding: 0.625rem !important; }   /* 16px → 10px */
+  .p-5 { padding: 0.75rem  !important; }   /* 20px → 12px */
+  .p-6 { padding: 0.875rem !important; }   /* 24px → 14px */
+  .p-8 { padding: 1rem     !important; }   /* 32px → 16px */
+
+  /* Horizontal page gutters — pages often go px-6/8/10 to breathe on desktop. */
+  .px-5  { padding-left: 0.75rem  !important; padding-right: 0.75rem  !important; }
+  .px-6  { padding-left: 0.875rem !important; padding-right: 0.875rem !important; }
+  .px-8  { padding-left: 1rem     !important; padding-right: 1rem     !important; }
+  .px-10 { padding-left: 1rem     !important; padding-right: 1rem     !important; }
+
+  /* Vertical page padding */
+  .py-5 { padding-top: 0.75rem  !important; padding-bottom: 0.75rem  !important; }
+  .py-6 { padding-top: 0.875rem !important; padding-bottom: 0.875rem !important; }
+  .py-8 { padding-top: 1rem     !important; padding-bottom: 1rem     !important; }
+
+  /* Grid / flex gaps. gap-3 (12px) stays — further shrinking crowds the UI. */
+  .gap-4 { gap: 0.625rem !important; }
+  .gap-5 { gap: 0.75rem  !important; }
+  .gap-6 { gap: 0.75rem  !important; }
+
+  /* Section-to-section spacing. These were tuned for desktop reading rhythm. */
+  .mt-5 { margin-top: 0.75rem  !important; }
+  .mt-6 { margin-top: 0.875rem !important; }
+  .mt-8 { margin-top: 1rem     !important; }
+  .my-6 { margin-top: 0.875rem !important; margin-bottom: 0.875rem !important; }
+  .my-8 { margin-top: 1rem     !important; margin-bottom: 1rem     !important; }
+
+  /* The project's shared card radius. 14px → 12px — a hair less chunky, so
+     cards sit a bit closer to the viewport edges without looking rounded off. */
+  .rounded-card { border-radius: 12px; }
+}
