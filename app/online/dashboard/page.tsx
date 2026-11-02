@@ -1,7 +1,7 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLiveTables } from "@/lib/useLiveTables";
-import { ShoppingBag, Clock, Undo2, Wallet, TrendingUp, Truck, RefreshCw, MapPin, Ban, Receipt, Tag, Package, XCircle } from "lucide-react";
+import { ShoppingBag, Clock, Undo2, Wallet, TrendingUp, Truck, RefreshCw, MapPin, Ban } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { HubRange, PageActions, Segmented, useIsPhone } from "@/components/HubUI";
 import { rangeDates, rs } from "@/lib/dateRange";
@@ -82,8 +82,12 @@ type DashCancels = { cancelled: number; not_fulfilled: number; fulfilled: number
      Cancellations    = order amount, cancelled before fulfilment
      Shipping charges = shipping_total               (what customers paid for delivery)
      Net sales        = Gross − Discounts − Returns − Cancellations
-   Verified against Shopify's own fields: amount = subtotal + shipping + tax. */
-type ShopifySales = {
+   Verified against Shopify's own fields: amount = subtotal + shipping + tax.
+
+   H308c: one row per store (plus store_code='ALL' totals) so the six figures
+   sit INSIDE the "Sales by store" table rather than in a separate card. */
+type ShopifySalesRow = {
+  store_code: string; is_total: boolean;
   gross_sales: number; discounts: number; returns_amount: number;
   cancellations: number; shipping_charges: number; net_sales: number;
   returns_count: number; cancellations_count: number; order_count: number;
@@ -137,6 +141,26 @@ const TONE_TXT = {
 } as const;
 const STORE_ORDER = ["LM", "TS", "TRZ"];
 
+/* H308c: the six Shopify-style sales lines, defined the same way as LADDER so
+   they can render inside the same table/ladder. `v` and `n` name the money
+   and count fields on ShopifySalesRow; `neg` prints a leading "−" so the
+   subtractions read correctly. The order mirrors Shopify's own finance report.
+   Net sales is `strong` and tone "good" to mark the final line. */
+const SHOPIFY_ROWS: {
+  key: string;
+  v: keyof ShopifySalesRow; n: keyof ShopifySalesRow | null;
+  label: string; hint?: string;
+  tone?: "good" | "warn" | "bad" | "muted";
+  neg?: boolean; strong?: boolean;
+}[] = [
+  { key: "gross",    v: "gross_sales",      n: "order_count",         label: "Gross sales",      hint: "products at list price",         strong: true },
+  { key: "disc",     v: "discounts",        n: null,                  label: "Discounts",        hint: "promo codes & line discounts",   tone: "warn",  neg: true },
+  { key: "ret",      v: "returns_amount",   n: "returns_count",       label: "Returns",          hint: "cancelled after fulfilment",     tone: "bad",   neg: true },
+  { key: "cancel",   v: "cancellations",    n: "cancellations_count", label: "Cancellations",    hint: "cancelled before fulfilment",    tone: "muted", neg: true },
+  { key: "ship",     v: "shipping_charges", n: null,                  label: "Shipping charges", hint: "what customers paid for delivery" },
+  { key: "net",      v: "net_sales",        n: null,                  label: "Net sales",        hint: "gross − discounts − returns − cancellations", tone: "good", strong: true },
+];
+
 export default function HubDashboard() {
   const phone = useIsPhone();
   /* On a phone the store columns do not fit side by side; the ladder shows one
@@ -155,7 +179,7 @@ export default function HubDashboard() {
   const [summary, setSummary] = useState<DashSummary | null>(null);
   const [counts, setCounts] = useState<DashCounts | null>(null);
   const [cancels, setCancels] = useState<DashCancels | null>(null);
-  const [sales, setSales] = useState<ShopifySales | null>(null);
+  const [salesByStore, setSalesByStore] = useState<ShopifySalesRow[]>([]);
 
   /* EVERY FIGURE ON THIS PAGE IS COUNTED IN THE DATABASE.
      This page used to fetch 1,000 orders and 1,000 parcels and add them up
@@ -181,7 +205,7 @@ export default function HubDashboard() {
       supabase.rpc("hub_return_rates", { p_months: 3 }),
       supabase.rpc("hub_dashboard_counts", args),
       supabase.rpc("hub_dashboard_cancellations", args),
-      supabase.rpc("hub_dashboard_shopify_sales", args),
+      supabase.rpc("hub_dashboard_shopify_sales_per_store", args),
     ]);
     if (my !== reqId.current) return;          // superseded by a newer request
     const firstErr = sum.error ?? br.error ?? cnt.error;
@@ -191,9 +215,9 @@ export default function HubDashboard() {
     /* A missing function (H287 not run yet) hides the row instead of
        putting an error over the whole dashboard. */
     setCancels(cx.error ? null : ((cx.data as DashCancels[])?.[0] ?? null));
-    /* Shopify sales — same tolerance: if the H308 migration hasn't landed,
-       the whole section hides rather than breaking the dashboard. */
-    setSales(sh.error ? null : ((sh.data as ShopifySales[])?.[0] ?? null));
+    /* H308c: per-store Shopify sales rows. If the migration hasn't landed, the
+       Shopify rows at the top of the Sales by store table simply don't render. */
+    setSalesByStore(sh.error ? [] : ((sh.data as ShopifySalesRow[]) ?? []));
     setBreakdown((br.data as Breakdown) ?? null);
     setRates((rt.data as RateRow[]) ?? []);
     setLoading(false);
@@ -495,56 +519,6 @@ export default function HubDashboard() {
           THE COURIER DECIDES, NOT SHOPIFY. 145 of 227 parcels that came back in
           30 days were then cancelled in Shopify; reading Shopify first would
           call a return a cancellation. */}
-      {/* H308 (2 Nov 2026) — SHOPIFY SALES BREAKDOWN.
-          The six figures Zeeshan reads off Shopify's own finance report, in
-          one block, from the same Shopify data we already store. Hidden if the
-          H308 migration hasn't landed yet (sales stays null). Mobile: 2-column
-          grid; tablet: 3; desktop: 6 across so the whole breakdown reads as
-          one row. The order is deliberate: Gross → Discounts → Returns →
-          Cancellations → Shipping → Net, matching Shopify's layout so the
-          numbers line up with what the owner sees on Shopify itself. */}
-      {sales && (
-        <div className="mt-3 rounded-card border border-line bg-surface sm:mt-5 dark:border-white/[0.06] dark:bg-[#201c17]">
-          <div className="flex flex-wrap items-baseline justify-between gap-2 px-3 pb-2 pt-3 sm:px-5 sm:pt-5">
-            <h3 className="text-[13.5px] font-bold text-ink sm:text-[14px] dark:text-[#f4f1ea]">
-              Shopify sales {store !== "ALL" && <span className="font-normal text-muted dark:text-[#a89f93]">· {STORES.find((s) => s.code === store)?.label ?? store}</span>}
-            </h3>
-            <span className="text-[11px] text-hint sm:text-[11.5px] dark:text-[#8a8175]">
-              exact figures from Shopify · gross − discounts − returns − cancellations = net
-            </span>
-          </div>
-          <div className="grid grid-cols-2 gap-0 border-t border-line sm:grid-cols-3 lg:grid-cols-6 dark:border-white/[0.06]">
-            {([
-              { label: "Gross sales",      value: sales.gross_sales,      Icon: Wallet,     tone: "text-ink dark:text-[#f4f1ea]",         sub: `${sales.order_count.toLocaleString()} orders`,                                                neg: false, bold: false },
-              { label: "Discounts",        value: sales.discounts,        Icon: Tag,        tone: "text-amber-strong dark:text-amber",    sub: "promo codes & line discounts",                                                                neg: true,  bold: false },
-              { label: "Returns",          value: sales.returns_amount,   Icon: Undo2,      tone: "text-red-700 dark:text-salmon",        sub: `${sales.returns_count.toLocaleString()} cancelled after fulfilment`,                          neg: true,  bold: false },
-              { label: "Cancellations",    value: sales.cancellations,    Icon: XCircle,    tone: "text-red-700 dark:text-salmon",        sub: `${sales.cancellations_count.toLocaleString()} cancelled before fulfilment`,                   neg: true,  bold: false },
-              { label: "Shipping charges", value: sales.shipping_charges, Icon: Truck,      tone: "text-ink dark:text-[#f4f1ea]",         sub: "what customers paid for delivery",                                                            neg: false, bold: false },
-              { label: "Net sales",        value: sales.net_sales,        Icon: Receipt,    tone: "text-success font-extrabold",          sub: "what became a sale",                                                                          neg: false, bold: true  },
-            ]).map((m, i) => (
-              <div key={m.label}
-                className={`min-w-0 border-line p-2.5 sm:p-4 dark:border-white/[0.06]
-                  ${i % 2 === 0 ? "border-r" : ""}
-                  ${i >= 2 ? "border-t sm:border-t" : ""}
-                  sm:[&:nth-child(3n)]:border-r-0 sm:[&:nth-child(3)]:border-t-0
-                  sm:[&:nth-child(n+4)]:border-t
-                  lg:border-t-0 lg:[&:not(:last-child)]:border-r lg:[&:nth-child(3n)]:border-r
-                  ${m.bold ? "bg-success-soft/40 dark:bg-white/[0.03]" : ""}`}>
-                <div className="flex items-center gap-1.5 text-[11.5px] font-medium text-muted sm:text-[12px] dark:text-[#a89f93]">
-                  <m.Icon size={13} className="shrink-0" /> {m.label}
-                </div>
-                <div className={`mt-1 max-sm:truncate text-[15.5px] tabular-nums sm:text-[18px] ${m.bold ? "font-extrabold" : "font-bold"} ${m.tone}`}>
-                  {loading ? "—" : (m.neg && Number(m.value) > 0 ? "−" : "") + rs(Number(m.value))}
-                </div>
-                <div className="mt-0.5 text-[10.5px] leading-tight text-hint sm:text-[11px] dark:text-[#8a8175]">
-                  {loading ? "" : m.sub}
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
       <div className="mt-3 rounded-card border border-line bg-surface sm:mt-5 dark:border-white/[0.06] dark:bg-[#201c17]">
         <div className="flex flex-wrap items-baseline justify-between gap-2 px-3 pb-2 pt-3 sm:px-5 sm:pt-5">
           <h3 className="text-[13.5px] font-bold text-ink sm:text-[14px] dark:text-[#f4f1ea]">Sales by store</h3>
@@ -554,6 +528,8 @@ export default function HubDashboard() {
           <div className="py-10 text-center text-[13px] text-muted dark:text-[#a89f93]">Loading…</div>
         ) : phone ? (() => {
           const s = M.storeCols.find((x) => (col === "ALL" ? x.is_total : x.store_code === col)) ?? M.storeCols[M.storeCols.length - 1];
+          /* H308c: look up the Shopify figures for the selected store. */
+          const sh = salesByStore.find((x) => x.store_code === (s?.is_total ? "ALL" : s?.store_code));
           return (
             <div className="px-3 pb-3">
               <Segmented value={col} onChange={setCol}
@@ -564,6 +540,26 @@ export default function HubDashboard() {
                     {!s.is_total && <span className="h-2 w-2 rounded-full" style={{ background: STORES.find((x) => x.code === s.store_code)?.color }} />}
                     {s.is_total ? "All three stores" : STORES.find((x) => x.code === s.store_code)?.label ?? s.store_code}
                   </div>
+                  {/* H308c: Shopify sales lines on top, inside the same ladder. */}
+                  {sh && SHOPIFY_ROWS.map((row) => {
+                    const v = Number(sh[row.v] ?? 0);
+                    const n = row.n ? Number(sh[row.n] ?? 0) : null;
+                    return (
+                      <div key={`sh-${row.key}`} className="flex items-center gap-2 border-t border-line/60 py-2 first:border-0 dark:border-white/[0.04]">
+                        <div className="min-w-0 flex-1 pl-1">
+                          <div className={`text-[13px] ${row.strong ? "font-bold text-ink dark:text-[#f4f1ea]" : "font-medium text-ink dark:text-[#e7e2d8]"} ${row.tone ? TONE_TXT[row.tone] : ""}`}>{row.label}</div>
+                          {row.hint && <div className="truncate text-[10.5px] text-hint dark:text-[#8a8175]">{row.hint}</div>}
+                        </div>
+                        <div className="shrink-0 text-right tabular-nums">
+                          <div className={`whitespace-nowrap ${row.strong ? "text-[14px] font-extrabold" : "text-[13px] font-semibold"} ${row.tone ? TONE_TXT[row.tone] : "text-ink dark:text-[#f4f1ea]"}`}>
+                            {(row.neg && v > 0 ? "−" : "") + rs(v)}
+                          </div>
+                          {n !== null && <div className="whitespace-nowrap text-[10.5px] text-hint dark:text-[#8a8175]">{n.toLocaleString()} {n === 1 ? "order" : "orders"}</div>}
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {sh && <div className="my-1 border-t-2 border-line dark:border-white/[0.10]" />}
                   {LADDER.map((row) => {
                     const v = Number(s[row.v] ?? 0), n = Number(s[row.n] ?? 0);
                     const share = !row.below && row.key !== "sale" && s.sale_value > 0 ? Math.round((v / s.sale_value) * 100) : null;
@@ -611,9 +607,41 @@ export default function HubDashboard() {
                 </tr>
               </thead>
               <tbody>
+                {/* H308c: six Shopify-style sales lines, inside the same table
+                    with the same per-store columns. Rendered above the existing
+                    ladder, separated by a thicker divider. Each cell looks up
+                    the ShopifySalesRow for that store (or 'ALL' for totals). */}
+                {SHOPIFY_ROWS.map((row, idx) => (
+                  <tr key={`sh-${row.key}`}
+                    className={idx === 0 ? "" : "border-t border-line/60 dark:border-white/[0.04]"}>
+                    <td className="sticky left-0 z-10 bg-surface py-2.5 pr-3 pl-5 dark:bg-[#201c17]">
+                      <div className={`${row.strong ? "font-bold text-ink dark:text-[#f4f1ea]" : "font-medium text-ink dark:text-[#e7e2d8]"} ${row.tone ? TONE_TXT[row.tone] : ""}`}>
+                        {row.label}
+                      </div>
+                      {row.hint && <div className="hidden text-[11px] text-hint sm:block dark:text-[#8a8175]">{row.hint}</div>}
+                    </td>
+                    {M.storeCols.map((s) => {
+                      const sh = salesByStore.find((x) => x.store_code === (s.is_total ? "ALL" : s.store_code));
+                      const v = sh ? Number(sh[row.v] ?? 0) : 0;
+                      const n = sh && row.n ? Number(sh[row.n] ?? 0) : null;
+                      return (
+                        <td key={s.store_code} className={`px-4 py-2.5 text-right tabular-nums ${s.is_total ? "bg-panel/60 dark:bg-white/[0.04]" : ""}`}>
+                          <div className={`whitespace-nowrap ${row.strong ? "text-[14px] font-extrabold" : "font-semibold"} ${row.tone ? TONE_TXT[row.tone] : "text-ink dark:text-[#f4f1ea]"}`}>
+                            {(row.neg && v > 0 ? "−" : "") + rs(v)}
+                          </div>
+                          {n !== null && (
+                            <div className="whitespace-nowrap text-[11px] text-hint dark:text-[#8a8175]">
+                              {n.toLocaleString()} {n === 1 ? "order" : "orders"}
+                            </div>
+                          )}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
                 {LADDER.map((row) => (
                   <tr key={row.key}
-                    className={`${row.below ? "border-t-2 border-line dark:border-white/[0.10]" : "border-t border-line/60 dark:border-white/[0.04]"}`}>
+                    className={`${row.below ? "border-t-2 border-line dark:border-white/[0.10]" : row.key === "sale" ? "border-t-2 border-line dark:border-white/[0.10]" : "border-t border-line/60 dark:border-white/[0.04]"}`}>
                     <td className="sticky left-0 z-10 bg-surface py-2.5 pr-3 dark:bg-[#201c17]"
                       style={{ paddingLeft: `${20 + row.indent * 16}px` }}>
                       <div className={`${row.strong ? "font-bold text-ink dark:text-[#f4f1ea]" : "font-medium text-ink dark:text-[#e7e2d8]"} ${row.tone ? TONE_TXT[row.tone] : ""}`}>
