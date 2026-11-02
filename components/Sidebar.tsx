@@ -5,7 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import {
   LayoutDashboard, Boxes, Layers, Factory, Truck, Shirt, ClipboardList,
   FileBarChart, CheckSquare, Gem, LogOut, Wallet, ArrowLeftRight,
-  Warehouse, PackageCheck, UsersRound, ShoppingCart,
+  Warehouse, PackageCheck, UsersRound,
   ChevronDown, ArrowLeft, type LucideIcon,
 } from "lucide-react";
 import { useProfile } from "@/lib/useProfile";
@@ -80,13 +80,6 @@ const NAV: NavItem[] = [
       { label: "Blocked items", href: "/reports/warehouse/blocked" },
     ] },
     { label: "Graph", href: "/reports/warehouse/graph" },
-  ] },
-
-  /* ═══ CARREFOUR ═══ (K192) Carrefour's own stock reports per shop, put
-     beside what the warehouse sent them: what each shop holds and sold. */
-  { label: "Carrefour", Icon: ShoppingCart, children: [
-    { label: "Stock & sales", href: "/carrefour" },
-    { label: "Upload report", href: "/carrefour/upload" },
   ] },
 
   /* ═══ PAYMENTS ═══ its own section, serving both departments. */

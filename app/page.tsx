@@ -2,7 +2,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Factory, ShoppingBag, Store, ShieldCheck, ChevronRight, LogOut } from "lucide-react";
+import { Factory, ShoppingBag, Store, ShoppingCart, ShieldCheck, ChevronRight, LogOut } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import ThemeToggle from "@/components/ThemeToggle";
 import { usePermissions } from "@/lib/usePermissions";
@@ -32,6 +32,10 @@ const DEPARTMENTS = [
   { href: "/retail", title: "Shops Sales", subtitle: "Retail shops · sales, cash book & commissions", icon: Store, light: "bg-salmon-soft", chip: "dark:bg-salmon",
     needs: ["retail.access", "retail.dashboard.view", "retail.sales.view", "retail.cashbook.view",
             "retail.expenses.view", "retail.employees.view", "retail.payroll.view"] },
+  /* K195 — Carrefour is one customer, but it pays on its own 100-day clock with
+     its own deductions, so it has its own door. */
+  { href: "/carrefour", title: "Carrefour", subtitle: "Stock, invoices, 100-day maturity & deductions", icon: ShoppingCart, light: "bg-lavender-soft", chip: "dark:bg-lavender",
+    needs: ["carrefour.view", "carrefour.upload", "carrefour.accounts.view", "carrefour.accounts.manage"] },
   /* Administration is not a business — it is the room where people and access
      are managed. It carries a `needs` list, so it only appears for someone who
      can actually manage users or roles. Staff never see it at all, which is
@@ -114,7 +118,9 @@ export default function DepartmentChooser() {
             {visible.map(({ href, title, subtitle, icon: Icon, light, chip }) => (
               <Link
                 key={href}
-                href={title === "Karkhana" ? landing : href}
+                href={title === "Karkhana" ? landing
+                  : title === "Carrefour" && can(["carrefour.accounts.view", "carrefour.accounts.manage"]) ? "/carrefour/dashboard"
+                  : href}
                 className={`reveal group flex items-center gap-4 rounded-card border border-line ${light} px-5 py-[18px] shadow-soft transition-all duration-200 hover:-translate-y-0.5 hover:shadow-card dark:border-white/[0.06] dark:bg-[#201c17] dark:shadow-none dark:hover:bg-[#26221b]`}
               >
                 <span className={`flex h-12 w-12 flex-none items-center justify-center rounded-[15px] bg-ink text-white dark:text-[#141414] ${chip}`}>

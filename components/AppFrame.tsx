@@ -4,6 +4,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { Lock } from "lucide-react";
 import Link from "next/link";
 import Sidebar from "./Sidebar";
+import CarrefourSidebar from "./carrefour/CarrefourSidebar";
 import MobileBar from "./MobileBar";
 import KarkhanaBell from "./KarkhanaBell";
 import SetPassword from "./SetPassword";
@@ -44,11 +45,14 @@ function FrameContent({ children }: { children: React.ReactNode }) {
   const { ready, can } = usePermissions();
   const allowed = can(requiredFor(pathname));
   const [navOpen, setNavOpen] = useState(false);
+  const isCarrefour = pathname === "/carrefour" || pathname.startsWith("/carrefour/");
   return (
     <div className="flex h-[100dvh] overflow-hidden bg-canvas">
-      <Sidebar open={navOpen} onClose={() => setNavOpen(false)} />
+      {isCarrefour
+        ? <CarrefourSidebar open={navOpen} onClose={() => setNavOpen(false)} />
+        : <Sidebar open={navOpen} onClose={() => setNavOpen(false)} />}
       <div className="flex min-w-0 flex-1 flex-col">
-        <MobileBar title="Karkhana" onOpen={() => setNavOpen(true)} right={<KarkhanaBell />} />
+        <MobileBar title={isCarrefour ? "Carrefour" : "Karkhana"} onOpen={() => setNavOpen(true)} right={<KarkhanaBell />} />
         <main className="min-w-0 flex-1 overflow-y-auto overflow-x-hidden">
           {!ready ? null : allowed ? children : <AccessRestricted />}
         </main>

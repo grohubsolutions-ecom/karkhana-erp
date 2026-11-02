@@ -39,6 +39,13 @@ export const ROUTE_PERMS: Record<string, string[] | null> = {
      separate: someone may read the sold figures without loading files. */
   "/carrefour": ["carrefour.view", "carrefour.upload"],
   "/carrefour/upload": ["carrefour.upload"],
+  /* K195 — the money side. Reading shop stock does not open these. */
+  "/carrefour/dashboard": ["carrefour.accounts.view", "carrefour.accounts.manage"],
+  "/carrefour/invoices": ["carrefour.accounts.view", "carrefour.accounts.manage"],
+  "/carrefour/maturity": ["carrefour.accounts.view", "carrefour.accounts.manage"],
+  "/carrefour/debit-notes": ["carrefour.accounts.view", "carrefour.accounts.manage"],
+  "/carrefour/payments": ["carrefour.accounts.view", "carrefour.accounts.manage"],
+  "/carrefour/terms": ["carrefour.accounts.view", "carrefour.accounts.manage"],
   "/grn/out": ["inventory.view", "inventory.issue"],
   "/packing": ["production.view", "production.entry"],
   "/grn/stitching": ["production.view", "production.entry"],
@@ -123,6 +130,7 @@ export const OTHER_DEPARTMENT_PERMS = [
   "hub.dashboard.view", "hub.orders.view", "hub.logistics.view", "hub.finance.view", "hub.attendance.view",
   "retail.access", "retail.dashboard.view", "retail.sales.view", "retail.cashbook.view",
   "retail.expenses.view", "retail.employees.view", "retail.payroll.view",
+  "carrefour.view", "carrefour.upload", "carrefour.accounts.view", "carrefour.accounts.manage",
   "users.manage", "roles.manage",
 ];
 
