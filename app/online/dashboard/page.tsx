@@ -1,7 +1,7 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLiveTables } from "@/lib/useLiveTables";
-import { ShoppingBag, Clock, Undo2, Wallet, TrendingUp, Truck, RefreshCw, MapPin, Ban } from "lucide-react";
+import { ShoppingBag, Clock, Undo2, Wallet, TrendingUp, Truck, RefreshCw, MapPin, Ban, Receipt, Tag, Package, XCircle } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { HubRange, PageActions, Segmented, useIsPhone } from "@/components/HubUI";
 import { rangeDates, rs } from "@/lib/dateRange";
@@ -73,6 +73,22 @@ type DashCounts = {
    why "Today" looked as if cancellations were not arriving. */
 type DashCancels = { cancelled: number; not_fulfilled: number; fulfilled: number; placed_earlier: number };
 
+/* H308 (2 Nov 2026): Shopify-style sales lines — exactly how Shopify's own
+   finance report breaks a store's revenue down. All six come from
+   online_orders (Shopify is the source of truth for order value). The math:
+     Gross sales      = subtotal + discount_total   (products at list price)
+     Discounts        = discount_total               (promo codes, line discounts)
+     Returns          = order amount, fulfilled then cancelled
+     Cancellations    = order amount, cancelled before fulfilment
+     Shipping charges = shipping_total               (what customers paid for delivery)
+     Net sales        = Gross − Discounts − Returns − Cancellations
+   Verified against Shopify's own fields: amount = subtotal + shipping + tax. */
+type ShopifySales = {
+  gross_sales: number; discounts: number; returns_amount: number;
+  cancellations: number; shipping_charges: number; net_sales: number;
+  returns_count: number; cancellations_count: number; order_count: number;
+};
+
 type RateRow = { month_label: string; courier: string; returned: number;
                  return_pct: number | null; change_pts: number | null;
                  cod_returned: number | null; is_part_month: boolean };
@@ -139,6 +155,7 @@ export default function HubDashboard() {
   const [summary, setSummary] = useState<DashSummary | null>(null);
   const [counts, setCounts] = useState<DashCounts | null>(null);
   const [cancels, setCancels] = useState<DashCancels | null>(null);
+  const [sales, setSales] = useState<ShopifySales | null>(null);
 
   /* EVERY FIGURE ON THIS PAGE IS COUNTED IN THE DATABASE.
      This page used to fetch 1,000 orders and 1,000 parcels and add them up
@@ -158,12 +175,13 @@ export default function HubDashboard() {
     const [from, to] = rangeDates(preset, cf, ct);
     const args = { p_from: from, p_to: to, p_store: store === "ALL" ? null : store };
 
-    const [sum, br, rt, cnt, cx] = await Promise.all([
+    const [sum, br, rt, cnt, cx, sh] = await Promise.all([
       supabase.rpc("hub_dashboard_summary", args),
       supabase.rpc("hub_dashboard_breakdown", args),
       supabase.rpc("hub_return_rates", { p_months: 3 }),
       supabase.rpc("hub_dashboard_counts", args),
       supabase.rpc("hub_dashboard_cancellations", args),
+      supabase.rpc("hub_dashboard_shopify_sales", args),
     ]);
     if (my !== reqId.current) return;          // superseded by a newer request
     const firstErr = sum.error ?? br.error ?? cnt.error;
@@ -173,6 +191,9 @@ export default function HubDashboard() {
     /* A missing function (H287 not run yet) hides the row instead of
        putting an error over the whole dashboard. */
     setCancels(cx.error ? null : ((cx.data as DashCancels[])?.[0] ?? null));
+    /* Shopify sales — same tolerance: if the H308 migration hasn't landed,
+       the whole section hides rather than breaking the dashboard. */
+    setSales(sh.error ? null : ((sh.data as ShopifySales[])?.[0] ?? null));
     setBreakdown((br.data as Breakdown) ?? null);
     setRates((rt.data as RateRow[]) ?? []);
     setLoading(false);
@@ -474,6 +495,56 @@ export default function HubDashboard() {
           THE COURIER DECIDES, NOT SHOPIFY. 145 of 227 parcels that came back in
           30 days were then cancelled in Shopify; reading Shopify first would
           call a return a cancellation. */}
+      {/* H308 (2 Nov 2026) — SHOPIFY SALES BREAKDOWN.
+          The six figures Zeeshan reads off Shopify's own finance report, in
+          one block, from the same Shopify data we already store. Hidden if the
+          H308 migration hasn't landed yet (sales stays null). Mobile: 2-column
+          grid; tablet: 3; desktop: 6 across so the whole breakdown reads as
+          one row. The order is deliberate: Gross → Discounts → Returns →
+          Cancellations → Shipping → Net, matching Shopify's layout so the
+          numbers line up with what the owner sees on Shopify itself. */}
+      {sales && (
+        <div className="mt-3 rounded-card border border-line bg-surface sm:mt-5 dark:border-white/[0.06] dark:bg-[#201c17]">
+          <div className="flex flex-wrap items-baseline justify-between gap-2 px-3 pb-2 pt-3 sm:px-5 sm:pt-5">
+            <h3 className="text-[13.5px] font-bold text-ink sm:text-[14px] dark:text-[#f4f1ea]">
+              Shopify sales {store !== "ALL" && <span className="font-normal text-muted dark:text-[#a89f93]">· {STORES.find((s) => s.code === store)?.label ?? store}</span>}
+            </h3>
+            <span className="text-[11px] text-hint sm:text-[11.5px] dark:text-[#8a8175]">
+              exact figures from Shopify · gross − discounts − returns − cancellations = net
+            </span>
+          </div>
+          <div className="grid grid-cols-2 gap-0 border-t border-line sm:grid-cols-3 lg:grid-cols-6 dark:border-white/[0.06]">
+            {([
+              { label: "Gross sales",      value: sales.gross_sales,      Icon: Wallet,     tone: "text-ink dark:text-[#f4f1ea]",         sub: `${sales.order_count.toLocaleString()} orders`,                                                neg: false, bold: false },
+              { label: "Discounts",        value: sales.discounts,        Icon: Tag,        tone: "text-amber-strong dark:text-amber",    sub: "promo codes & line discounts",                                                                neg: true,  bold: false },
+              { label: "Returns",          value: sales.returns_amount,   Icon: Undo2,      tone: "text-red-700 dark:text-salmon",        sub: `${sales.returns_count.toLocaleString()} cancelled after fulfilment`,                          neg: true,  bold: false },
+              { label: "Cancellations",    value: sales.cancellations,    Icon: XCircle,    tone: "text-red-700 dark:text-salmon",        sub: `${sales.cancellations_count.toLocaleString()} cancelled before fulfilment`,                   neg: true,  bold: false },
+              { label: "Shipping charges", value: sales.shipping_charges, Icon: Truck,      tone: "text-ink dark:text-[#f4f1ea]",         sub: "what customers paid for delivery",                                                            neg: false, bold: false },
+              { label: "Net sales",        value: sales.net_sales,        Icon: Receipt,    tone: "text-success font-extrabold",          sub: "what became a sale",                                                                          neg: false, bold: true  },
+            ]).map((m, i) => (
+              <div key={m.label}
+                className={`min-w-0 border-line p-2.5 sm:p-4 dark:border-white/[0.06]
+                  ${i % 2 === 0 ? "border-r" : ""}
+                  ${i >= 2 ? "border-t sm:border-t" : ""}
+                  sm:[&:nth-child(3n)]:border-r-0 sm:[&:nth-child(3)]:border-t-0
+                  sm:[&:nth-child(n+4)]:border-t
+                  lg:border-t-0 lg:[&:not(:last-child)]:border-r lg:[&:nth-child(3n)]:border-r
+                  ${m.bold ? "bg-success-soft/40 dark:bg-white/[0.03]" : ""}`}>
+                <div className="flex items-center gap-1.5 text-[11.5px] font-medium text-muted sm:text-[12px] dark:text-[#a89f93]">
+                  <m.Icon size={13} className="shrink-0" /> {m.label}
+                </div>
+                <div className={`mt-1 max-sm:truncate text-[15.5px] tabular-nums sm:text-[18px] ${m.bold ? "font-extrabold" : "font-bold"} ${m.tone}`}>
+                  {loading ? "—" : (m.neg && Number(m.value) > 0 ? "−" : "") + rs(Number(m.value))}
+                </div>
+                <div className="mt-0.5 text-[10.5px] leading-tight text-hint sm:text-[11px] dark:text-[#8a8175]">
+                  {loading ? "" : m.sub}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="mt-3 rounded-card border border-line bg-surface sm:mt-5 dark:border-white/[0.06] dark:bg-[#201c17]">
         <div className="flex flex-wrap items-baseline justify-between gap-2 px-3 pb-2 pt-3 sm:px-5 sm:pt-5">
           <h3 className="text-[13.5px] font-bold text-ink sm:text-[14px] dark:text-[#f4f1ea]">Sales by store</h3>
