@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState, useCallback } from "react";
-import { Loader2, UserPlus, ShieldCheck, X, KeyRound, Users, Trash2, RotateCcw } from "lucide-react";
+import { Loader2, UserPlus, ShieldCheck, X, KeyRound, Users, Trash2, RotateCcw, AtSign } from "lucide-react";
 import IconChip from "@/components/IconChip";
 import { supabase } from "@/lib/supabase";
 import { useConfirm } from "@/components/ConfirmDialog";
@@ -90,6 +90,36 @@ export default function UsersTab({ canManage }: { canManage: boolean }) {
     if (error) { setError(await invokeError(error)); return; }
     if ((data as { error?: string })?.error) { setError((data as { error: string }).error); return; }
     window.alert(`Password reset for ${name}. Share the new password with them — they'll set their own on next login.`);
+  }
+
+  /* H309 (3 Nov 2026): admin change of a user's login email. Previously the
+     only way was to delete and recreate the account, which lost everything
+     linked by user_id (role assignments, attendance, notification history).
+     The edge function updates auth.users AND app_users in one shot and skips
+     Supabase's confirmation email — the admin is making the change on the
+     user's behalf, so an auto-sent confirmation to the NEW address would be
+     a surprise to someone who hasn't been told it is theirs yet. */
+  async function changeEmail(userId: string, name: string, current: string) {
+    if (!supabase) return;
+    const prompt = `Change ${name}'s login email.\n\nCurrent: ${current || "(none)"}\n\nType the new email address:`;
+    const ne = window.prompt(prompt, current && !current.endsWith(SYNTH) ? current : "");
+    if (ne === null) return;
+    const trimmed = ne.trim().toLowerCase();
+    if (!trimmed) { setError("Email cannot be empty."); return; }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) { setError("That doesn't look like a valid email address."); return; }
+    if (trimmed === (current || "").toLowerCase()) return;   // nothing to do
+    if (!(await confirm({
+      title: `Change ${name}'s email?`,
+      body: `From ${current || "(none)"} → ${trimmed}. They'll use the new email to log in from now on. Their password is NOT changed.`,
+      confirmLabel: "Change email",
+    }))) return;
+    setBusy(userId); setError("");
+    const { data, error } = await supabase.functions.invoke("create-user", { body: { action: "change_email", user_id: userId, new_email: trimmed } });
+    setBusy(null);
+    if (error) { setError(await invokeError(error)); return; }
+    if ((data as { error?: string })?.error) { setError((data as { error: string }).error); return; }
+    window.alert(`Email changed for ${name}. They log in with ${trimmed} from now on.`);
+    load();
   }
 
   function openAdd() { setNf({ ...EMPTY_NEW }); setCreateError(""); setCreatedMsg(""); setShowAdd(true); }
@@ -208,7 +238,17 @@ export default function UsersTab({ canManage }: { canManage: boolean }) {
                     </td>
                     <td className="px-5 py-3">
                       {canManage && (
-                        <div className="flex items-center justify-end gap-1.5">
+                        <div className="flex flex-wrap items-center justify-end gap-1.5">
+                          {/* H309: admin-side change-email, available for every
+                              account (including synthetic phone-only ones, which
+                              lets you turn a phone-only login into one with a
+                              real email). Super-admin accounts can only be
+                              changed by another super admin — the edge function
+                              enforces that too, this is only the UI gate. */}
+                          <button onClick={() => changeEmail(id, u.full_name as string, email)} disabled={busy === id}
+                            className="inline-flex items-center gap-1 rounded-full border border-line px-2.5 py-1 text-[12px] font-semibold text-ink/70 hover:bg-panel disabled:opacity-50" title="Change login email">
+                            <AtSign size={13} /> Email
+                          </button>
                           {id !== meId && (
                             <button onClick={() => resetPassword(id, u.full_name as string)} disabled={busy === id}
                               className="inline-flex items-center gap-1 rounded-full border border-line px-2.5 py-1 text-[12px] font-semibold text-ink/70 hover:bg-panel disabled:opacity-50" title="Reset password">
