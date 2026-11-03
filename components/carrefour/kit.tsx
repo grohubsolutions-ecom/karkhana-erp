@@ -7,6 +7,7 @@ export const KINDS: { key: string; label: string }[] = [
   { key: "back_margin", label: "Back margin" },
   { key: "rebate", label: "Rebate" },
   { key: "supply_fee", label: "Supply fee" },
+  { key: "margin_support", label: "Margin support fee" },
   { key: "other", label: "Other" },
 ];
 export const kindLabel = (k: string) => KINDS.find((x) => x.key === k)?.label ?? k;

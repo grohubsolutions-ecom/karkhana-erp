@@ -3,7 +3,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
   ArrowLeft, LayoutDashboard, FileText, CalendarClock, ReceiptText, Banknote,
-  Percent, Boxes, Upload, ShoppingCart, LogOut, type LucideIcon,
+  Percent, Boxes, Upload, ShoppingCart, LogOut, ClipboardList, Undo2, Barcode, type LucideIcon,
 } from "lucide-react";
 import { useProfile } from "@/lib/useProfile";
 import { usePermissions } from "@/lib/usePermissions";
@@ -12,11 +12,18 @@ import { supabase } from "@/lib/supabase";
 
 /* THE CARREFOUR MENU. Its own door on the home screen (K195), so the two
    report screens moved here from the Karkhana menu: same pages, same URLs. */
-const NAV: { label: string; href: string; Icon: LucideIcon }[] = [
+type Row = { label: string; href: string; Icon: LucideIcon } | { heading: string };
+const NAV: Row[] = [
   { label: "Dashboard", href: "/carrefour/dashboard", Icon: LayoutDashboard },
+  { heading: "Orders" },
+  { label: "All orders", href: "/carrefour/orders", Icon: ClipboardList },
+  { label: "Returns", href: "/carrefour/returns", Icon: Undo2 },
+  { label: "Warehouse invoices", href: "/carrefour/invoices", Icon: FileText },
+  { heading: "Barcodes & stock" },
+  { label: "Articles & margins", href: "/carrefour/articles", Icon: Barcode },
   { label: "Stock & sales", href: "/carrefour", Icon: Boxes },
   { label: "Upload report", href: "/carrefour/upload", Icon: Upload },
-  { label: "Invoices", href: "/carrefour/invoices", Icon: FileText },
+  { heading: "Finance" },
   { label: "Maturity", href: "/carrefour/maturity", Icon: CalendarClock },
   { label: "Debit notes", href: "/carrefour/debit-notes", Icon: ReceiptText },
   { label: "Payments", href: "/carrefour/payments", Icon: Banknote },
@@ -33,7 +40,9 @@ export default function CarrefourSidebar({ open, onClose }: { open?: boolean; on
     if (supabase) await supabase.auth.signOut();
     router.replace("/login");
   }
-  const links = NAV.filter((n) => can(ROUTE_PERMS[n.href] ?? null));
+  const allowed = NAV.filter((n) => "heading" in n || can(ROUTE_PERMS[n.href] ?? null));
+  /* A heading with nothing under it is noise. */
+  const links = allowed.filter((n, i) => !("heading" in n) || (allowed[i + 1] && !("heading" in allowed[i + 1])));
 
   return (
     <>
@@ -52,7 +61,9 @@ export default function CarrefourSidebar({ open, onClose }: { open?: boolean; on
           </div>
         </div>
         <nav className="flex-1 space-y-1 overflow-y-auto px-3" onClick={(e) => { if ((e.target as HTMLElement).closest("a")) onClose?.(); }}>
-          {links.map(({ label, href, Icon }) => {
+          {links.map((n) => {
+            if ("heading" in n) return <p key={n.heading} className="px-3.5 pb-0.5 pt-3 text-[10.5px] font-bold uppercase tracking-wide text-hint">{n.heading}</p>;
+            const { label, href, Icon } = n;
             const on = pathname === href;
             return (
               <Link key={href} href={href}

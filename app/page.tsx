@@ -34,8 +34,8 @@ const DEPARTMENTS = [
             "retail.expenses.view", "retail.employees.view", "retail.payroll.view"] },
   /* K195 — Carrefour is one customer, but it pays on its own 100-day clock with
      its own deductions, so it has its own door. */
-  { href: "/carrefour", title: "Carrefour", subtitle: "Stock, invoices, 100-day maturity & deductions", icon: ShoppingCart, light: "bg-lavender-soft", chip: "dark:bg-lavender",
-    needs: ["carrefour.view", "carrefour.upload", "carrefour.accounts.view", "carrefour.accounts.manage"] },
+  { href: "/carrefour", title: "Carrefour", subtitle: "LPOs, invoices, returns, stock & finance", icon: ShoppingCart, light: "bg-lavender-soft", chip: "dark:bg-lavender",
+    needs: ["carrefour.view", "carrefour.upload", "carrefour.orders.view", "carrefour.orders.manage", "carrefour.accounts.view", "carrefour.accounts.manage"] },
   /* Administration is not a business — it is the room where people and access
      are managed. It carries a `needs` list, so it only appears for someone who
      can actually manage users or roles. Staff never see it at all, which is
@@ -120,6 +120,7 @@ export default function DepartmentChooser() {
                 key={href}
                 href={title === "Karkhana" ? landing
                   : title === "Carrefour" && can(["carrefour.accounts.view", "carrefour.accounts.manage"]) ? "/carrefour/dashboard"
+                  : title === "Carrefour" && can(["carrefour.orders.view", "carrefour.orders.manage"]) ? "/carrefour/orders"
                   : href}
                 className={`reveal group flex items-center gap-4 rounded-card border border-line ${light} px-5 py-[18px] shadow-soft transition-all duration-200 hover:-translate-y-0.5 hover:shadow-card dark:border-white/[0.06] dark:bg-[#201c17] dark:shadow-none dark:hover:bg-[#26221b]`}
               >
