@@ -11,7 +11,7 @@ type Pay = {
   employee_id: string; code: string; name: string; department: string | null; pay_type: string; base_amount: number;
   present_days: number; half_days: number; absent_days: number; paid_leave_days: number; review_days: number;
   late_minutes: number; early_minutes: number; overtime_pending_minutes: number; overtime_approved_minutes: number;
-  attendance_cut: number; overtime_pay: number; net_pay: number | null; wages_paid: number; note: string | null;
+  attendance_cut: number; overtime_pay: number; net_pay: number | null; wages_paid: number; advances: number; deductions: number; bonuses: number; note: string | null;
 };
 
 export default function PayrollTab() {
@@ -28,14 +28,14 @@ export default function PayrollTab() {
   }, [month]);
   useEffect(() => { load(); }, [load]);
 
-  const balance = (r: Pay) => (r.net_pay == null ? null : Number(r.net_pay) - Number(r.wages_paid));
+  const balance = (r: Pay) => (r.net_pay == null ? null : Number(r.net_pay) + Number(r.bonuses) - Number(r.deductions) - Number(r.advances) - Number(r.wages_paid));
   const review = rows.reduce((t, r) => t + r.review_days, 0);
 
   function download() {
     exportExcel({
       title: `Attendance payroll ${month}`,
-      headers: ["Code", "Name", "Department", "Pay type", "Rate", "Present", "Absent", "Late min", "Cut", "Overtime", "Net", "Already paid", "Balance", "Note"],
-      rows: rows.map((r) => [r.code, r.name, r.department, r.pay_type, r.base_amount, r.present_days, r.absent_days, r.late_minutes, r.attendance_cut, r.overtime_pay, r.net_pay, r.wages_paid, balance(r), r.note]),
+      headers: ["Code", "Name", "Department", "Pay type", "Rate", "Present", "Absent", "Late min", "Cut", "Overtime", "Net", "Bonus", "Deduction", "Advance", "Already paid", "Balance", "Note"],
+      rows: rows.map((r) => [r.code, r.name, r.department, r.pay_type, r.base_amount, r.present_days, r.absent_days, r.late_minutes, r.attendance_cut, r.overtime_pay, r.net_pay, r.bonuses, r.deductions, r.advances, r.wages_paid, balance(r), r.note]),
     });
   }
 
@@ -52,10 +52,10 @@ export default function PayrollTab() {
         <Stat label="Still to pay" value={money(rows.reduce((t, r) => t + (balance(r) ?? 0), 0))} />
         <Stat label="Days to review first" value={review} />
       </div>
-      <TableBox min={1040}>
-        <Head cols={["Name", "Department", "Pay type", "Rate", "Present", "Absent", "Late", "Pending OT", "Cut", "Overtime", "Net", "Already paid", "Balance"]} />
+      <TableBox min={1240}>
+        <Head cols={["Name", "Department", "Pay type", "Rate", "Present", "Absent", "Late", "Pending OT", "Cut", "Overtime", "Net", "Bonus", "Deduction", "Advance", "Already paid", "Balance"]} />
         <tbody className="divide-y divide-line dark:divide-white/[0.05]">
-          {rows.length === 0 ? <Empty span={13} loading={loading} text="No staff are set up for this month." /> : rows.map((r) => (
+          {rows.length === 0 ? <Empty span={16} loading={loading} text="No staff are set up for this month." /> : rows.map((r) => (
             <tr key={r.employee_id} className="text-ink dark:text-[#e7e2d8]">
               <td className={`${td} font-semibold`}>{r.name}{r.note && <span className="block text-[11.5px] font-normal text-muted">{r.note}</span>}</td>
               <td className={td}>{r.department ?? "—"}</td>
@@ -68,6 +68,9 @@ export default function PayrollTab() {
               <td className={td}>{money(r.attendance_cut)}</td>
               <td className={td}>{money(r.overtime_pay)}</td>
               <td className={`${td} font-semibold`}>{r.net_pay == null ? "—" : money(r.net_pay)}</td>
+              <td className={td}>{money(r.bonuses)}</td>
+              <td className={td}>{money(r.deductions)}</td>
+              <td className={td}>{money(r.advances)}</td>
               <td className={td}>{money(r.wages_paid)}</td>
               <td className={`${td} font-semibold`}>{balance(r) == null ? "—" : money(balance(r))}</td>
             </tr>

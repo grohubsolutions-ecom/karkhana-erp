@@ -17,6 +17,7 @@ export type Day = {
   employee_id: string; att_date: string; first_in: string | null; last_out: string | null; worked_minutes: number;
   late_minutes: number; early_minutes: number; overtime_minutes: number; overtime_approved_minutes: number;
   status: string; is_manual: boolean; note: string | null;
+  scheduled_minutes?: number; extra_overtime_minutes?: number; extra_overtime_note?: string | null;
 };
 
 export const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];

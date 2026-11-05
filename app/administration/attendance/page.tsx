@@ -9,17 +9,21 @@ import TodayTab from "@/components/attendance/TodayTab";
 import StaffTab from "@/components/attendance/StaffTab";
 import ShiftsTab from "@/components/attendance/ShiftsTab";
 import ReviewTab from "@/components/attendance/ReviewTab";
+import PlannerTab from "@/components/attendance/PlannerTab";
+import ReportsTab from "@/components/attendance/ReportsTab";
 import PayrollTab from "@/components/attendance/PayrollTab";
 import WagesTab from "@/components/attendance/WagesTab";
 
-type Tab = "today" | "staff" | "shifts" | "review" | "wages" | "payroll";
+type Tab = "today" | "staff" | "shifts" | "review" | "planner" | "wages" | "payroll" | "reports";
 const TABS: { key: Tab; label: string; short?: string }[] = [
   { key: "today", label: "Today" },
   { key: "staff", label: "Staff" },
   { key: "shifts", label: "Shifts & departments", short: "Shifts" },
   { key: "review", label: "Review" },
+  { key: "planner", label: "Leave & extras", short: "Leave" },
   { key: "wages", label: "Daily wages", short: "Wages" },
   { key: "payroll", label: "Payroll" },
+  { key: "reports", label: "Reports" },
 ];
 
 export default function AttendancePage() {
@@ -40,8 +44,10 @@ export default function AttendancePage() {
             {tab === "staff" && <StaffTab />}
             {tab === "shifts" && <ShiftsTab />}
             {tab === "review" && <ReviewTab />}
+            {tab === "planner" && <PlannerTab />}
             {tab === "wages" && <WagesTab />}
             {tab === "payroll" && <PayrollTab />}
+            {tab === "reports" && <ReportsTab />}
           </>
         )}
       </div>

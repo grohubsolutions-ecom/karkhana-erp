@@ -49,7 +49,7 @@ const options = (serial: string) => [
   "OPERLOGStamp=9999",
   "ATTPHOTOStamp=9999",
   "ErrorDelay=30",
-  "Delay=10",
+  "Delay=30",
   "TransTimes=00:00;14:05",
   "TransInterval=1",
   "TransFlag=TransData AttLog",

@@ -9,12 +9,12 @@ import { Empty, ErrorNote, Head, TableBox, linkBtn, td } from "./ui";
 
 type Form = {
   id: string | null; name: string; phone: string; department_id: string; pay_type: string; pay_amount: string;
-  join_date: string; device_user_id: string; shift_id: string; working_days_per_month: string;
+  join_date: string; device_user_id: string; shift_id: string; own_start: string; own_end: string; working_days_per_month: string;
   late_cut_enabled: boolean; overtime_enabled: boolean; overtime_multiplier: string;
 };
 const blank = (): Form => ({
   id: null, name: "", phone: "", department_id: "", pay_type: "Monthly", pay_amount: "", join_date: karachiDate(),
-  device_user_id: "", shift_id: "", working_days_per_month: "26", late_cut_enabled: true, overtime_enabled: true, overtime_multiplier: "1",
+  device_user_id: "", shift_id: "", own_start: "", own_end: "", working_days_per_month: "26", late_cut_enabled: true, overtime_enabled: true, overtime_multiplier: "1",
 });
 const canonicalPay = (v: string | null) => {
   const s = (v ?? "").toLowerCase();
@@ -64,7 +64,7 @@ export default function StaffTab() {
     setForm({
       id: s.id, name: s.name, phone: s.phone ?? "", department_id: s.department_id ?? "", pay_type: canonicalPay(s.pay_type),
       pay_amount: s.pay_amount == null ? "" : String(s.pay_amount), join_date: s.join_date ?? "",
-      device_user_id: c?.device_user_id ?? "", shift_id: c?.shift_id ?? "",
+      device_user_id: c?.device_user_id ?? "", shift_id: c?.shift_id ?? "", own_start: "", own_end: "",
       working_days_per_month: String(c?.working_days_per_month ?? 26), late_cut_enabled: c?.late_cut_enabled ?? true,
       overtime_enabled: c?.overtime_enabled ?? true, overtime_multiplier: String(c?.overtime_multiplier ?? 1),
     });
@@ -75,6 +75,8 @@ export default function StaffTab() {
     if (!form.name.trim()) { setFormErr("Enter a name."); return; }
     if (!form.department_id) { setFormErr("Choose a department."); return; }
     if (form.pay_type !== "Piece-rate" && !(Number(form.pay_amount) > 0)) { setFormErr("Enter the pay amount."); return; }
+    const custom = form.shift_id === "custom";
+    if (custom && !(form.own_start && form.own_end && form.own_end > form.own_start)) { setFormErr("Enter a start time and a later end time."); return; }
     setBusy(true); setFormErr("");
     const person = {
       name: form.name.trim(), phone: form.phone.trim() || null, department_id: form.department_id, pay_type: form.pay_type,
@@ -84,8 +86,16 @@ export default function StaffTab() {
       ? await supabase.from("employees").update(person).eq("id", form.id).select("id").single()
       : await supabase.from("employees").insert(person).select("id").single();
     if (res.error || !res.data) { setBusy(false); setFormErr(res.error?.message ?? "Could not save."); return; }
+    let shiftId = form.shift_id || null;
+    if (custom) {
+      const label = `${person.name} ${form.own_start}–${form.own_end}`;
+      const found = await supabase.from("att_shifts").select("id").eq("name", label).maybeSingle();
+      const made = found.data ?? (await supabase.from("att_shifts").insert({ name: label, start_time: form.own_start, end_time: form.own_end }).select("id").single()).data;
+      if (!made) { setBusy(false); setFormErr("Could not save these hours."); setForm({ ...form, id: (res.data as { id: string }).id }); return; }
+      shiftId = (made as { id: string }).id;
+    }
     const up = await supabase.from("att_employee_settings").upsert({
-      employee_id: (res.data as { id: string }).id, device_user_id: form.device_user_id.trim() || null, shift_id: form.shift_id || null,
+      employee_id: (res.data as { id: string }).id, device_user_id: form.device_user_id.trim() || null, shift_id: shiftId,
       working_days_per_month: Number(form.working_days_per_month) || 26, late_cut_enabled: form.late_cut_enabled,
       overtime_enabled: form.overtime_enabled, overtime_multiplier: Number(form.overtime_multiplier) || 0, updated_at: new Date().toISOString(),
     }, { onConflict: "employee_id" });
@@ -168,9 +178,14 @@ export default function StaffTab() {
             <Field label="Own shift" hint="Leave on default to use the department's shift.">
               <select className={inputCls} value={form.shift_id} onChange={(e) => f({ shift_id: e.target.value })}>
                 <option value="">Department default</option>
+                <option value="custom">Set hours for this person…</option>
                 {shifts.map((s) => <option key={s.id} value={s.id}>{s.name} ({hhmm(s.start_time)}–{hhmm(s.end_time)})</option>)}
               </select>
             </Field>
+            {form.shift_id === "custom" && <>
+              <Field label="Starts at"><input type="time" className={inputCls} value={form.own_start} onChange={(e) => f({ own_start: e.target.value })} /></Field>
+              <Field label="Ends at"><input type="time" className={inputCls} value={form.own_end} onChange={(e) => f({ own_end: e.target.value })} /></Field>
+            </>}
             <Field label="Pay type">
               <select className={inputCls} value={form.pay_type} onChange={(e) => f({ pay_type: e.target.value })}>
                 {PAY_TYPES.map((p) => <option key={p}>{p}</option>)}
