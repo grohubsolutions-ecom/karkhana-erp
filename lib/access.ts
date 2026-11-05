@@ -75,6 +75,7 @@ export const ROUTE_PERMS: Record<string, string[] | null> = {
   "/reports": ["reports.view"],
   "/approvals": ["inventory.approve", "production.approve", "grn.approve"],
   "/administration": ["users.manage", "roles.manage"],
+  "/administration/attendance": ["employees.manage"],
   /* The Karkhana admin's own room: Karkhana logins and job roles only. */
   "/karkhana/team": ["karkhana.admin"],
 

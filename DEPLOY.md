@@ -13,6 +13,8 @@ Set these two in Vercel → Project → Settings → Environment Variables
 
 Without them the app falls back to preview mode (sample data, no real login).
 
+The attendance device route also needs `SUPABASE_SERVICE_ROLE_KEY` in Vercel. It is server only.
+
 ## Deploy
 
     npm install

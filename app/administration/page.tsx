@@ -49,6 +49,9 @@ export default function AdministrationPage() {
                   {t}
                 </button>
               ))}
+              <Link href="/administration/attendance" className="rounded-full bg-surface px-4 py-2 text-[13px] font-semibold text-muted transition hover:bg-panel">
+                Attendance & payroll
+              </Link>
             </div>
 
             {tab === "Employees" && <AdminEmployeesTab canManage={!!canManage} />}
