@@ -6,7 +6,7 @@ import { exportExcel } from "@/lib/export";
 import { STAFF_FIELDS, STATUS_LABEL, flatStaff, hours, karachiDate, karachiTime, type Day, type Staff } from "@/lib/attendance";
 import { Segmented } from "@/components/HubUI";
 import { btnGhost, inputCls } from "@/components/Modal";
-import { Empty, ErrorNote, Head, StatusBadge, TableBox, td } from "./ui";
+import { DeptPicker, Empty, ErrorNote, Head, StatusBadge, TableBox, deptOf, td } from "./ui";
 
 type Punch = { device_user_id: string; punched_at: string; raw_line: string | null };
 type Link = { employee_id: string; device_user_id: string | null };
@@ -17,6 +17,7 @@ const karachiDay = (v: string) => new Date(v).toLocaleDateString("en-CA", { time
 export default function ReportsTab() {
   const [month, setMonth] = useState(karachiDate().slice(0, 7));
   const [view, setView] = useState<View>("days");
+  const [dept, setDept] = useState("");
   const [person, setPerson] = useState("all");
   const [days, setDays] = useState<Day[]>([]);
   const [punches, setPunches] = useState<Punch[]>([]);
@@ -45,15 +46,22 @@ export default function ReportsTab() {
 
   const byId = useMemo(() => new Map(staff.map((s) => [s.id, s])), [staff]);
   const byDevice = useMemo(() => new Map(links.filter((l) => l.device_user_id).map((l) => [l.device_user_id as string, l.employee_id])), [links]);
-  const shownDays = days.filter((d) => person === "all" || d.employee_id === person);
-  const shownPunches = punches.filter((p) => person === "all" || byDevice.get(p.device_user_id) === person);
+  const names = useMemo(() => [...new Set(staff.filter((s) => s.is_active).map((s) => deptOf(s.departments?.name)))].sort(), [staff]);
+  const chosen = dept && (dept === "all" || names.includes(dept)) ? dept : names[0] ?? "";
+  const inDept = (id: string | undefined) => chosen === "all" || (!!id && deptOf(byId.get(id)?.departments?.name) === chosen);
+  const people = staff.filter((s) => inDept(s.id));
+  const shownDays = days.filter((d) => inDept(d.employee_id) && (person === "all" || d.employee_id === person));
+  const shownPunches = punches.filter((p) => {
+    const id = byDevice.get(p.device_user_id);
+    return (chosen === "all" || !id || inDept(id)) && (person === "all" || id === person);
+  });
   const punchName = (p: Punch) => byId.get(byDevice.get(p.device_user_id) ?? "")?.name ?? "Not linked";
   const capped = days.length >= LIMIT || punches.length >= LIMIT;
 
   function download() {
     if (view === "days") {
       exportExcel({
-        title: `Attendance ${month}`,
+        title: `Attendance ${chosen === "all" ? "all departments" : chosen} ${month}`,
         headers: ["Date", "Name", "Department", "In", "Out", "Worked", "Late min", "Early min", "Overtime min", "Status", "Note"],
         rows: shownDays.map((d) => {
           const s = byId.get(d.employee_id);
@@ -75,9 +83,10 @@ export default function ReportsTab() {
       {capped && <ErrorNote text={`Only the first ${LIMIT} rows of this month are shown.`} />}
       <div className="mb-4 flex flex-wrap items-center gap-2">
         <input type="month" value={month} onChange={(e) => setMonth(e.target.value)} className={`${inputCls} !w-44`} aria-label="Month" />
+        <DeptPicker names={names} value={chosen} onChange={(v) => { setDept(v); setPerson("all"); }} allLabel="All departments" />
         <select value={person} onChange={(e) => setPerson(e.target.value)} className={`${inputCls} !w-56`} aria-label="Person">
           <option value="all">Everyone</option>
-          {staff.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          {people.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
         </select>
         <Segmented value={view} onChange={setView} options={[{ key: "days", label: "Daily attendance" }, { key: "punches", label: "Machine punches" }]} />
         <button className={btnGhost} onClick={download}><Download size={14} /> Excel</button>

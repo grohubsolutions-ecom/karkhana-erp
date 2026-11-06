@@ -4,13 +4,14 @@ import { supabase } from "@/lib/supabase";
 import { hours, karachiDate, karachiTime, money } from "@/lib/attendance";
 import { inputCls } from "@/components/Modal";
 import { useConfirm } from "@/components/ConfirmDialog";
-import { Empty, ErrorNote, Head, Stat, StatusBadge, TableBox, linkBtn, td } from "./ui";
+import { DeptPicker, Empty, ErrorNote, Head, Stat, StatusBadge, TableBox, deptOf, linkBtn, td } from "./ui";
 
 type Wage = { employee_id: string; code: string; name: string; department: string | null; status: string | null; first_in: string | null; last_out: string | null; worked_minutes: number | null; amount_due: number | null; amount_paid: number | null };
 
 export default function WagesTab() {
   const [date, setDate] = useState(karachiDate());
   const [rows, setRows] = useState<Wage[]>([]);
+  const [dept, setDept] = useState("all");
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(true);
   const confirm = useConfirm();
@@ -37,20 +38,24 @@ export default function WagesTab() {
     if (error) setErr(error.message); else load();
   }
 
+  const names = [...new Set(rows.map((r) => deptOf(r.department)))];
+  const shown = rows.filter((r) => dept === "all" || deptOf(r.department) === dept);
+
   return (
     <div>
       <ErrorNote text={err} />
       <div className="mb-4 flex flex-wrap items-center gap-3">
         <input type="date" value={date} max={karachiDate()} onChange={(e) => setDate(e.target.value)} className={`${inputCls} !w-44`} aria-label="Date" />
+        <DeptPicker names={names} value={dept} onChange={setDept} allLabel="All daily-wage staff" />
       </div>
       <div className="mb-4 grid grid-cols-2 gap-3 md:max-w-md">
-        <Stat label="Due" value={money(rows.reduce((t, r) => t + (r.amount_paid == null ? Number(r.amount_due) || 0 : 0), 0))} />
-        <Stat label="Paid" value={money(rows.reduce((t, r) => t + (Number(r.amount_paid) || 0), 0))} />
+        <Stat label="Due" value={money(shown.reduce((t, r) => t + (r.amount_paid == null ? Number(r.amount_due) || 0 : 0), 0))} />
+        <Stat label="Paid" value={money(shown.reduce((t, r) => t + (Number(r.amount_paid) || 0), 0))} />
       </div>
       <TableBox>
         <Head cols={["Name", "Department", "In", "Out", "Worked", "Status", "Amount", ""]} />
         <tbody className="divide-y divide-line dark:divide-white/[0.05]">
-          {rows.length === 0 ? <Empty span={8} loading={loading} text="No daily-wage staff yet. Set Pay type to Daily in the Staff tab." /> : rows.map((r) => (
+          {shown.length === 0 ? <Empty span={8} loading={loading} text="No daily-wage staff yet. Set Pay type to Daily in the Staff tab." /> : shown.map((r) => (
             <tr key={r.employee_id} className="text-ink dark:text-[#e7e2d8]">
               <td className={`${td} font-semibold`}>{r.name}</td>
               <td className={td}>{r.department ?? "—"}</td>

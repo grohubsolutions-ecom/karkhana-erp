@@ -4,7 +4,7 @@ import { RefreshCw } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { STAFF_FIELDS, flatStaff, hours, karachiDate, karachiTime, type Day, type Staff } from "@/lib/attendance";
 import { inputCls, btnGhost } from "@/components/Modal";
-import { Empty, ErrorNote, Head, Stat, StatusBadge, TableBox, td } from "./ui";
+import { DeptPicker, Empty, ErrorNote, Head, Stat, StatusBadge, TableBox, deptOf, td } from "./ui";
 
 type Device = { serial_no: string; name: string; last_seen_at: string | null };
 
@@ -13,6 +13,7 @@ export default function TodayTab() {
   const [staff, setStaff] = useState<Staff[]>([]);
   const [days, setDays] = useState<Day[]>([]);
   const [devices, setDevices] = useState<Device[]>([]);
+  const [dept, setDept] = useState("");
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
 
@@ -32,7 +33,11 @@ export default function TodayTab() {
   useEffect(() => { load(); }, [load]);
 
   const byId = useMemo(() => new Map(days.map((d) => [d.employee_id, d])), [days]);
-  const count = (...s: string[]) => days.filter((d) => s.includes(d.status)).length;
+  const names = useMemo(() => [...new Set(staff.map((s) => deptOf(s.departments?.name)))].sort(), [staff]);
+  const chosen = dept && (dept === "all" || names.includes(dept)) ? dept : names[0] ?? "";
+  const shown = staff.filter((s) => chosen === "all" || deptOf(s.departments?.name) === chosen);
+  const shownDays = shown.map((s) => byId.get(s.id)).filter((d): d is Day => !!d);
+  const count = (...s: string[]) => shownDays.filter((d) => s.includes(d.status)).length;
   const online = (v: string | null) => !!v && Date.now() - new Date(v).getTime() < 5 * 60 * 1000;
 
   return (
@@ -40,6 +45,7 @@ export default function TodayTab() {
       <ErrorNote text={err} />
       <div className="mb-4 flex flex-wrap items-center gap-2">
         <input type="date" value={date} max={karachiDate()} onChange={(e) => setDate(e.target.value)} className={`${inputCls} !w-44`} aria-label="Date" />
+        <DeptPicker names={names} value={chosen} onChange={setDept} allLabel="All departments" />
         <button onClick={load} className={btnGhost}><RefreshCw size={14} /> Refresh</button>
         {devices.map((d) => (
           <span key={d.serial_no} className="ml-auto text-[12.5px] text-muted dark:text-[#a89f93]">
@@ -51,13 +57,13 @@ export default function TodayTab() {
       <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-4">
         <Stat label="Present or at work" value={count("present", "in_progress", "worked_off")} />
         <Stat label="Absent" value={count("absent")} />
-        <Stat label="Late" value={days.filter((d) => d.late_minutes > 0).length} />
+        <Stat label="Late" value={shownDays.filter((d) => d.late_minutes > 0).length} />
         <Stat label="Need review" value={count("missing_out", "no_shift")} />
       </div>
       <TableBox>
         <Head cols={["Name", "Department", "In", "Out", "Worked", "Late", "Early", "Status"]} />
         <tbody className="divide-y divide-line dark:divide-white/[0.05]">
-          {staff.length === 0 ? <Empty span={8} loading={loading} text="No active staff." /> : staff.map((s) => {
+          {shown.length === 0 ? <Empty span={8} loading={loading} text="No active staff." /> : shown.map((s) => {
             const d = byId.get(s.id);
             return (
               <tr key={s.id} className="text-ink dark:text-[#e7e2d8]">

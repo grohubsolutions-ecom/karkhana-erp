@@ -62,4 +62,17 @@ export function Stat({ label, value }: { label: string; value: React.ReactNode }
   );
 }
 
+export const NO_DEPT = "No department";
+export const deptOf = (name: string | null | undefined) => name || NO_DEPT;
+
+export function DeptPicker({ names, value, onChange, allLabel }: { names: string[]; value: string; onChange: (v: string) => void; allLabel: string }) {
+  return (
+    <select value={value} onChange={(e) => onChange(e.target.value)} aria-label="Department"
+      className="h-10 w-full rounded-full border border-line bg-surface px-3 text-[13px] font-semibold text-ink sm:w-60 dark:border-white/10 dark:bg-white/[0.03] dark:text-[#f4f1ea]">
+      {names.map((n) => <option key={n} value={n}>{n}</option>)}
+      <option value="all">{allLabel}</option>
+    </select>
+  );
+}
+
 export const linkBtn = "rounded-full border border-line px-3 py-1 text-[12px] font-semibold text-ink transition hover:bg-panel disabled:opacity-50 dark:border-white/10 dark:text-[#f4f1ea] dark:hover:bg-white/[0.06]";
