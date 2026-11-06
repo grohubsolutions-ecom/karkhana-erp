@@ -381,6 +381,15 @@ function parseOwnExInvoice(raw: string): Batch[] {
      row, so the import can name the parcel instead of only a total being off.
      INV-20250027: #TS4220 "7,997.00" arrived as "7" + ",997.00" and read as 997. */
   const unbalanced: string[] = [];
+  /* NOVEMBER 2026 LAYOUT (INV-20250029 onwards): the row columns became
+       UPFRONT · RESERVED (COD) · SHIPPING CHARGES · ADD. W. · NET TOTAL
+     — five amounts, not six, upfront FIRST, no fuel on the row, an extra
+     additional-weight charge, and Net Total = COD − shipping − add. weight,
+     POSITIVE when the courier owes you (the old sign was the other way).
+     Fuel went back to one line at the bottom. Every row of INV-29 was dropped
+     for having fewer than six amounts, so the import read 0 of 387.
+     Recognised by its header; the older layouts are read exactly as before. */
+  const addWLayout = /\bADD\.?\s*W\.?\s+NET TOTAL\b/i.test(flat);
   const re = /(\d{12})\s+(.*?)(?=\d{12}\s|Developed by Own Express|Own Express · Invoice|$)/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(flat))) {
@@ -388,6 +397,17 @@ function parseOwnExInvoice(raw: string): Batch[] {
     const st = /\b(Delivered|Returned|Return)\b/i.exec(rest);
     if (!st) continue;
     const ns = rest.match(new RegExp(AMT, "g"));
+    if (addWLayout) {
+      if (!ns || ns.length < 5) continue;
+      const [up, cod, ship, addW, netTotal] = ns.slice(0, 5).map((x) => Number(x.replace(/,/g, "")));
+      if (Math.abs(cod - up - ship - addW - netTotal) > 1) unbalanced.push(m[1]);
+      sumCharges += ship + addW; sumOwnexNet += netTotal;
+      rows.push({ tracking_id: m[1], status: st[1],
+                  cod: n2(cod), fee: n2(ship + addW), tax: 0,
+                  net: n2(netTotal),
+                  paid_on: date || null });
+      continue;
+    }
     if (!ns || ns.length < 6) continue;
     const v = ns.slice(0, 6).map((x) => Number(x.replace(/,/g, "")));
     if (Math.abs(v[3] + v[4] - v[2] - v[5]) > 1) unbalanced.push(m[1]);
@@ -438,6 +458,10 @@ function parseOwnExInvoice(raw: string): Batch[] {
     problem = `the rows come to ${fromRows}, the invoice pays ${payout}`;
   else if (fuelOnRows && off(sumOwnexNet, grand))
     problem = `the rows' net totals ${sumOwnexNet}, the grand total says ${grand}`;
+  /* November layout: "Payable Details … Total 470,255.00" is COD − shipping, the
+     rows' Net Totals added up — one more figure from the invoice to agree with. */
+  else if (addWLayout && shipping !== undefined && off(sumOwnexNet, n2(declaredCod - shipping)))
+    problem = `the rows' net totals ${sumOwnexNet}, the invoice's payable details say ${n2(declaredCod - shipping)}`;
 
   return [{
     ref, date, rows, courier: "OwnEx", declaredCount,
