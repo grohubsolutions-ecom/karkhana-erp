@@ -18,6 +18,7 @@ begin
     round(case
       when a.status = 'paid_leave' then e.pay_amount
       when a.status = 'present' and a.is_manual then e.pay_amount
+      when not s.late_cut_enabled and a.first_in is not null then e.pay_amount
       when a.last_out is null or coalesce(a.scheduled_minutes, 0) = 0 then 0
       else e.pay_amount * least(a.worked_minutes::numeric / a.scheduled_minutes, 1)
     end

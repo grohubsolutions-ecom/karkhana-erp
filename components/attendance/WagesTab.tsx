@@ -58,8 +58,8 @@ export default function WagesTab() {
         <DeptPicker names={names} value={dept} onChange={setDept} allLabel="All daily-wage staff" />
       </div>
       <div className="mb-3 rounded-card border border-line bg-surface p-3 text-[13px] text-ink dark:border-white/10 dark:bg-white/[0.03] dark:text-[#e7e2d8]">
-        <b>How it is worked out:</b> daily wage ÷ shift hours × hours worked. Full shift = full wage. Approved overtime is added on top.
-        The amount appears after the worker scans out. You can change it before you press Mark paid.
+        <b>How it is worked out:</b> daily wage ÷ shift hours × hours worked, so late arrival or early leaving is cut. Approved overtime is added on top.
+        Staff with pay cut turned off in Staff get the full wage once they scan in. You can change any amount before you press Mark paid.
       </div>
       <div className="mb-4 grid grid-cols-2 gap-3 md:max-w-md">
         <Stat label="To pay" value={money(shown.reduce((t, r) => t + (r.amount_paid == null ? Number(amountOf(r)) || 0 : 0), 0))} />
