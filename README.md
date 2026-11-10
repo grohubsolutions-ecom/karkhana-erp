@@ -1,31 +1,27 @@
-# H309 — Admin change-email for Hub users
+# Daily Wage Desk (K198)
 
-**Date:** 3 Nov 2026
+Supervisor portal at `/wage-desk`. Shows only Karkhana daily-wage workers (Karkhana, Labor and factory sections).
+Hub, Inventory, Shops Sales and all monthly-salary staff are never returned by the database.
 
-## What changed
+## Files
+- `supabase/migrations/K198_wage_desk_supervisor_portal.sql` — run once in the Supabase SQL editor (project ozkhkhlwjblzgwmjbdde)
+- `app/wage-desk/page.tsx` — new route, no existing file changed
 
-A **"Email"** button now appears next to each user in **Administration → Users**.
-Any admin with `users.manage` can change any user's login email in one click —
-no delete + recreate, no roles/attendance/history lost.
+## One line in lib/access.ts
+Add to ROUTE_PERMS:
 
-## Files in this zip
+    "/wage-desk": ["wages.desk"],
 
-- `components/UsersTab.tsx` — adds the "Email" button and the change-email flow.
+## If the repo has its own browser client helper
+Replace the two `createBrowserClient(...)` lines at the top of page.tsx with the repo's helper import.
 
-## What's already live server-side (not in this zip)
+## Give the login
+1. Administration → Users: add mianshahidazeem@hotmail.com (password must be at least 6 characters).
+2. Karkhana → Team: set his job role to **Wage Supervisor**.
+3. Supervisor opens https://karkhana-erp-app.vercel.app/wage-desk and bookmarks it.
 
-- Edge function `create-user` v40 — adds `action: "change_email"`.
-  Already deployed; no upload needed.
-
-## Rules the edge function enforces
-
-- Caller must have `users.manage` permission (same as every other user action).
-- Super Admin's email can only be changed by another Super Admin.
-- Email must be well-formed and NOT already used by another account.
-- Updates BOTH `auth.users.email` and `app_users.email` in one shot.
-- `email_confirm: true` — Supabase does NOT send a confirmation email to the
-  new address. The admin is making the change on behalf of the user; a
-  confirmation email to an address the user hasn't been told about yet would
-  be a surprise.
-- Password is NOT reset — login email changes, password stays. If the admin
-  also wants to reset the password, that's a separate "Reset" click.
+## Rules enforced in the database
+- Only `wages.desk` can read the desk; it has no access to employees.manage, payroll, Hub or retail.
+- Pay / edit / undo allowed for today and the last 7 days; older needs a Karkhana admin.
+- Amount different from the portal requires a note.
+- Payments land in `att_wage_payments` — the same table the admin daily-wages and month-pay screens read.
