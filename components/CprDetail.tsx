@@ -309,8 +309,8 @@ export default function CprDetail({ row, onClose }: { row: Row; onClose: () => v
 
   /* WHAT THE PARCELS ACCOUNT FOR, PER COURIER.
      `matched_total` is the net of the DELIVERED parcels we hold. On a PostEx
-     CPR that is the whole story, so net − matched is money for parcels we have
-     no record of.
+     CPR, delivered net less the return charges is the whole story, so what is
+     left is money for parcels we have no record of.
 
      On an OwnEx invoice it is not. OwnEx also deducts every return's charge and
      a fuel surcharge at invoice level, so net − matched was always negative or
@@ -321,9 +321,15 @@ export default function CprDetail({ row, onClose }: { row: Row; onClose: () => v
      For OwnEx the parcels account for:  delivered net − return charges − fuel.
      Anything left over genuinely is not explained by the rows. */
   const isOwnExInv = String(row.courier ?? "") === "OwnEx";
+  /* PostEx deducts return charges too (Nov 2026). Every return row on a PostEx
+     CPR carries a negative net — shipping + GST for bringing it back — and the
+     CPR's Net Total already has them taken off. Leaving them out made every
+     PostEx settlement show "Paid for parcels we don't hold" equal to minus its
+     return charges: CPR-ILZG6757435 read Rs −21,517.43 with all 202 parcels
+     matched, on all 115 PostEx CPRs. */
   const explained = isOwnExInv
     ? n(row.matched_total) - Math.abs(n(row.returns_cost)) - n(row.gst)
-    : n(row.matched_total);
+    : n(row.matched_total) - Math.abs(n(row.returns_cost));
   const gap = n(netTotal) - explained;
 
   /* EACH COURIER DEDUCTS DIFFERENT THINGS, SO NAME THEM DIFFERENTLY.
@@ -420,9 +426,9 @@ export default function CprDetail({ row, onClose }: { row: Row; onClose: () => v
               </div>
               {/* Not a discrepancy to hide — it is money received for parcels
                   this system never recorded, and it is worth knowing. */}
-              {isOwnExInv && (
+              {(isOwnExInv || n(row.returns_cost) !== 0) && (
                 <div className="flex justify-between">
-                  <span className="text-muted dark:text-[#a89f93]">Less return charges and fuel</span>
+                  <span className="text-muted dark:text-[#a89f93]">{isOwnExInv ? "Less return charges and fuel" : "Less return charges"}</span>
                   <span className="tabular-nums">{money(explained)}</span>
                 </div>
               )}
