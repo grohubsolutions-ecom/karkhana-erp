@@ -851,7 +851,13 @@ export function parseCommListRows(rows: string[][]): CommRow[] {
       percentage: finalPct,
     });
   }
-  return out;
+  /* Deduplicate by item_code — a hand-made file may list the same barcode
+     twice. Keep the LAST occurrence so the user's latest value wins. Without
+     this, the Supabase upsert fails with "ON CONFLICT DO UPDATE command
+     cannot affect a row a second time". */
+  const seen = new Map<string, number>();
+  out.forEach((r, i) => seen.set(r.item_code, i));
+  return out.filter((_, i) => [...seen.values()].includes(i));
 }
 
 /* ── WHICH SHOP IS THIS FILE FROM? ────────────────────────────────────────
