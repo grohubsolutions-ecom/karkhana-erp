@@ -204,11 +204,12 @@ export function detectKind(headers: string[]): NimbusKind {
   /* Custom commission list — a hand-made file with a barcode column and at
      least one of commission / percentage / rate. Does not come from Nimbus, so
      it is checked LAST to avoid stealing a Nimbus file whose headers overlap.
-     Case-insensitive because these are hand-typed column names. */
+     Case-insensitive AND substring-matched because these are hand-typed column
+     names — "ITEMS BARECODE", "Barcode", "Item Barcode" should all work. */
   const lc = headers.map((h) => h.toLowerCase());
-  const hasLc = (h: string) => lc.includes(h);
-  const hasBarcode = hasLc("barcode") || hasLc("bar code") || hasLc("barcode no") || hasLc("item barcode") || hasLc("item code");
-  const hasComm = hasLc("commission") || hasLc("commission amount") || hasLc("rate") || hasLc("percentage");
+  const any = (kw: string) => lc.some((h) => h.includes(kw));
+  const hasBarcode = any("barcode") || any("barecode") || any("bar code") || lc.includes("item code");
+  const hasComm = any("commission") || lc.includes("rate") || lc.includes("percentage");
   if (hasBarcode && hasComm) return "comm_list";
   return "unknown";
 }
@@ -811,19 +812,20 @@ export function parseCommRows(rows: string[][]): CommRow[] {
  */
 export function parseCommListRows(rows: string[][]): CommRow[] {
   const hdr = rows[0].map((h) => h.trim());
-  /* Case-insensitive lookup — the file is hand-made, so "barcode" and
-     "BARCODE" and "Barcode" should all work. */
-  const lcIdx: Record<string, number> = {};
-  hdr.forEach((h, i) => { const k = h.toLowerCase(); if (!(k in lcIdx)) lcIdx[k] = i; });
-  const first = (...names: string[]) => {
-    for (const n of names) { const i = lcIdx[n.toLowerCase()]; if (i != null) return i; }
+  /* Case-insensitive AND substring lookup — the file is hand-made, so
+     "ITEMS BARECODE", "Barcode", "Item Barcode" should all work.
+     `findBy` tries exact matches first, then substring contains. */
+  const lcHdr = hdr.map((h) => h.toLowerCase());
+  const find = (exactNames: string[], substrings: string[]) => {
+    for (const n of exactNames) { const i = lcHdr.indexOf(n.toLowerCase()); if (i >= 0) return i; }
+    for (const kw of substrings) { const lo = kw.toLowerCase(); const i = lcHdr.findIndex((h) => h.includes(lo)); if (i >= 0) return i; }
     return -1;
   };
-  const ci = first("Barcode", "Bar Code", "Barcode No", "Item Barcode", "Item Code");
-  const ni = first("Item Name", "Name", "Article", "Article Name", "Description", "Product");
-  const pi = first("Retail Price", "Price", "MRP", "Rate");
-  const coi = first("Commission", "Commission Amount");
-  const pci = first("Percentage", "%", "Commission %", "Comm %");
+  const ci = find(["Barcode", "Bar Code", "Barcode No", "Item Barcode", "Item Code"], ["barcode", "barecode", "bar code"]);
+  const ni = find(["Item Name", "Name", "Article", "Article Name", "Description", "Product"], ["item name", "article", "product"]);
+  const pi = find(["Retail Price", "Price", "MRP"], ["retail price", "price", "mrp"]);
+  const coi = find(["Commission", "Commission Amount"], ["commission"]);
+  const pci = find(["Percentage", "%", "Commission %", "Comm %"], ["percentage", "percent"]);
 
   if (ci < 0) return [];
 
