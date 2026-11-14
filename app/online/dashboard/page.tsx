@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLiveTables } from "@/lib/useLiveTables";
 import { ShoppingBag, Clock, Undo2, Wallet, TrendingUp, Truck, RefreshCw, MapPin, Ban } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
-import { HubRange, PageActions, Segmented, useIsPhone } from "@/components/HubUI";
+import { HubRange, PageActions, useIsPhone } from "@/components/HubUI";
 import { rangeDates, rs } from "@/lib/dateRange";
 
 const STORES = [
@@ -116,56 +116,66 @@ type StoreRow = {
 type CourierRow = { courier: string; dispatched: number; delivered: number; returned: number };
 type Breakdown = { stores: StoreRow[]; couriers: CourierRow[]; cities: { label: string; value: number }[] };
 
-/* The ladder, top to bottom. Indent shows what sits inside what:
-   Total sales = Not dispatched + Dispatched, and
-   Dispatched  = In transit + Delivered & paid + Delivered, payment due + Returned.
-   Cancelled sits below the line — it never left the building, and two voided
-   Trenzee test orders (Rs 32,950,200 and Rs 1,049,700) would otherwise make
-   Trenzee a Rs 34M store. */
-const LADDER: {
-  key: string; v: keyof StoreRow; n: keyof StoreRow; label: string; hint?: string;
-  indent: 0 | 1 | 2; strong?: boolean; tone?: "good" | "warn" | "bad" | "muted"; below?: boolean;
-}[] = [
-  { key: "sale",       v: "sale_value",   n: "sale_orders",  label: "Total sales",            hint: "every order except cancelled", indent: 0, strong: true },
-  { key: "pending",    v: "pending_v",    n: "pending_n",    label: "Not dispatched yet",     indent: 1 },
-  { key: "dispatched", v: "dispatched_v", n: "dispatched_n", label: "Dispatched",             hint: "handed to a courier", indent: 1, strong: true },
-  { key: "transit",    v: "transit_v",    n: "transit_n",    label: "In transit",             indent: 2 },
-  { key: "paid",       v: "paid_v",       n: "paid_n",       label: "Delivered & paid",       hint: "customer received it, courier has paid", indent: 2, tone: "good" },
-  { key: "unpaid",     v: "unpaid_v",     n: "unpaid_n",     label: "Delivered, payment due", hint: "customer received it, money not in yet", indent: 2, tone: "warn" },
-  { key: "returned",   v: "returned_v",   n: "returned_n",   label: "Returned",               hint: "parcel came back", indent: 2, tone: "bad" },
-  { key: "cancelled",  v: "cancelled_v",  n: "cancelled_n",  label: "Cancelled",              hint: "never dispatched — not in sales", indent: 0, tone: "muted", below: true },
+/* Shopify's "Total sales breakdown", same lines, same maths (H316):
+     Net sales   = Gross − Discounts − Sales reversals
+     Total sales = Net + Shipping + Return fees + Taxes
+   Free-shipping discounts come off shipping, not products, as in Shopify.
+   If H316 hasn't been run yet the card falls back to the older per-store
+   function (H308), where free shipping still shows under Discounts. */
+type SalesBreakdown = {
+  gross_sales: number; discounts: number; sales_reversals: number; net_sales: number;
+  shipping_charges: number; return_fees: number; taxes: number; total_sales: number;
+};
+const BREAKDOWN_ROWS: { key: keyof SalesBreakdown; label: string; neg?: boolean }[] = [
+  { key: "gross_sales",      label: "Gross sales" },
+  { key: "discounts",        label: "Discounts", neg: true },
+  { key: "sales_reversals",  label: "Sales reversals", neg: true },
+  { key: "net_sales",        label: "Net sales" },
+  { key: "shipping_charges", label: "Shipping charges" },
+  { key: "return_fees",      label: "Return fees" },
+  { key: "taxes",            label: "Taxes" },
+  { key: "total_sales",      label: "Total sales" },
 ];
-const TONE_TXT = {
-  good: "text-success", warn: "text-amber-strong dark:text-amber",
-  bad: "text-red-700 dark:text-salmon", muted: "text-muted dark:text-[#a89f93]",
-} as const;
-const STORE_ORDER = ["LM", "TS", "TRZ"];
+const fromH308 = (r: ShopifySalesRow): SalesBreakdown => {
+  const net = Number(r.net_sales || 0), ship = Number(r.shipping_charges || 0);
+  return {
+    gross_sales: Number(r.gross_sales || 0), discounts: Number(r.discounts || 0),
+    sales_reversals: Number(r.returns_amount || 0) + Number(r.cancellations || 0),
+    net_sales: net, shipping_charges: ship, return_fees: 0, taxes: 0, total_sales: net + ship,
+  };
+};
 
-/* H308c: the six Shopify-style sales lines, defined the same way as LADDER so
-   they can render inside the same table/ladder. `v` and `n` name the money
-   and count fields on ShopifySalesRow; `neg` prints a leading "−" so the
-   subtractions read correctly. The order mirrors Shopify's own finance report.
-   Net sales is `strong` and tone "good" to mark the final line. */
-const SHOPIFY_ROWS: {
-  key: string;
-  v: keyof ShopifySalesRow; n: keyof ShopifySalesRow | null;
-  label: string; hint?: string;
-  tone?: "good" | "warn" | "bad" | "muted";
-  neg?: boolean; strong?: boolean;
-}[] = [
-  { key: "gross",    v: "gross_sales",      n: "order_count",         label: "Gross sales",      hint: "products at list price",         strong: true },
-  { key: "disc",     v: "discounts",        n: null,                  label: "Discounts",        hint: "promo codes & line discounts",   tone: "warn",  neg: true },
-  { key: "ret",      v: "returns_amount",   n: "returns_count",       label: "Returns",          hint: "cancelled after fulfilment",     tone: "bad",   neg: true },
-  { key: "cancel",   v: "cancellations",    n: "cancellations_count", label: "Cancellations",    hint: "cancelled before fulfilment",    tone: "muted", neg: true },
-  { key: "ship",     v: "shipping_charges", n: null,                  label: "Shipping charges", hint: "what customers paid for delivery" },
-  { key: "net",      v: "net_sales",        n: null,                  label: "Net sales",        hint: "gross − discounts − returns − cancellations", tone: "good", strong: true },
-];
+/* The arrow next to each figure, as Shopify draws it: change against the
+   same number of days just before. Nothing to compare → a dash. */
+function Change({ now, prev }: { now: number; prev: number | null }) {
+  if (prev === null || (now === 0 && prev === 0)) {
+    return <span className="w-16 text-center text-hint dark:text-[#8a8175]">—</span>;
+  }
+  const pc = prev === 0 ? 100 : ((now - prev) / Math.abs(prev)) * 100;
+  const up = pc >= 0, a = Math.abs(pc);
+  const txt = a >= 1000 ? `${(a / 1000).toFixed(1)}K%` : `${Math.round(a)}%`;
+  return (
+    <span className={`w-16 whitespace-nowrap text-right text-[11.5px] font-semibold tabular-nums ${up ? "text-emerald-700" : "text-muted dark:text-[#a89f93]"}`}>
+      {up ? "↗" : "↘"} {txt}
+    </span>
+  );
+}
+
+/* The same number of days immediately before [from, to]. "All time" has
+   nothing before it, so no comparison. */
+function prevRange(from: string | null, to: string | null): [string, string] | null {
+  if (!from || !to) return null;
+  const d = (x: string) => new Date(x + "T00:00:00Z").getTime();
+  const DAY = 86400000;
+  const len = Math.round((d(to) - d(from)) / DAY) + 1;
+  const iso = (t: number) => new Date(t).toISOString().slice(0, 10);
+  return [iso(d(from) - len * DAY), iso(d(from) - DAY)];
+}
 
 export default function HubDashboard() {
   const phone = useIsPhone();
   /* On a phone the store columns do not fit side by side; the ladder shows one
      store at a time, picked here. */
-  const [col, setCol] = useState("ALL");
   const [breakdown, setBreakdown] = useState<Breakdown | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
@@ -179,7 +189,8 @@ export default function HubDashboard() {
   const [summary, setSummary] = useState<DashSummary | null>(null);
   const [counts, setCounts] = useState<DashCounts | null>(null);
   const [cancels, setCancels] = useState<DashCancels | null>(null);
-  const [salesByStore, setSalesByStore] = useState<ShopifySalesRow[]>([]);
+  const [salesNow, setSalesNow] = useState<SalesBreakdown | null>(null);
+  const [salesPrev, setSalesPrev] = useState<SalesBreakdown | null>(null);
 
   /* EVERY FIGURE ON THIS PAGE IS COUNTED IN THE DATABASE.
      This page used to fetch 1,000 orders and 1,000 parcels and add them up
@@ -199,13 +210,23 @@ export default function HubDashboard() {
     const [from, to] = rangeDates(preset, cf, ct);
     const args = { p_from: from, p_to: to, p_store: store === "ALL" ? null : store };
 
-    const [sum, br, rt, cnt, cx, sh] = await Promise.all([
+    const prev = prevRange(from, to);
+    /* One row for the breakdown card: H316 if it exists, else H308's total row. */
+    const salesFor = async (a: typeof args): Promise<SalesBreakdown | null> => {
+      const r = await supabase!.rpc("hub_sales_breakdown", a);
+      if (!r.error) return ((r.data as SalesBreakdown[] | null)?.[0]) ?? null;
+      const o = await supabase!.rpc("hub_dashboard_shopify_sales_per_store", a);
+      const t = o.error ? null : (o.data as ShopifySalesRow[] | null)?.find((x) => x.is_total);
+      return t ? fromH308(t) : null;
+    };
+    const [sum, br, rt, cnt, cx, sNow, sPrev] = await Promise.all([
       supabase.rpc("hub_dashboard_summary", args),
       supabase.rpc("hub_dashboard_breakdown", args),
       supabase.rpc("hub_return_rates", { p_months: 3 }),
       supabase.rpc("hub_dashboard_counts", args),
       supabase.rpc("hub_dashboard_cancellations", args),
-      supabase.rpc("hub_dashboard_shopify_sales_per_store", args),
+      salesFor(args),
+      prev ? salesFor({ ...args, p_from: prev[0], p_to: prev[1] }) : Promise.resolve(null),
     ]);
     if (my !== reqId.current) return;          // superseded by a newer request
     const firstErr = sum.error ?? br.error ?? cnt.error;
@@ -217,7 +238,8 @@ export default function HubDashboard() {
     setCancels(cx.error ? null : ((cx.data as DashCancels[])?.[0] ?? null));
     /* H308c: per-store Shopify sales rows. If the migration hasn't landed, the
        Shopify rows at the top of the Sales by store table simply don't render. */
-    setSalesByStore(sh.error ? [] : ((sh.data as ShopifySalesRow[]) ?? []));
+    setSalesNow(sNow);
+    setSalesPrev(sPrev);
     setBreakdown((br.data as Breakdown) ?? null);
     setRates((rt.data as RateRow[]) ?? []);
     setLoading(false);
@@ -247,25 +269,12 @@ export default function HubDashboard() {
     const receivable = Number(summary?.cod_receivable ?? 0);
     const receivableCount = Number(summary?.receivable_count ?? 0);
 
-    /* Always the three stores in a fixed order, even one with no orders in the
-       dates — a store that silently drops out of the table reads as a store
-       that does not exist, which is exactly what happened to Trenzee. */
-    const got = breakdown?.stores ?? [];
-    const zero = (code: string): StoreRow => ({
-      store_code: code, is_total: code === "ALL", orders: 0, sale_orders: 0, sale_value: 0,
-      pending_n: 0, pending_v: 0, dispatched_n: 0, dispatched_v: 0, transit_n: 0, transit_v: 0,
-      paid_n: 0, paid_v: 0, unpaid_n: 0, unpaid_v: 0, returned_n: 0, returned_v: 0,
-      cancelled_n: 0, cancelled_v: 0, delivery_rate: null,
-    });
-    const codes = store === "ALL" ? [...STORE_ORDER, "ALL"] : [store];
-    const storeCols = codes.map((c) => got.find((r) => r.store_code === c) ?? zero(c));
-
     return {
       total, pending, dispatched, returned, cancelled, delivered, transit, totalAmt, avgAmt, deliveryRate,
-      received, receivable, receivableCount, storeCols,
+      received, receivable, receivableCount,
       cities: breakdown?.cities ?? [], couriers: breakdown?.couriers ?? [],
     };
-  }, [summary, counts, breakdown, store]);
+  }, [summary, counts, breakdown]);
 
   const pct = (n: number) => (M.total ? Math.round((n / M.total) * 100) : 0);
   /* Return rate per courier, this month against last. The dashboard already
@@ -510,181 +519,32 @@ export default function HubDashboard() {
         </div>
       </div>
 
-      {/* ── SALES BY STORE ─────────────────────────────────────────────────
-          Stores across, the life of an order down. Read a column top to bottom
-          and it adds up: Total sales splits into not-dispatched and dispatched,
-          and dispatched splits into in transit, delivered & paid, delivered but
-          unpaid, and returned. Cancelled sits under the line because it never
-          left the building.
-          THE COURIER DECIDES, NOT SHOPIFY. 145 of 227 parcels that came back in
-          30 days were then cancelled in Shopify; reading Shopify first would
-          call a return a cancellation. */}
-      <div className="mt-3 rounded-card border border-line bg-surface sm:mt-5 dark:border-white/[0.06] dark:bg-[#201c17]">
-        <div className="flex flex-wrap items-baseline justify-between gap-2 px-3 pb-2 pt-3 sm:px-5 sm:pt-5">
-          <h3 className="text-[13.5px] font-bold text-ink sm:text-[14px] dark:text-[#f4f1ea]">Sales by store</h3>
-          <span className="text-[11px] text-hint sm:text-[11.5px] dark:text-[#8a8175]">order value · every column adds up</span>
+      {/* TOTAL SALES BREAKDOWN — Shopify's own finance card, line for line.
+          Respects the store picker above; the arrow compares with the same
+          number of days just before the chosen dates. */}
+      <div className="mt-3 rounded-card border border-line bg-surface p-3 sm:mt-5 sm:p-5 dark:border-white/[0.06] dark:bg-[#201c17]">
+        <h3 className="text-[13.5px] font-bold text-ink sm:text-[14px] dark:text-[#f4f1ea]">Total sales breakdown</h3>
+        <p className="mt-0.5 text-[12px] text-muted dark:text-[#a89f93]">
+          Breakdown of amount spent (subtotal, taxes, shipping, sales reversals, discounts, fees, etc.)
+        </p>
+        <div className="mt-3">
+          {BREAKDOWN_ROWS.map((row, i) => {
+            const v = Number(salesNow?.[row.key] ?? 0);
+            const p = salesPrev ? Number(salesPrev[row.key] ?? 0) : null;
+            return (
+              <div key={row.key}
+                className={`flex items-center justify-between gap-3 rounded-lg px-2.5 py-2.5 ${i % 2 ? "bg-panel/70 dark:bg-white/[0.04]" : ""}`}>
+                <span className="text-[13.5px] text-blue-700 dark:text-[#9db8f0]">{row.label}</span>
+                <span className="flex items-center gap-3">
+                  <b className="whitespace-nowrap text-[13.5px] tabular-nums text-ink dark:text-[#f4f1ea]">
+                    {loading ? "—" : (row.neg && v > 0 ? "−" : "") + rs(v)}
+                  </b>
+                  <Change now={v} prev={loading ? null : p} />
+                </span>
+              </div>
+            );
+          })}
         </div>
-        {loading ? (
-          <div className="py-10 text-center text-[13px] text-muted dark:text-[#a89f93]">Loading…</div>
-        ) : phone ? (() => {
-          const s = M.storeCols.find((x) => (col === "ALL" ? x.is_total : x.store_code === col)) ?? M.storeCols[M.storeCols.length - 1];
-          /* H308c: look up the Shopify figures for the selected store. */
-          const sh = salesByStore.find((x) => x.store_code === (s?.is_total ? "ALL" : s?.store_code));
-          return (
-            <div className="px-3 pb-3">
-              <Segmented value={col} onChange={setCol}
-                options={[{ key: "ALL", label: "All" }, ...M.storeCols.filter((x) => !x.is_total).map((x) => ({ key: x.store_code, label: x.store_code }))]} />
-              {s && (
-                <div className="mt-2">
-                  <div className="flex items-center gap-2 px-1 pb-1 pt-1 text-[12.5px] font-semibold text-muted dark:text-[#a89f93]">
-                    {!s.is_total && <span className="h-2 w-2 rounded-full" style={{ background: STORES.find((x) => x.code === s.store_code)?.color }} />}
-                    {s.is_total ? "All three stores" : STORES.find((x) => x.code === s.store_code)?.label ?? s.store_code}
-                  </div>
-                  {/* H308c: Shopify sales lines on top, inside the same ladder. */}
-                  {sh && SHOPIFY_ROWS.map((row) => {
-                    const v = Number(sh[row.v] ?? 0);
-                    const n = row.n ? Number(sh[row.n] ?? 0) : null;
-                    return (
-                      <div key={`sh-${row.key}`} className="flex items-center gap-2 border-t border-line/60 py-2 first:border-0 dark:border-white/[0.04]">
-                        <div className="min-w-0 flex-1 pl-1">
-                          <div className={`text-[13px] ${row.strong ? "font-bold text-ink dark:text-[#f4f1ea]" : "font-medium text-ink dark:text-[#e7e2d8]"} ${row.tone ? TONE_TXT[row.tone] : ""}`}>{row.label}</div>
-                          {row.hint && <div className="truncate text-[10.5px] text-hint dark:text-[#8a8175]">{row.hint}</div>}
-                        </div>
-                        <div className="shrink-0 text-right tabular-nums">
-                          <div className={`whitespace-nowrap ${row.strong ? "text-[14px] font-extrabold" : "text-[13px] font-semibold"} ${row.tone ? TONE_TXT[row.tone] : "text-ink dark:text-[#f4f1ea]"}`}>
-                            {(row.neg && v > 0 ? "−" : "") + rs(v)}
-                          </div>
-                          {n !== null && <div className="whitespace-nowrap text-[10.5px] text-hint dark:text-[#8a8175]">{n.toLocaleString()} {n === 1 ? "order" : "orders"}</div>}
-                        </div>
-                      </div>
-                    );
-                  })}
-                  {sh && <div className="my-1 border-t-2 border-line dark:border-white/[0.10]" />}
-                  {LADDER.map((row) => {
-                    const v = Number(s[row.v] ?? 0), n = Number(s[row.n] ?? 0);
-                    const share = !row.below && row.key !== "sale" && s.sale_value > 0 ? Math.round((v / s.sale_value) * 100) : null;
-                    return (
-                      /* H306: tighter rows on a phone — the ladder has 8 rows
-                         and py-2.5 pushed Delivery rate off a 6" screen. */
-                      <div key={row.key} className={`flex items-center gap-2 py-2 ${row.below ? "mt-1 border-t-2 border-line dark:border-white/[0.10]" : "border-t border-line/60 first:border-0 dark:border-white/[0.04]"}`}
-                        style={{ paddingLeft: `${4 + row.indent * 12}px` }}>
-                        <div className="min-w-0 flex-1">
-                          <div className={`text-[13px] ${row.strong ? "font-bold text-ink dark:text-[#f4f1ea]" : "font-medium text-ink dark:text-[#e7e2d8]"} ${row.tone ? TONE_TXT[row.tone] : ""}`}>{row.label}</div>
-                          {row.hint && <div className="truncate text-[10.5px] text-hint dark:text-[#8a8175]">{row.hint}</div>}
-                        </div>
-                        <div className="shrink-0 text-right tabular-nums">
-                          <div className={`whitespace-nowrap ${row.strong ? "text-[14px] font-extrabold" : "text-[13px] font-semibold"} ${row.tone ? TONE_TXT[row.tone] : "text-ink dark:text-[#f4f1ea]"}`}>{rs(v)}</div>
-                          <div className="whitespace-nowrap text-[10.5px] text-hint dark:text-[#8a8175]">{n.toLocaleString()} {n === 1 ? "order" : "orders"}{share !== null && ` · ${share}%`}</div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                  <div className="flex items-center justify-between border-t border-line pt-2.5 text-[13.5px] dark:border-white/[0.06]">
-                    <span className="font-medium text-ink dark:text-[#e7e2d8]">Delivery rate</span>
-                    <b className="tabular-nums text-ink dark:text-[#f4f1ea]">{s.delivery_rate == null ? "—" : `${Number(s.delivery_rate).toFixed(1)}%`}</b>
-                  </div>
-                </div>
-              )}
-            </div>
-          );
-        })() : (
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[640px] text-left text-[13px]">
-              <thead>
-                <tr className="border-b border-line text-[11.5px] uppercase tracking-wide text-muted dark:border-white/[0.06] dark:text-[#a89f93]">
-                  <th className="sticky left-0 z-10 bg-surface px-5 py-2.5 font-semibold dark:bg-[#201c17]" />
-                  {M.storeCols.map((s) => {
-                    const meta = STORES.find((x) => x.code === s.store_code);
-                    return (
-                      <th key={s.store_code} className={`whitespace-nowrap px-4 py-2.5 text-right font-semibold ${s.is_total ? "bg-panel/60 text-ink dark:bg-white/[0.04] dark:text-[#f4f1ea]" : ""}`}>
-                        <span className="inline-flex items-center gap-1.5">
-                          {!s.is_total && <span className="h-2 w-2 rounded-full" style={{ background: meta?.color }} />}
-                          {meta?.label ?? s.store_code}
-                        </span>
-                      </th>
-                    );
-                  })}
-                </tr>
-              </thead>
-              <tbody>
-                {/* H308c: six Shopify-style sales lines, inside the same table
-                    with the same per-store columns. Rendered above the existing
-                    ladder, separated by a thicker divider. Each cell looks up
-                    the ShopifySalesRow for that store (or 'ALL' for totals). */}
-                {SHOPIFY_ROWS.map((row, idx) => (
-                  <tr key={`sh-${row.key}`}
-                    className={idx === 0 ? "" : "border-t border-line/60 dark:border-white/[0.04]"}>
-                    <td className="sticky left-0 z-10 bg-surface py-2.5 pr-3 pl-5 dark:bg-[#201c17]">
-                      <div className={`${row.strong ? "font-bold text-ink dark:text-[#f4f1ea]" : "font-medium text-ink dark:text-[#e7e2d8]"} ${row.tone ? TONE_TXT[row.tone] : ""}`}>
-                        {row.label}
-                      </div>
-                      {row.hint && <div className="hidden text-[11px] text-hint sm:block dark:text-[#8a8175]">{row.hint}</div>}
-                    </td>
-                    {M.storeCols.map((s) => {
-                      const sh = salesByStore.find((x) => x.store_code === (s.is_total ? "ALL" : s.store_code));
-                      const v = sh ? Number(sh[row.v] ?? 0) : 0;
-                      const n = sh && row.n ? Number(sh[row.n] ?? 0) : null;
-                      return (
-                        <td key={s.store_code} className={`px-4 py-2.5 text-right tabular-nums ${s.is_total ? "bg-panel/60 dark:bg-white/[0.04]" : ""}`}>
-                          <div className={`whitespace-nowrap ${row.strong ? "text-[14px] font-extrabold" : "font-semibold"} ${row.tone ? TONE_TXT[row.tone] : "text-ink dark:text-[#f4f1ea]"}`}>
-                            {(row.neg && v > 0 ? "−" : "") + rs(v)}
-                          </div>
-                          {n !== null && (
-                            <div className="whitespace-nowrap text-[11px] text-hint dark:text-[#8a8175]">
-                              {n.toLocaleString()} {n === 1 ? "order" : "orders"}
-                            </div>
-                          )}
-                        </td>
-                      );
-                    })}
-                  </tr>
-                ))}
-                {LADDER.map((row) => (
-                  <tr key={row.key}
-                    className={`${row.below ? "border-t-2 border-line dark:border-white/[0.10]" : row.key === "sale" ? "border-t-2 border-line dark:border-white/[0.10]" : "border-t border-line/60 dark:border-white/[0.04]"}`}>
-                    <td className="sticky left-0 z-10 bg-surface py-2.5 pr-3 dark:bg-[#201c17]"
-                      style={{ paddingLeft: `${20 + row.indent * 16}px` }}>
-                      <div className={`${row.strong ? "font-bold text-ink dark:text-[#f4f1ea]" : "font-medium text-ink dark:text-[#e7e2d8]"} ${row.tone ? TONE_TXT[row.tone] : ""}`}>
-                        {row.label}
-                      </div>
-                      {row.hint && <div className="hidden text-[11px] text-hint sm:block dark:text-[#8a8175]">{row.hint}</div>}
-                    </td>
-                    {M.storeCols.map((s) => {
-                      const v = Number(s[row.v] ?? 0);
-                      const n = Number(s[row.n] ?? 0);
-                      /* Share of that store's sales — except for cancelled, which
-                         is not part of sales, so a percentage of them would be a
-                         percentage of the wrong thing. */
-                      const share = !row.below && row.key !== "sale" && s.sale_value > 0
-                        ? Math.round((v / s.sale_value) * 100) : null;
-                      return (
-                        <td key={s.store_code} className={`px-4 py-2.5 text-right tabular-nums ${s.is_total ? "bg-panel/60 dark:bg-white/[0.04]" : ""}`}>
-                          <div className={`whitespace-nowrap ${row.strong ? "text-[14px] font-extrabold" : "font-semibold"} ${row.tone ? TONE_TXT[row.tone] : "text-ink dark:text-[#f4f1ea]"}`}>
-                            {rs(v)}
-                          </div>
-                          <div className="whitespace-nowrap text-[11px] text-hint dark:text-[#8a8175]">
-                            {n.toLocaleString()} {n === 1 ? "order" : "orders"}{share !== null && ` · ${share}%`}
-                          </div>
-                        </td>
-                      );
-                    })}
-                  </tr>
-                ))}
-                <tr className="border-t border-line dark:border-white/[0.06]">
-                  <td className="sticky left-0 z-10 bg-surface px-5 py-2.5 dark:bg-[#201c17]">
-                    <div className="font-medium text-ink dark:text-[#e7e2d8]">Delivery rate</div>
-                    <div className="hidden text-[11px] text-hint sm:block dark:text-[#8a8175]">delivered ÷ (delivered + returned)</div>
-                  </td>
-                  {M.storeCols.map((s) => (
-                    <td key={s.store_code} className={`px-4 py-2.5 text-right font-bold tabular-nums text-ink dark:text-[#f4f1ea] ${s.is_total ? "bg-panel/60 dark:bg-white/[0.04]" : ""}`}>
-                      {s.delivery_rate == null ? "—" : `${Number(s.delivery_rate).toFixed(1)}%`}
-                    </td>
-                  ))}
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        )}
       </div>
 
       <div className="mt-4 grid gap-4 lg:grid-cols-2">
