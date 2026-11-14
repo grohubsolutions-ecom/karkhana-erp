@@ -21,9 +21,9 @@
  *      load-bearing for compatibility with rows already in the old database.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Upload, FileCheck2, AlertTriangle, CheckCircle2, X, Info, Check, Undo2 } from "lucide-react";
+import { Upload, FileCheck2, AlertTriangle, CheckCircle2, X, Info, Check, Undo2, UserCheck } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
-import { btnPrimary, btnGhost } from "@/components/Modal";
+import { btnPrimary, btnGhost, inputCls } from "@/components/Modal";
 import {
   DataTable, Pill, Select, PreviewNote, SourceNote,
   money, unitForBranch, useIsPhone, useBranches, useEmployees, addDays, type Col,
@@ -31,7 +31,7 @@ import {
 import { readGrid, findHeaderRow, dropRepeatedHeaders } from "@/lib/readGrid";
 import {
   detectKind, KIND_LABEL, normStore, withLineHashes, looksLikeMopCell,
-  parseSalesRows, parseExpenseRows, parsePaymentRows, parseCommRows, linkAdvances,
+  parseSalesRows, parseExpenseRows, parsePaymentRows, parseCommRows, parseCommListRows, linkAdvances,
   receiptNo, shopFromReceipts, shopFromStamps, shopFromFileName, shopFromStaffNames,
   type ShopGuess, type ReceiptHigh, type StampHits,
   type NimbusKind, type SaleRow, type ExpenseRow, type PaymentRow, type CommRow,
@@ -111,6 +111,8 @@ type ImportResult = {
   note: string;
 };
 
+type PendingAdv = ExpenseRow & { _k: number };
+
 /** The uploader itself — drop zone, preview, checks and the write.
  *
  *  It lives in a component rather than on a page of its own because there IS no
@@ -151,6 +153,25 @@ export function ImportPanel({ onDone, inShop, inShopKey }: {
      "not matched" against a row it had in fact matched. */
   const { allEmployees: staff } = useEmployees("shops");
   const staffById = useMemo(() => new Map(staff.map((e) => [e.id, e])), [staff]);
+
+  /* Branch name lookup and employee grouping — for the post-import assignment
+     panel that surfaces unmatched advances. */
+  const branchNameFor = useMemo(() => {
+    const m = new Map<number, string>();
+    branches.forEach((b) => m.set(Number(b.id), b.name));
+    return (id: unknown) => m.get(Number(id)) ?? "—";
+  }, [branches]);
+
+  const byShopForAssign = useMemo(() => {
+    const m = new Map<string, typeof staff[number][]>();
+    staff.forEach((e) => {
+      const k = branchNameFor(e.branch_id);
+      (m.get(k) ?? m.set(k, []).get(k)!).push(e);
+    });
+    return [...m.entries()].sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([shop, list]) => [shop, list.slice().sort((a, b) => String(a.name).localeCompare(String(b.name)))] as const);
+  }, [staff, branchNameFor]);
+
   const [fileName, setFileName] = useState("");
   const [rows, setRows] = useState<string[][]>([]);
   const [kind, setKind] = useState<NimbusKind>("unknown");
@@ -178,6 +199,25 @@ export function ImportPanel({ onDone, inShop, inShopKey }: {
   const [undoConfirm, setUndoConfirm] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState<string | null>(null);
+
+  /* EXPENSE CATEGORY REVIEW — the old Grohub retail app stopped at this point
+     and showed each expense row with a dropdown so the operator could classify
+     it (Purchasing, Salary, Head Office, Rent, Utilities, etc.) before the
+     import landed. The current `guessCat()` gets this right most of the time,
+     but things like "market payment" become "Purchasing" when the operator
+     knows it was Marketing. This state lets any auto-guessed category be
+     overridden in the preview, per row, exactly as the old app behaved. */
+  const EXPENSE_CATS = ["Expense", "Head Office", "Salary", "Advance", "Purchasing", "Rent", "Utilities", "Marketing", "Maintenance", "Other"] as const;
+  const [catOverrides, setCatOverrides] = useState<Record<number, string>>({});
+
+  /* PENDING ADVANCE ASSIGNMENTS — shown right after an expense import when
+     some advances could not be auto-matched. The panel asks the question
+     immediately while the person importing still has the context, rather
+     than relying on someone to find them in the Ledger tab later. */
+  const [pendingAdvs, setPendingAdvs] = useState<PendingAdv[]>([]);
+  const [assignPick, setAssignPick] = useState<Record<number, string>>({});
+  const [assignBusy, setAssignBusy] = useState<number | null>(null);
+  const [assignErr, setAssignErr] = useState<Record<number, string>>({});
 
   /* THE RESULT LOG — one card per file that has actually landed.
      A day's import is not one file, it is four or five dropped in sequence:
@@ -426,8 +466,10 @@ export function ImportPanel({ onDone, inShop, inShopKey }: {
   }, [rows, kind, forceBid, resolveBranch]);
 
   const comm = useMemo(() => {
-    if (!rows.length || kind !== "comm_master") return null;
-    return parseCommRows(rows);
+    if (!rows.length) return null;
+    if (kind === "comm_master") return parseCommRows(rows);
+    if (kind === "comm_list") return parseCommListRows(rows);
+    return null;
   }, [rows, kind]);
 
   /* WHO EACH ADVANCE BELONGS TO, worked out before anything is written.
@@ -441,7 +483,7 @@ export function ImportPanel({ onDone, inShop, inShopKey }: {
 
   async function onFile(f: File) {
     setFatal(""); setWarn([]); setDone(null); setRows([]); setNeedBranch(false); setPickBranch("");
-    setChanging(false); setInferred(false);
+    setChanging(false); setInferred(false); setCatOverrides({});
     setFileName(f.name);
 
     /* CSV, Excel or PDF — see lib/readGrid.ts. Everything below this line is
@@ -467,7 +509,7 @@ export function ImportPanel({ onDone, inShop, inShopKey }: {
     if (hi < 0) {
       setFatal(grid.format === "pdf"
         ? "No Nimbus column headings were found in that PDF. The table may not have come through — try the CSV or Excel export of the same report."
-        : "This does not look like a Nimbus export — no Store, Account, Payment Mode or Item Code column was found.");
+        : "This does not look like a Nimbus export or a commission list — no Store, Account, Payment Mode, Item Code or Barcode column was found.");
       setKind("unknown");
       return;
     }
@@ -731,7 +773,15 @@ export function ImportPanel({ onDone, inShop, inShopKey }: {
       }
 
       else if (expenses) {
-        const ok = expenses.parsed.filter((p) => p.branch_id);
+        /* APPLY CATEGORY OVERRIDES from the review dropdowns before importing.
+           The operator may have reclassified rows in the preview — those
+           overrides live in `catOverrides` keyed by the row's index in
+           `expenses.parsed`. */
+        const reviewed = expenses.parsed.map((p, i) => {
+          const ov = catOverrides[i];
+          return ov && ov !== p.category ? { ...p, category: ov } : p;
+        });
+        const ok = reviewed.filter((p) => p.branch_id);
         if (!ok.length) { setFatal("No row matched a branch — nothing to import."); setBusy(false); return; }
         /* The RPC, not a client-side delete-then-insert. It scopes its own
            delete from the payload and lands on a unique dedupe_key, which is
@@ -767,6 +817,20 @@ export function ImportPanel({ onDone, inShop, inShopKey }: {
           ],
           note: "Importing replaces previously-imported Nimbus expenses inside the file's own date range, so an overlapping re-import cannot double anything.",
         });
+
+        /* SURFACE UNMATCHED ADVANCES IMMEDIATELY — the popup Kashif asked for.
+           Rather than burying them in a done-message sentence, open a panel
+           listing each one with a picker so the person importing can assign
+           them right now while they still have the context. */
+        if (adv && adv.seen > adv.matched) {
+          const unmatched = expenses.parsed.filter(
+            (p: ExpenseRow) => p.category === "Advance" && p.txn_type === "expense" && !adv.who.has(p),
+          );
+          if (unmatched.length) {
+            setPendingAdvs(unmatched.map((r, i) => ({ ...r, _k: i })));
+            setAssignPick({}); setAssignErr({});
+          }
+        }
       }
 
       else if (payments) {
@@ -896,8 +960,30 @@ export function ImportPanel({ onDone, inShop, inShopKey }: {
      file still needs to see which ones have already landed. */
   function reset() {
     setRows([]); setFileName(""); setFatal(""); setWarn([]); setDone(null); setNeedBranch(false); setPickBranch(""); setInferred(false);
-    setProg(null);
+    setProg(null); setPendingAdvs([]); setAssignPick({}); setAssignErr({});
     if (fileRef.current) fileRef.current.value = "";
+  }
+
+  /** Assign one unmatched advance to a person's salary ledger, right here in the
+   *  import flow. Same write as UnassignedAdvances.tsx — employee_id, the paying
+   *  shop (not the person's own), the date, the amount. */
+  async function assignAdv(r: PendingAdv) {
+    const empId = Number(assignPick[r._k] || 0);
+    if (!supabase || !empId) return;
+    setAssignBusy(r._k); setAssignErr((f) => ({ ...f, [r._k]: "" }));
+    const { error } = await supabase.from("retail_employee_ledger").insert({
+      employee_id: empId,
+      branch_id: r.branch_id,
+      entry_date: r.expense_date,
+      advance: Math.abs(r.amount),
+      purchase_credit: 0, paid: 0,
+      purchase_details: (r.description || "Advance") + " (assigned at import)",
+      source: "advance",
+    });
+    setAssignBusy(null);
+    if (error) { setAssignErr((f) => ({ ...f, [r._k]: error.message })); return; }
+    setPendingAdvs((prev) => prev.filter((p) => p._k !== r._k));
+    onDone?.();
   }
 
   /* THE PHONE CARD FOR A SALES PREVIEW answers one question: did this line find
@@ -926,7 +1012,19 @@ export function ImportPanel({ onDone, inShop, inShopKey }: {
     { head: "Date", muted: true, cell: (p) => p.expense_date },
     { head: "Shop", bold: true, phone: "title", cell: (p) => p.branch_id ? (branches.find((b) => b.id === p.branch_id)?.name ?? p._store) : <Pill tone="bad">{p._store}</Pill> },
     { head: "Type", cell: (p) => p.txn_type === "income" ? <Pill tone="good">Income</Pill> : <Pill tone="warn">Expense</Pill> },
-    { head: "Category", phone: "meta", cell: (p) => p.category },
+    { head: "Category", phone: "meta", cell: (p) => {
+      const ri = expenses?.parsed.indexOf(p) ?? -1;
+      const cur = catOverrides[ri] ?? p.category;
+      /* Income rows keep their category as-is — the dropdown is for expenses. */
+      if (p.txn_type === "income") return <span>{cur}</span>;
+      return (
+        <select value={cur}
+          onChange={(e) => setCatOverrides((prev) => ({ ...prev, [ri]: e.target.value }))}
+          className="rounded border border-line bg-surface px-1.5 py-0.5 text-[12px] text-ink outline-none dark:border-white/10 dark:bg-white/[0.06] dark:text-white">
+          {EXPENSE_CATS.map((c) => <option key={c} value={c}>{c}</option>)}
+        </select>
+      );
+    }},
     { head: "Description", muted: true, cell: (p) => p.description ?? "—" },
     /* WHO THE ADVANCE IS CHARGED TO — read-only, and only when the file has
        advances in it at all. Read-only on purpose: these rows are about to be
@@ -974,7 +1072,7 @@ export function ImportPanel({ onDone, inShop, inShopKey }: {
      the row, the name is the grey line, and the percentage is the figure
      somebody opened the commission master to check. */
   const commCols: Col<CommRow>[] = [
-    { head: "Item code", bold: true, cell: (c) => c.item_code },
+    { head: kind === "comm_list" ? "Barcode" : "Item code", bold: true, cell: (c) => c.item_code },
     { head: "Item name", muted: true, cell: (c) => c.item_name ?? "—" },
     { head: "Retail", right: true, cell: (c) => money(c.retail_price) },
     { head: "Commission", right: true, cell: (c) => money(c.commission) },
@@ -1043,7 +1141,7 @@ export function ImportPanel({ onDone, inShop, inShopKey }: {
             : "border-line bg-surface dark:border-white/[0.12] dark:bg-[#201c17]"}`}>
         <span className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-panel text-ink dark:bg-white/[0.08] dark:text-white"><Upload size={22} /></span>
         <p className="mt-3 text-[14px] font-semibold text-ink dark:text-[#f4f1ea]">
-          {phone ? "Tap to choose a Nimbus export" : dragDepth > 0 ? "Let go to read it" : "Drop a Nimbus export here"}
+          {phone ? "Tap to choose a file" : dragDepth > 0 ? "Let go to read it" : "Drop any NimbusRMS export here"}
         </p>
         <p className="mt-1 text-[12.5px] text-muted dark:text-[#a89f93]">
           Sales, account transactions, non-cash payments or the commission master.
@@ -1052,6 +1150,9 @@ export function ImportPanel({ onDone, inShop, inShopKey }: {
             because nothing on this screen said they did not have to. */}
         <p className="mt-1 text-[12px] text-hint dark:text-[#8a8175]">
           CSV, Excel (.xlsx / .xls) or PDF — the file says which report it is.
+        </p>
+        <p className="mt-0.5 text-[12px] text-hint dark:text-[#8a8175]">
+          Or drop a custom commission list with Barcode and Commission columns.
         </p>
         {phone
           /* A <button> inside a <button> is not valid HTML — the parser lifts it
@@ -1192,6 +1293,75 @@ export function ImportPanel({ onDone, inShop, inShopKey }: {
         </div>
       )}
 
+      {/* ASSIGN UNMATCHED ADVANCES — shown after an expense import when some
+          advances could not be auto-linked to a person. The person importing
+          picks who took each one, and it goes straight to that person's salary
+          ledger. "Skip for now" leaves them as plain expenses — they will
+          appear on the Ledger tab under "Unassigned advances" later. */}
+      {pendingAdvs.length > 0 && (
+        <div className="mt-4 rounded-card border border-amber/30 bg-amber-soft p-5 dark:border-amber/30 dark:bg-amber/10">
+          <div className="mb-3 flex items-start gap-2.5">
+            <AlertTriangle size={18} className="mt-0.5 flex-none text-amber-strong dark:text-amber" />
+            <div className="flex-1">
+              <h3 className="text-[14px] font-bold text-ink dark:text-[#f4f1ea]">
+                {money(pendingAdvs.reduce((t, r) => t + Math.abs(r.amount), 0))} across{" "}
+                {pendingAdvs.length} advance{pendingAdvs.length === 1 ? "" : "s"} — who took {pendingAdvs.length === 1 ? "it" : "them"}?
+              </h3>
+              <p className="mt-1 text-[12.5px] text-ink dark:text-[#e7e2d8]">
+                These imported as expenses but nobody was charged. Pick the person — their salary
+                ledger updates immediately.
+              </p>
+            </div>
+            <button onClick={() => setPendingAdvs([])}
+              className="flex-none text-[12px] font-semibold text-muted underline underline-offset-2 dark:text-[#a89f93]">
+              Skip for now
+            </button>
+          </div>
+          <div className="space-y-2">
+            {pendingAdvs.map((r) => (
+              <div key={r._k} className="rounded-lg border border-line bg-surface p-3 dark:border-white/[0.06] dark:bg-[#201c17]">
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[13.5px] font-bold text-ink dark:text-[#f4f1ea]">
+                      {money(Math.abs(r.amount))}
+                    </div>
+                    <div className="mt-0.5 text-[12px] text-muted dark:text-[#a89f93]">
+                      {branchNameFor(r.branch_id)} · {r.expense_date} · {r.description || "no note"}
+                    </div>
+                  </div>
+                  <select value={assignPick[r._k] ?? ""}
+                    onChange={(e) => setAssignPick((p) => ({ ...p, [r._k]: e.target.value }))}
+                    className={`${inputCls} min-w-[190px] max-md:w-full`}>
+                    <option value="">Who took it?</option>
+                    {byShopForAssign.map(([shop, list]) => (
+                      <optgroup key={shop} label={shop}>
+                        {list.map((e) => (
+                          <option key={e.id} value={String(e.id)}>
+                            {e.name}{e.active === false ? " (ended)" : ""}
+                          </option>
+                        ))}
+                      </optgroup>
+                    ))}
+                  </select>
+                  <button onClick={() => assignAdv(r)}
+                    disabled={!assignPick[r._k] || assignBusy === r._k}
+                    className={`${btnPrimary} max-md:w-full`}>
+                    {assignBusy === r._k ? "…" : <><UserCheck size={14} /> Assign</>}
+                  </button>
+                </div>
+                {assignErr[r._k] && (
+                  <p className="mt-1 text-[11.5px] font-semibold text-danger">{assignErr[r._k]}</p>
+                )}
+              </div>
+            ))}
+          </div>
+          <p className="mt-3 text-[11.5px] text-muted dark:text-[#a89f93]">
+            Skip for now leaves them unlinked — they can still be assigned later in the Ledger tab
+            under &ldquo;Unassigned advances&rdquo;.
+          </p>
+        </div>
+      )}
+
       {/* THE RESULT LOG, PHONE ONLY. One card per file that landed, newest
           first: what the file was taken to be, how many rows went in, and how
           many were already there. Cards rather than a table because the numbers
@@ -1274,7 +1444,7 @@ export function ImportPanel({ onDone, inShop, inShopKey }: {
                 : kind === "payments" ? (destination
                     ? `Classify ${readyCount.toLocaleString()} payments in ${destination}`
                     : `Classify ${readyCount.toLocaleString()} payments`)
-                : kind === "comm_master" ? `Update ${readyCount.toLocaleString()} rates`
+                : (kind === "comm_master" || kind === "comm_list") ? `Update ${readyCount.toLocaleString()} commission rates`
                 : destination ? `Import ${readyCount.toLocaleString()} rows into ${destination}`
                 : `Import ${readyCount.toLocaleString()} rows`}
             </button>

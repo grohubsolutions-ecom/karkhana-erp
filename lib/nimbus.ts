@@ -190,16 +190,26 @@ export const normStore = (s: unknown) => String(s ?? "").toUpperCase().replace(/
 export type NimbusKind =
   | "sales_multi" | "sales_single"
   | "expense_multi" | "expense_single"
-  | "comm_master" | "payments" | "unknown";
+  | "comm_master" | "comm_list" | "payments" | "unknown";
 
 export function detectKind(headers: string[]): NimbusKind {
   const has = (h: string) => headers.includes(h);
+  /* Nimbus commission master is the strictest match — all three columns. */
   if (has("Account") && has("Store Name")) return "expense_multi";
   if (has("Account") && !has("Store Name") && (has("Transaction Date") || has("Amount"))) return "expense_single";
   if (has("Item Code") && has("Commission") && has("Percentage")) return "comm_master";
   if (has("Payment Mode") && has("Store Name")) return "payments";
   if (!has("Store") && has("Item Code") && has("Date") && (has("MOP") || has("Sales Amount"))) return "sales_single";
   if (has("Store")) return "sales_multi";
+  /* Custom commission list — a hand-made file with a barcode column and at
+     least one of commission / percentage / rate. Does not come from Nimbus, so
+     it is checked LAST to avoid stealing a Nimbus file whose headers overlap.
+     Case-insensitive because these are hand-typed column names. */
+  const lc = headers.map((h) => h.toLowerCase());
+  const hasLc = (h: string) => lc.includes(h);
+  const hasBarcode = hasLc("barcode") || hasLc("bar code") || hasLc("barcode no") || hasLc("item barcode") || hasLc("item code");
+  const hasComm = hasLc("commission") || hasLc("commission amount") || hasLc("rate") || hasLc("percentage");
+  if (hasBarcode && hasComm) return "comm_list";
   return "unknown";
 }
 
@@ -209,6 +219,7 @@ export const KIND_LABEL: Record<NimbusKind, string> = {
   expense_multi: "Account transactions — all stores",
   expense_single: "Account transactions — single store",
   comm_master: "Commission master",
+  comm_list: "Commission list",
   payments: "Non-cash payments",
   unknown: "Not a Nimbus export",
 };
@@ -784,6 +795,58 @@ export function parseCommRows(rows: string[][]): CommRow[] {
       retail_price: num(get(r, "Retail Price") || get(r, "Rate")),
       commission: num(get(r, "Commission")),
       percentage: num(get(r, "Percentage")),
+    });
+  }
+  return out;
+}
+
+/* ── custom commission list ──────────────────────────────────────────────
+ *
+ * Not a Nimbus export — a hand-made file the user creates with barcodes and
+ * commission amounts or percentages. Flexible header names: Barcode / Bar Code /
+ * Item Barcode / Item Code for the key, Commission / Commission Amount / Rate /
+ * Percentage for the value. Item Name and Retail Price are optional.
+ *
+ * Returns the same CommRow shape so the import path is identical to comm_master.
+ */
+export function parseCommListRows(rows: string[][]): CommRow[] {
+  const hdr = rows[0].map((h) => h.trim());
+  /* Case-insensitive lookup — the file is hand-made, so "barcode" and
+     "BARCODE" and "Barcode" should all work. */
+  const lcIdx: Record<string, number> = {};
+  hdr.forEach((h, i) => { const k = h.toLowerCase(); if (!(k in lcIdx)) lcIdx[k] = i; });
+  const first = (...names: string[]) => {
+    for (const n of names) { const i = lcIdx[n.toLowerCase()]; if (i != null) return i; }
+    return -1;
+  };
+  const ci = first("Barcode", "Bar Code", "Barcode No", "Item Barcode", "Item Code");
+  const ni = first("Item Name", "Name", "Article", "Article Name", "Description", "Product");
+  const pi = first("Retail Price", "Price", "MRP", "Rate");
+  const coi = first("Commission", "Commission Amount");
+  const pci = first("Percentage", "%", "Commission %", "Comm %");
+
+  if (ci < 0) return [];
+
+  const out: CommRow[] = [];
+  for (let ri = 1; ri < rows.length; ri++) {
+    const r = rows[ri];
+    const code = (r[ci] ?? "").trim();
+    if (!code || /^total/i.test(code)) continue;
+    const commVal = coi >= 0 ? num(r[coi] ?? "") : 0;
+    const pctVal = pci >= 0 ? num(r[pci] ?? "") : 0;
+    /* If only one of commission/percentage was given and the retail price is
+       present, derive the other so the database row is complete. */
+    const retail = pi >= 0 ? num(r[pi] ?? "") : 0;
+    let finalComm = commVal;
+    let finalPct = pctVal;
+    if (finalComm === 0 && finalPct > 0 && retail > 0) finalComm = Math.round(retail * finalPct / 100);
+    if (finalPct === 0 && finalComm > 0 && retail > 0) finalPct = Math.round((finalComm / retail) * 10000) / 100;
+    out.push({
+      item_code: code,
+      item_name: ni >= 0 ? (r[ni] ?? "").trim() || null : null,
+      retail_price: retail,
+      commission: finalComm,
+      percentage: finalPct,
     });
   }
   return out;
