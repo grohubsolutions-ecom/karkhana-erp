@@ -195,7 +195,7 @@ export default function AddArticlePage() {
 
               {err && <p className="mt-3 text-[12.5px] font-medium text-danger">{err}</p>}
 
-              <div className="mt-5 flex items-center gap-2">
+              <div className="mt-5 flex flex-wrap items-center gap-2">
                 {/* Bottom left, as asked — everything already saved is one
                     click away rather than somewhere else entirely. */}
                 <Link href="/edit-record"
@@ -204,7 +204,7 @@ export default function AddArticlePage() {
                 </Link>
                 <button onClick={reset} className="ml-auto whitespace-nowrap rounded-xl2 border border-line px-4 py-2.5 text-[13px] font-semibold text-ink/70 hover:bg-panel">Clear</button>
                 <button onClick={save} disabled={busy || !allowed}
-                  className="flex items-center gap-1.5 whitespace-nowrap rounded-xl2 bg-ink px-6 py-2.5 text-[13px] font-semibold text-white disabled:opacity-50">
+                  className="flex items-center gap-1.5 whitespace-nowrap rounded-xl2 bg-ink px-5 py-2.5 text-[13px] font-semibold text-white disabled:opacity-50 sm:px-6">
                   {busy && <Loader2 size={15} className="animate-spin" />} Create article
                 </button>
               </div>

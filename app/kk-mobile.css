@@ -1,0 +1,183 @@
+/* KARKHANA, WAREHOUSE, PAYMENTS, CARREFOUR, REPORTS, ADMINISTRATION, WAGE DESK
+ * — PHONE RULES ONLY.
+ *
+ * Every rule is under `html.kk` AND a width query. AppFrame adds the class on
+ * every screen EXCEPT the Hub (/online, /me) and Shops Sales (/retail), which
+ * have their own phone layers (hub-mobile.css, retail-mobile.css) and are left
+ * exactly as they are. The computer (1024px and up) is untouched: nothing in
+ * this file applies there.
+ *
+ * Same split as the retail file:
+ *   768–1023px (phone sideways, small tablet) — only the DEVICE rules: 16px
+ *     inputs so iOS stops zooming, and thumb-sized tap targets.
+ *   below 768px — the phone LAYOUT as well: cards instead of tables, compact
+ *     page padding, sheets that fit.
+ */
+
+/* ── DEVICE RULES: phones in either orientation ─────────────────────────── */
+@media (max-width: 1023.98px) {
+  /* iPhones zoom the whole page when you tap into a box with text under 16px,
+     and leave it zoomed — the page then slides left and right under your
+     thumb. Measured before this file: 234 such boxes on 75 Karkhana screens. */
+  html.kk input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
+  html.kk select,
+  html.kk textarea {
+    font-size: 16px !important;
+  }
+  /* No double-tap zoom delay (pinch still works), no grey tap flash. */
+  html.kk { touch-action: manipulation; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+  html.kk * { -webkit-tap-highlight-color: transparent; }
+
+  /* Tap floor. 40px is the smallest a thumb hits reliably; dialog buttons get
+     44 because a mis-tap there saves something. `:not([class*="min-h-"])`
+     keeps a button that already asked for MORE from being pulled down. */
+  html.kk body button.rounded-full:not([class*="min-h-"]),
+  html.kk body a.rounded-full:not([class*="min-h-"]),
+  html.kk body button.rounded-xl2:not([class*="min-h-"]),
+  html.kk body button.rounded-xl:not([class*="min-h-"]) {
+    min-height: 40px;
+  }
+  html.kk body button[aria-label]:not([class*="min-w-"]),
+  html.kk body button[title]:not([class*="min-w-"]) {
+    min-width: 40px;
+  }
+  html.kk [role="dialog"] button.rounded-full:not([class*="min-h-"]) { min-height: 44px; }
+  html.kk [role="dialog"] button[aria-label="Close"] { min-width: 44px; min-height: 44px; display: inline-flex; align-items: center; justify-content: center; }
+  html.kk input[type="date"], html.kk input[type="time"], html.kk input[type="month"] { min-height: 44px; }
+  html.kk input[type="checkbox"], html.kk input[type="radio"] { min-width: 20px; min-height: 20px; }
+}
+
+/* ── PHONE LAYOUT ───────────────────────────────────────────────────────── */
+@media (max-width: 767.98px) {
+  /* Nothing may push the page sideways. `clip`, not `hidden`: hidden turns the
+     box into a scroll port and breaks sticky headers inside it. */
+  html.kk body, html.kk main { overflow-x: clip; }
+
+  /* While a dialog is open the page behind it stays still, and scrolling inside
+     the dialog stops at its end instead of dragging the page. */
+  html.kk:has([role="dialog"]), html.kk:has(.fixed.inset-0.z-\[60\]) { overflow: hidden; }
+  html.kk:has([role="dialog"]) body { overflow: hidden; }
+  html.kk [role="dialog"] { overscroll-behavior: contain; padding-bottom: calc(20px + env(safe-area-inset-bottom)); }
+
+  /* Page gutters: desktop's 24px is a lot of a 390px screen. */
+  html.kk body .px-6 { padding-left: 16px; padding-right: 16px; }
+  html.kk body .px-8 { padding-left: 16px; padding-right: 16px; }
+  html.kk main .p-6 { padding: 16px; }
+  html.kk main { padding-bottom: env(safe-area-inset-bottom); }
+
+  /* Wide modals (`xwide`, `wide`) are already full-width bottom sheets below
+     640px — Modal.tsx does that. Tables inside them become cards below. */
+
+  /* ── TABLES BECOME CARDS ────────────────────────────────────────────────
+     PhoneTables.tsx writes each column's heading onto its cells as
+     data-label and marks the table `kk-cards`. Here each row becomes a card:
+     the first filled cell is the title, every other cell is a labelled line,
+     unlabelled button columns become the card's action row. */
+  html.kk table.kk-cards {
+    display: block;
+    width: 100% !important;
+    min-width: 0 !important;
+    border-collapse: separate;
+    font-size: 13.5px;
+  }
+  html.kk table.kk-cards thead,
+  html.kk table.kk-cards tr.kk-head { display: none !important; }
+  html.kk table.kk-cards tbody,
+  html.kk table.kk-cards tfoot { display: block; }
+  html.kk table.kk-cards tr:not(.hidden) {
+    display: block;
+    margin: 0 0 10px;
+    padding: 10px 14px;
+    border: 1px solid #eae5dd;
+    border-radius: 16px;
+    background: #fff;
+  }
+  html.kk.dark table.kk-cards tr:not(.hidden) { border-color: rgba(255,255,255,0.08); background: rgba(255,255,255,0.03); }
+  html.kk table.kk-cards tfoot tr:not(.hidden) { background: #f1eee9; font-weight: 700; }
+  html.kk.dark table.kk-cards tfoot tr:not(.hidden) { background: rgba(255,255,255,0.07); }
+
+  html.kk table.kk-cards td:not(.hidden),
+  html.kk table.kk-cards th:not(.hidden) {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    width: auto !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    padding: 4px 0 !important;
+    border: 0 !important;
+    text-align: right !important;
+    white-space: normal !important;
+    overflow-wrap: anywhere;
+    position: static !important;
+    background: transparent !important;
+  }
+  html.kk table.kk-cards td[data-label]::before,
+  html.kk table.kk-cards th[data-label]::before {
+    content: attr(data-label);
+    flex: none;
+    max-width: 48%;
+    text-align: left;
+    font-size: 12px;
+    font-weight: 600;
+    color: #857c72;
+    white-space: normal;
+  }
+  html.kk table.kk-cards td[data-label] > *,
+  html.kk table.kk-cards th[data-label] > * { min-width: 0; }
+
+  /* Title line: the row's name, full width, bold, a hairline under it. */
+  html.kk table.kk-cards td[data-kk-title],
+  html.kk table.kk-cards th[data-kk-title] {
+    display: block;
+    text-align: left !important;
+    font-size: 14.5px;
+    font-weight: 700;
+    padding: 0 0 7px !important;
+    margin-bottom: 4px;
+    border-bottom: 1px solid #eae5dd !important;
+  }
+  html.kk.dark table.kk-cards td[data-kk-title],
+  html.kk.dark table.kk-cards th[data-kk-title] { border-bottom-color: rgba(255,255,255,0.08) !important; }
+
+  /* Nothing in it, nothing to show. */
+  html.kk table.kk-cards .kk-empty { display: none !important; }
+
+  /* Buttons in a row: one line along the bottom of the card, right-aligned,
+     wrapping if there are many. */
+  html.kk table.kk-cards td[data-kk-actions] {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 8px;
+    padding-top: 8px !important;
+  }
+  html.kk table.kk-cards td[data-kk-actions] > * { flex-wrap: wrap; justify-content: flex-end; }
+
+  /* "Nothing here yet" / group-heading rows: one full-width line, no card. */
+  html.kk table.kk-cards tr.kk-full { padding: 8px 4px; border: 0; background: transparent; text-align: center; }
+  html.kk table.kk-cards tr.kk-full td { display: block; text-align: center !important; }
+
+  /* Inputs inside a card fill the space next to their label. */
+  html.kk table.kk-cards td[data-label] input:not([type="checkbox"]):not([type="radio"]),
+  html.kk table.kk-cards td[data-label] select { width: 58% !important; min-width: 0; }
+
+  /* The scroller the table sat in no longer needs to scroll, and its rounded
+     white frame would draw a card around the cards. */
+  html.kk div:has(> table.kk-cards) { overflow-x: visible !important; }
+
+  /* Tables with no heading row: each row wraps. First cell (the name) gets a
+     line of its own; the rest flow after it; a button goes to the right. */
+  html.kk table.kk-flow { display: block; width: 100% !important; min-width: 0 !important; }
+  html.kk table.kk-flow tbody, html.kk table.kk-flow tfoot { display: block; }
+  html.kk table.kk-flow tr:not(.hidden) { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 10px 14px; }
+  html.kk table.kk-flow td:not(.hidden), html.kk table.kk-flow th:not(.hidden) { display: block; padding: 0 !important; width: auto !important; min-width: 0 !important; text-align: left !important; white-space: normal !important; }
+  html.kk table.kk-flow td:first-child { flex: 1 1 100%; }
+  html.kk table.kk-flow td:last-child:has(button, a) { margin-left: auto; }
+  html.kk div:has(> table.kk-flow) { overflow-x: visible !important; }
+
+  /* Wide grids that stay tables (data-keep-table, or >16 columns) scroll
+     inside themselves, never the page. */
+  html.kk table:not(.kk-cards) { max-width: none; }
+  html.kk div:has(> table:not(.kk-cards):not(.kk-flow)) { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+}

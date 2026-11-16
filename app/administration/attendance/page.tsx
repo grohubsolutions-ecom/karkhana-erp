@@ -39,7 +39,18 @@ export default function AttendancePage() {
           <div className="rounded-card bg-surface p-8 text-center text-[14px] text-muted shadow-card">Connect Supabase to use attendance.</div>
         ) : (
           <>
-            <Segmented className="mb-5 w-full" value={tab} onChange={setTab} options={TABS} />
+            {/* Eight tabs do not fit a 390px row — they were squashed to two
+                letters each. Phone: one dropdown. md and up: the strip as it was. */}
+            <label className="mb-4 block md:hidden">
+              <span className="sr-only">Section</span>
+              <select value={tab} onChange={(e) => setTab(e.target.value as Tab)}
+                className="w-full rounded-xl2 border border-line bg-surface px-3.5 py-2.5 font-semibold text-ink outline-none dark:border-white/10 dark:bg-white/[0.04] dark:text-white">
+                {TABS.map((t) => <option key={t.key} value={t.key}>{t.label}</option>)}
+              </select>
+            </label>
+            <div className="hidden md:block">
+              <Segmented className="mb-5 w-full" value={tab} onChange={setTab} options={TABS} />
+            </div>
             {tab === "today" && <TodayTab />}
             {tab === "staff" && <StaffTab />}
             {tab === "shifts" && <ShiftsTab />}
