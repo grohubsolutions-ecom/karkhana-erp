@@ -34,6 +34,11 @@ const MONTHS = ["", "January", "February", "March", "April", "May", "June",
                 "July", "August", "September", "October", "November", "December"];
 const SHORT = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const rs = (v: unknown) => "Rs " + Math.round(Number(v) || 0).toLocaleString("en-PK");
+/* 818 → "13h 38m" (H317 time short) */
+const hm = (v: unknown) => {
+  const m = Math.round(Number(v) || 0), h = Math.floor(m / 60), r = m % 60;
+  return h ? (r ? `${h}h ${r}m` : `${h}h`) : `${r}m`;
+};
 const dayCount = (v: unknown) => {
   const n = Number(v) || 0;
   const w = Math.floor(n);
@@ -346,6 +351,12 @@ export default function EmployeeMonthDetail({
               <div className="flex justify-between text-red-700">
                 <span>{row.absent} absent day{Number(row.absent) > 1 ? "s" : ""} — not counted</span>
                 <span className="tabular-nums">− {rs(row.absent_deduction)}</span>
+              </div>
+            )}
+            {Number(row.short_minutes) > 0 && (
+              <div className="flex justify-between text-red-700">
+                <span>Time short − {hm(row.short_minutes)} (late in + early out) — already off Earned</span>
+                <span className="tabular-nums">− {rs(row.short_deduction)}</span>
               </div>
             )}
             <div className="flex justify-between">
