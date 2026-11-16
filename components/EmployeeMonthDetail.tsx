@@ -24,6 +24,7 @@ import { X, Loader2, Check, AlertTriangle, CalendarPlus, Trash2, ArrowRight } fr
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { useConfirm } from "@/components/ConfirmDialog";
 import type { SummaryRow } from "@/components/MonthlySummary";
+import HoursLedger, { type HoursDay } from "@/components/HoursLedger";
 
 type Row = SummaryRow;
 type Day = { day: number; status: string; time_in?: string | null; time_out?: string | null };
@@ -34,9 +35,9 @@ const MONTHS = ["", "January", "February", "March", "April", "May", "June",
                 "July", "August", "September", "October", "November", "December"];
 const SHORT = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const rs = (v: unknown) => "Rs " + Math.round(Number(v) || 0).toLocaleString("en-PK");
-/* 818 → "13h 38m" (H317 time short) */
+/* 818 → "13h 38m" (H319 hours balance) */
 const hm = (v: unknown) => {
-  const m = Math.round(Number(v) || 0), h = Math.floor(m / 60), r = m % 60;
+  const m = Math.abs(Math.round(Number(v) || 0)), h = Math.floor(m / 60), r = m % 60;
   return h ? (r ? `${h}h ${r}m` : `${h}h`) : `${r}m`;
 };
 const dayCount = (v: unknown) => {
@@ -57,6 +58,7 @@ export default function EmployeeMonthDetail({
   const [days, setDays] = useState<Day[]>([]);
   const [advs, setAdvs] = useState<Adv[]>([]);
   const [extras, setExtras] = useState<Extra[]>([]);
+  const [hours, setHours] = useState<HoursDay[]>([]);
   const [loading, setLoading] = useState(true);
   /* The calendar has to know about public holidays, not just Sundays.
      Without them 14 August — Independence Day, worked — renders as an ordinary
@@ -73,7 +75,7 @@ export default function EmployeeMonthDetail({
   const load = useCallback(async () => {
     if (!isSupabaseConfigured || !supabase) { setLoading(false); return; }
     setLoading(true);
-    const [d, a, h, x] = await Promise.all([
+    const [d, a, h, x, hr] = await Promise.all([
       supabase.from("online_att_records").select("day,status,time_in,time_out")
         .eq("emp_id", row.emp_id).eq("year", year).eq("month", month).order("day"),
       supabase.from("online_att_advances").select("id,date,amount,note,carried_from")
@@ -81,6 +83,7 @@ export default function EmployeeMonthDetail({
       supabase.from("online_att_holidays").select("hdate"),
       supabase.from("online_att_extra_days").select("id,day,portion,reason,given_by_name")
         .eq("emp_id", row.emp_id).gte("day", from).lte("day", to).order("day"),
+      supabase.rpc("hub_hours_daily", { p_emp: row.emp_id, p_year: year, p_month: month }),
     ]);
     const e = d.error ?? a.error ?? x.error;
     if (e) setErr(e.message);
@@ -88,6 +91,7 @@ export default function EmployeeMonthDetail({
     setAdvs((a.data as Adv[]) ?? []);
     setHols(new Set(((h.data as { hdate: string }[]) ?? []).map((v) => v.hdate)));
     setExtras((x.data as Extra[]) ?? []);
+    setHours(hr.error ? [] : ((hr.data as HoursDay[]) ?? []));
     setLoading(false);
     /* Reloaded whenever the summary's figures for this person change — a day
        given, a payment marked or undone. */
@@ -251,6 +255,14 @@ export default function EmployeeMonthDetail({
           )}
         </div>
 
+        {/* H320: HOURS DAY BY DAY — the plus and minus behind the Hours column. */}
+        <div className="mt-4 overflow-hidden rounded-card border border-line dark:border-white/10">
+          <div className="border-b border-line bg-panel px-4 py-2.5 text-[13px] font-semibold text-ink dark:border-white/10 dark:bg-white/[0.04] dark:text-[#f4f1ea] sm:px-5">
+            Hours, day by day
+          </div>
+          <HoursLedger rows={hours} loading={loading} />
+        </div>
+
         {/* EXTRA DAYS GIVEN — each with its reason and who gave it. */}
         <div className="mt-4">
           <div className="mb-1.5 flex items-center justify-between gap-2">
@@ -353,10 +365,10 @@ export default function EmployeeMonthDetail({
                 <span className="tabular-nums">− {rs(row.absent_deduction)}</span>
               </div>
             )}
-            {Number(row.short_minutes) > 0 && (
-              <div className="flex justify-between text-red-700">
-                <span>Time short − {hm(row.short_minutes)} (late in + early out) — already off Earned</span>
-                <span className="tabular-nums">− {rs(row.short_deduction)}</span>
+            {Number(row.balance_days) > 0 && (
+              <div className={`flex justify-between ${Number(row.time_balance) < 0 ? "text-red-700" : Number(row.time_balance) > 0 ? "text-emerald-700" : ""}`}>
+                <span>Hours balance — worked {hm(row.worked_minutes)} of {hm(row.required_minutes)} over {row.balance_days} days (not paid or cut)</span>
+                <span className="tabular-nums">{Number(row.time_balance) > 0 ? "+" : Number(row.time_balance) < 0 ? "− " : ""}{hm(row.time_balance)}</span>
               </div>
             )}
             <div className="flex justify-between">

@@ -51,10 +51,10 @@ export type SummaryRow = {
   advances: number; payable: number; is_paid: boolean;
   /* H284 */
   given_days: number; given_pay: number; advance_cut: number; carried: number;
-  /* H317: minutes late in + early out against the shift, and what they cost
-     (already taken off Earned). Optional so the screen still loads before
-     H317 is run. */
-  short_minutes?: number; short_deduction?: number;
+  /* H319: the month's hours balance in minutes — worked minus the shift's
+     hours, day by day, plus and minus netted. Shown only; it never changes
+     the salary. Optional so the screen still loads before H319 is run. */
+  time_balance?: number; worked_minutes?: number; required_minutes?: number; balance_days?: number;
 };
 type Row = SummaryRow;
 
@@ -65,9 +65,18 @@ const rs = (v: unknown) => "Rs " + Math.round(Number(v) || 0).toLocaleString("en
 /* 1.5 → "1½", 0.5 → "½" */
 /* 818 → "13h 38m", 45 → "45m" */
 export const hm = (v: unknown) => {
-  const m = Math.round(Number(v) || 0);
+  const m = Math.abs(Math.round(Number(v) || 0));
   const h = Math.floor(m / 60), r = m % 60;
   return h ? (r ? `${h}h ${r}m` : `${h}h`) : `${r}m`;
+};
+/* Signed balance: +1h 2m / − 1h 26m / 0h */
+export const bal = (v: unknown) => {
+  const n = Math.round(Number(v) || 0);
+  return n > 0 ? `+${hm(n)}` : n < 0 ? `− ${hm(n)}` : "0h";
+};
+const balTone = (v: unknown) => {
+  const n = Math.round(Number(v) || 0);
+  return n > 0 ? "text-emerald-700" : n < 0 ? "text-red-700" : "text-muted dark:text-[#a89f93]";
 };
 export const dayCount = (v: unknown) => {
   const n = Number(v) || 0;
@@ -190,14 +199,13 @@ export default function MonthlySummary({ department = "HUB" }: { department?: st
     half: a.half + Number(r.half),
     absent: a.absent + Number(r.absent),
     lost: a.lost + Number(r.absent_deduction),
-    shortMin: a.shortMin + Number(r.short_minutes ?? 0),
-    shortAmt: a.shortAmt + Number(r.short_deduction ?? 0),
+    balance: a.balance + Number(r.time_balance ?? 0),
     given: a.given + Number(r.given_days ?? 0),
     advances: a.advances + Number(r.advance_cut ?? r.advances),
     carried: a.carried + Number(r.carried ?? 0),
     earned: a.earned + Number(r.gross),
     payable: a.payable + Number(r.payable),
-  }), { present: 0, half: 0, absent: 0, lost: 0, shortMin: 0, shortAmt: 0, given: 0, advances: 0, carried: 0, earned: 0, payable: 0 });
+  }), { present: 0, half: 0, absent: 0, lost: 0, balance: 0, given: 0, advances: 0, carried: 0, earned: 0, payable: 0 });
 
   const isCurrentMonth = year === today.getFullYear() && month === today.getMonth() + 1;
   const stale = rowsKey !== key;
@@ -281,7 +289,9 @@ export default function MonthlySummary({ department = "HUB" }: { department?: st
                 <span className="font-semibold text-emerald-700">{r.present} present</span>
                 {Number(r.half) > 0 && <span className="text-amber-700">{r.half} half</span>}
                 {Number(r.absent) > 0 && <span className="text-red-700">{r.absent} absent (− {rs(r.absent_deduction)})</span>}
-                {Number(r.short_minutes) > 0 && <span className="text-red-700">− {hm(r.short_minutes)} short (− {rs(r.short_deduction)})</span>}
+                {Number(r.balance_days) > 0 && (
+                  <span className={`font-semibold ${balTone(r.time_balance)}`}>{bal(r.time_balance)} hours</span>
+                )}
                 <span className="text-muted dark:text-[#a89f93]">{r.paid_off} off paid{Number(r.extra_days) > 0 ? ` +${r.extra_days}` : ""}</span>
                 {Number(r.given_days) > 0 && <span className="font-semibold text-emerald-700">+{dayCount(r.given_days)} extra day</span>}
                 <span className="font-semibold text-ink dark:text-[#e7e2d8]">{dayCount(r.counted_days)} counted</span>
@@ -307,7 +317,7 @@ export default function MonthlySummary({ department = "HUB" }: { department?: st
               <div className="flex justify-between text-[13px] font-semibold text-muted dark:text-[#a89f93]"><span>Total earned</span><span className="tabular-nums">{rs(t.earned)}</span></div>
               <div className="mt-0.5 flex justify-between text-[14px] font-extrabold text-ink dark:text-[#f4f1ea]"><span>Total payable</span><span>{rs(t.payable)}</span></div>
               <div className="mt-1 text-muted dark:text-[#a89f93]">
-                {t.present} present · {t.half} half · {t.absent} absent (− {rs(t.lost)}){t.shortMin > 0 ? ` · − ${hm(t.shortMin)} short (− ${rs(t.shortAmt)})` : ""}{t.given > 0 ? ` · +${dayCount(t.given)} extra` : ""} · advances {rs(t.advances)}
+                {t.present} present · {t.half} half · {t.absent} absent (− {rs(t.lost)}){t.given > 0 ? ` · +${dayCount(t.given)} extra` : ""} · advances {rs(t.advances)}
                 {t.carried > 0 ? ` · ${rs(t.carried)} carried to ${nextShort}` : ""}
               </div>
             </div>
@@ -323,7 +333,7 @@ export default function MonthlySummary({ department = "HUB" }: { department?: st
               <th className="px-3 py-3 text-right font-semibold text-emerald-700">Present</th>
               <th className="px-3 py-3 text-right font-semibold text-amber-700">Half</th>
               <th className="px-3 py-3 text-right font-semibold text-red-700">Absent</th>
-              <th className="px-3 py-3 text-right font-semibold text-red-700">Time short</th>
+              <th className="px-3 py-3 text-right font-semibold">Hours</th>
               <th className="px-3 py-3 text-right font-semibold text-red-700">Lost</th>
               <th className="px-3 py-3 text-right font-semibold">Paid off</th>
               <th className="px-3 py-3 text-right font-semibold text-emerald-700">Extra day</th>
@@ -363,15 +373,16 @@ export default function MonthlySummary({ department = "HUB" }: { department?: st
                     by not being counted, but subtraction by omission is invisible
                     — Ahmad's two absences turned 13,000 into 12,000 with nothing
                     on screen saying why. */}
-                {/* H317: late in + early out against the shift. The time and its
-                    cost, both minus; the cost is already off Earned. */}
-                <td className="px-3 py-3 text-right tabular-nums text-red-700">
-                  {Number(r.short_minutes) > 0 ? (
+                {/* H319: hours balance for the month — plus covers minus.
+                    Shown only; the salary is not changed by it. */}
+                <td className="whitespace-nowrap px-3 py-3 text-right tabular-nums"
+                    title={Number(r.balance_days) > 0 ? `Worked ${hm(r.worked_minutes)} of ${hm(r.required_minutes)} over ${r.balance_days} days` : undefined}>
+                  {Number(r.balance_days) > 0 ? (
                     <>
-                      <div>− {hm(r.short_minutes)}</div>
-                      <div className="text-[11.5px]">− {rs(r.short_deduction)}</div>
+                      <div className={`font-semibold ${balTone(r.time_balance)}`}>{bal(r.time_balance)}</div>
+                      <div className="text-[11px] text-hint dark:text-[#8a8175]">{r.balance_days} {Number(r.balance_days) === 1 ? "day" : "days"}</div>
                     </>
-                  ) : "—"}
+                  ) : <span className="text-hint dark:text-[#6f675d]">—</span>}
                 </td>
                 <td className="px-3 py-3 text-right tabular-nums text-red-700">
                   {Number(r.absent_deduction) ? "− " + rs(r.absent_deduction) : "—"}
@@ -422,9 +433,7 @@ export default function MonthlySummary({ department = "HUB" }: { department?: st
                 <td className="px-3 py-3 text-right tabular-nums text-emerald-700">{t.present}</td>
                 <td className="px-3 py-3 text-right tabular-nums text-amber-700">{t.half}</td>
                 <td className="px-3 py-3 text-right tabular-nums text-red-700">{t.absent}</td>
-                <td className="px-3 py-3 text-right tabular-nums text-red-700">
-                  {t.shortMin > 0 ? <><div>− {hm(t.shortMin)}</div><div className="text-[11.5px]">− {rs(t.shortAmt)}</div></> : "—"}
-                </td>
+                <td className="whitespace-nowrap px-3 py-3 text-right tabular-nums" />
                 <td className="px-3 py-3 text-right tabular-nums text-red-700">− {rs(t.lost)}</td>
                 <td />
                 <td className="px-3 py-3 text-right tabular-nums text-emerald-700">{t.given > 0 ? `+${dayCount(t.given)}` : ""}</td>
@@ -467,7 +476,7 @@ export default function MonthlySummary({ department = "HUB" }: { department?: st
       <p className="mt-3 text-[12px] leading-relaxed text-hint dark:text-[#8a8175]">
         Payable = counted days ÷ days in the month × salary − advance cut. A full month worked pays the full salary, in February as in August.
         Sundays and public holidays are paid for everyone; working a day off adds one extra day, and an extra day given is paid the same way.
-        &ldquo;Time short&rdquo; is minutes late in plus minutes early out against each person&rsquo;s shift (beyond the grace), charged at the day rate ÷ shift minutes and already taken off Earned.
+        &ldquo;Hours&rdquo; is the month&rsquo;s balance: on each present day with a time in and out, hours worked minus the shift&rsquo;s hours, plus and minus added together — extra time one day covers short time another. A day short by no more than the grace (10 min) counts as 0. Overtime shows as plus but adds no pay, and the balance never changes the salary. Days without a time out are not counted.
         Approved leave is paid in full; an absent day is not counted, and &ldquo;Lost&rdquo; is what it would have paid.
         Marking someone paid asks how much of their advance to cut; what is not cut moves to next month as &ldquo;Advance carried forward&rdquo;.
         {isCurrentMonth && " This month counts days up to today, so the figure grows as the month goes on."}

@@ -20,7 +20,7 @@
  *   from the browser console.
  */
 import { useCallback, useEffect, useState } from "react";
-import { CalendarDays, HandCoins, Wallet, Loader2, AlertTriangle, LogOut, Eye, EyeOff } from "lucide-react";
+import { CalendarDays, HandCoins, Wallet, Loader2, AlertTriangle, LogOut, Eye, EyeOff, Clock } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import MyWork from "@/components/MyWork";
@@ -30,6 +30,8 @@ import ReturnsTrend from "@/components/ReturnsTrend";
 import HubSessionGuard from "@/components/HubSessionGuard";
 import HubBell from "@/components/HubBell";
 import PushToggle from "@/components/PushToggle";
+/* H320: the hours balance, day by day. */
+import HoursLedger, { type HoursDay, hoursTotals, signed, tone as hTone } from "@/components/HoursLedger";
 /* Headings are Title Case — every word starts with a capital (the owner,
    5 Oct 2026). */
 import { tc } from "@/lib/titleCase";
@@ -82,6 +84,7 @@ export default function MyPortal() {
   const [days, setDays] = useState<Day[]>([]);
   const [advs, setAdvs] = useState<Adv[]>([]);
   const [extras, setExtras] = useState<Extra[]>([]);
+  const [hours, setHours] = useState<HoursDay[]>([]);
   /* The calendar has to know about public holidays too.
      It only checked for Sundays, so 14 August — Independence Day, worked —
      showed as an ordinary "present" day while the figures above it said
@@ -143,13 +146,14 @@ export default function MyPortal() {
   const load = useCallback(async () => {
     if (!isSupabaseConfigured || !supabase) { setLoading(false); return; }
     setLoading(true); setErr("");
-    const [m, p, d, a, h, x] = await Promise.all([
+    const [m, p, d, a, h, x, hr] = await Promise.all([
       supabase.rpc("my_employee"),
       supabase.rpc("my_monthly_payable", { p_year: year, p_month: month }),
       supabase.rpc("my_attendance", { p_year: year, p_month: month }),
       supabase.rpc("my_advances", { p_year: year, p_month: month }),
       supabase.from("online_att_holidays").select("hdate,name"),
       supabase.rpc("my_extra_days", { p_year: year, p_month: month }),
+      supabase.rpc("my_hours_daily", { p_year: year, p_month: month }),
     ]);
     /* Any failure is said. Only the first one was checked, so a failed pay
        figure showed Rs 0 — as if nothing had been earned this month. */
@@ -160,6 +164,8 @@ export default function MyPortal() {
     setDays((d.data as Day[]) ?? []);
     setAdvs((a.data as Adv[]) ?? []);
     setExtras((x.data as Extra[]) ?? []);
+    /* Not in firstErr: before H320 is run the hours simply do not show. */
+    setHours(hr.error ? [] : ((hr.data as HoursDay[]) ?? []));
     setHols(new Set(((h.data as { hdate: string }[]) ?? []).map((x) => x.hdate)));
     setLoading(false);
   }, [year, month]);
@@ -185,6 +191,7 @@ export default function MyPortal() {
   const advCut = Number(pay?.advance_cut ?? pay?.advances ?? 0);
   const carried = Number(pay?.carried ?? 0);
   const nextMonth = MONTHS[month === 12 ? 1 : month + 1];
+  const ht = hoursTotals(hours);
   const extraLabel = (iso: string) => `${Number(iso.slice(8, 10))} ${MONTHS[month].slice(0, 3)}`;
 
   if (loading || !perms) {
@@ -410,6 +417,33 @@ export default function MyPortal() {
                   </dt>
                   <dd className="shrink-0 font-semibold tabular-nums text-ink dark:text-[#e7e2d8]">{money(gross)}</dd>
                 </div>
+                {/* Everything that came off, or could have, said out loud. */}
+                {Number(pay?.absent) > 0 && (
+                  <div className="flex items-baseline justify-between gap-4 border-b border-line px-4 py-2.5 dark:border-white/[0.06] sm:px-5">
+                    <dt className="text-muted dark:text-[#a89f93]">
+                      {pay?.absent} absent day{Number(pay?.absent) > 1 ? "s" : ""} — not paid
+                      <span className="mt-0.5 block text-[11.5px] text-hint dark:text-[#8a8175]">already left out of the earned figure above</span>
+                    </dt>
+                    <dd className="shrink-0 font-semibold tabular-nums text-red-700">− {money(pay?.absent_deduction)}</dd>
+                  </div>
+                )}
+                {Number(pay?.half) > 0 && (
+                  <div className="flex items-baseline justify-between gap-4 border-b border-line px-4 py-2.5 dark:border-white/[0.06] sm:px-5">
+                    <dt className="text-muted dark:text-[#a89f93]">
+                      {pay?.half} half day{Number(pay?.half) > 1 ? "s" : ""} — paid as half
+                    </dt>
+                    <dd className="shrink-0 font-semibold tabular-nums text-amber-700">½ each</dd>
+                  </div>
+                )}
+                {ht.days > 0 && (
+                  <div className="flex items-baseline justify-between gap-4 border-b border-line px-4 py-2.5 dark:border-white/[0.06] sm:px-5">
+                    <dt className="text-muted dark:text-[#a89f93]">
+                      Hours balance
+                      <span className="mt-0.5 block text-[11.5px] text-hint dark:text-[#8a8175]">shown only — does not change your pay; see Your Hours below</span>
+                    </dt>
+                    <dd className={`shrink-0 font-semibold tabular-nums ${hTone(ht.balance)}`}>{signed(ht.balance)}</dd>
+                  </div>
+                )}
                 {advCut > 0 && (
                   <div className="flex items-baseline justify-between gap-4 border-b border-line px-4 py-2.5 dark:border-white/[0.06] sm:px-5">
                     <dt className="text-muted dark:text-[#a89f93]">
@@ -475,6 +509,14 @@ export default function MyPortal() {
                   </dd>
                 </div>
               </dl>
+            </section>
+
+            {/* H320: YOUR HOURS — every day, plus and minus, with the running balance. */}
+            <section className="overflow-hidden rounded-card border border-line bg-surface shadow-card dark:border-white/10 dark:bg-[#201c17]">
+              <h2 className="flex items-center gap-2 border-b border-line px-4 py-3 text-[13px] font-bold text-ink dark:border-white/10 dark:text-[#f4f1ea] sm:px-5">
+                <Clock size={15} /> Your Hours In {MONTHS[month]}
+              </h2>
+              <HoursLedger rows={hours} />
             </section>
 
           </div>
@@ -568,7 +610,7 @@ export default function MyPortal() {
         <p className={`mt-5 px-1 text-[11.5px] leading-relaxed text-hint dark:text-[#8a8175] ${shown === "pay" ? "" : "hidden"}`}>
           Sundays and public holidays are paid. Working one adds a day, and an extra day
           given to you is paid the same way. An absent day is not counted, and it is the
-          only thing that reduces what you earn. Advance not cut in a month moves to the
+          only thing that reduces what you earn — your hours balance is shown, never cut. Advance not cut in a month moves to the
           next month as &ldquo;Advance carried forward&rdquo;.
           {isCurrent && " This month is still running, so the figure grows each day you are marked present."}
           {" "}Something look wrong? Speak to whoever marks attendance for your department.
