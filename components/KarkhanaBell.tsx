@@ -191,7 +191,7 @@ export default function KarkhanaBell({ align = "right" }: { align?: "left" | "ri
         )}
       </button>
 
-      {open && <div className="fixed inset-0 z-40 bg-black/25 sm:bg-transparent md:hidden" onClick={() => setOpen(false)} />}
+      {open && <div className="fixed inset-0 z-40 bg-black/25 sm:bg-transparent lg:hidden" onClick={() => setOpen(false)} />}
       {open && (
         /* Phone: a sheet measured from the window, so it cannot run off an
            edge. Desktop: anchored to the bell, opening into the page. */

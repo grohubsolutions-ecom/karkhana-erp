@@ -3,6 +3,17 @@
    Nothing here touches another department: the class is removed when you
    leave the Hub. */
 
+/* A phone held SIDEWAYS is 768–1023px wide, where the Hub shows its computer
+   layout — but iOS still zooms on any input under 16px there. Measured: 21
+   such inputs across ten Hub screens at 900px. Only the font size applies in
+   this band; the layout is untouched. 1024px and up: nothing changes. */
+@media (min-width: 768px) and (max-width: 1023.98px) {
+  html.hub input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
+  html.hub select,
+  html.hub textarea { font-size: 16px !important; }
+  html.hub { touch-action: manipulation; }
+}
+
 @media (max-width: 767.98px) {
   /* Nothing may push the page sideways. `clip` cuts off overflow without
      turning the box into a scroll area, so sticky headers inside still work. */

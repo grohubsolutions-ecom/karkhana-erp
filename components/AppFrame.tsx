@@ -11,6 +11,32 @@ import SetPassword from "./SetPassword";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { PermissionsProvider, usePermissions } from "@/lib/usePermissions";
 import { requiredFor } from "@/lib/access";
+import PhoneTables from "./PhoneTables";
+import "../app/kk-mobile.css";
+
+/* PHONE LAYER FOR EVERYTHING THAT IS NOT THE HUB OR SHOPS SALES.
+   The Hub (/online, /me) and Shops Sales (/retail) carry their own phone
+   layers. Every other screen — Karkhana, Warehouse, Payments, Carrefour,
+   Reports, Team, Administration, the wage desk, the department chooser — gets
+   `html.kk`, which switches on app/kk-mobile.css, and PhoneTables, which lets
+   that file turn tables into cards below 768px. Nothing in either applies at
+   1024px and up: the computer layout is unchanged. */
+function usesOwnPhoneLayer(pathname: string) {
+  return pathname === "/me" ||
+    pathname === "/online" || pathname.startsWith("/online/") ||
+    pathname === "/retail" || pathname.startsWith("/retail/");
+}
+function KarkhanaPhoneLayer() {
+  const pathname = usePathname();
+  const on = !usesOwnPhoneLayer(pathname);
+  useEffect(() => {
+    if (!on) return;
+    const html = document.documentElement;
+    html.classList.add("kk");
+    return () => html.classList.remove("kk");
+  }, [on]);
+  return on ? <PhoneTables /> : null;
+}
 
 function AccessRestricted() {
   return (
@@ -47,13 +73,17 @@ function FrameContent({ children }: { children: React.ReactNode }) {
   const [navOpen, setNavOpen] = useState(false);
   const isCarrefour = pathname === "/carrefour" || pathname.startsWith("/carrefour/");
   return (
-    <div className="flex h-[100dvh] overflow-hidden bg-canvas">
+    /* Phone: the PAGE scrolls (document scroll), not a panel inside a fixed
+       100dvh frame. With a fixed frame the iOS keyboard shifts the frame and
+       every tap lands a few pixels from where the button is drawn — the Hub
+       had the same bug and the same fix. 1024px and up: the original frame. */
+    <div className="flex min-h-[100dvh] bg-canvas lg:h-[100dvh] lg:overflow-hidden">
       {isCarrefour
         ? <CarrefourSidebar open={navOpen} onClose={() => setNavOpen(false)} />
         : <Sidebar open={navOpen} onClose={() => setNavOpen(false)} />}
       <div className="flex min-w-0 flex-1 flex-col">
         <MobileBar title={isCarrefour ? "Carrefour" : "Karkhana"} onOpen={() => setNavOpen(true)} right={<KarkhanaBell />} />
-        <main className="min-w-0 flex-1 overflow-y-auto overflow-x-hidden">
+        <main className="min-w-0 flex-1 lg:overflow-y-auto lg:overflow-x-hidden">
           {!ready ? null : allowed ? children : <AccessRestricted />}
         </main>
       </div>
@@ -118,7 +148,7 @@ export default function AppFrame({ children }: { children: React.ReactNode }) {
     } catch { /* no matchMedia (very old browsers) — skip silently */ }
   }, [authReady, isLogin, pathname, router]);
 
-  if (isLogin) return <>{children}</>;
+  if (isLogin) return <><KarkhanaPhoneLayer />{children}</>;
   if (!authReady) return null;
   if (mustChange === null) return null;
   if (mustChange) return <SetPassword onDone={() => setMustChange(false)} />;
@@ -135,12 +165,13 @@ export default function AppFrame({ children }: { children: React.ReactNode }) {
 
      The provider now wraps both branches. Only the chrome differs. */
   if (isFullScreen) {
-    return <PermissionsProvider><FullScreenGate>{children}</FullScreenGate></PermissionsProvider>;
+    return <PermissionsProvider><KarkhanaPhoneLayer /><FullScreenGate>{children}</FullScreenGate></PermissionsProvider>;
   }
 
   // Only now (fully authenticated) do we load permissions — one shared copy.
   return (
     <PermissionsProvider>
+      <KarkhanaPhoneLayer />
       <FrameContent>{children}</FrameContent>
     </PermissionsProvider>
   );
