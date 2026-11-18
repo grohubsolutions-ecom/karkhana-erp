@@ -116,20 +116,25 @@ type StoreRow = {
 type CourierRow = { courier: string; dispatched: number; delivered: number; returned: number };
 type Breakdown = { stores: StoreRow[]; couriers: CourierRow[]; cities: { label: string; value: number }[] };
 
-/* Shopify's "Total sales breakdown", same lines, same maths (H316):
-     Net sales   = Gross − Discounts − Sales reversals
+/* Shopify's "Total sales breakdown", same lines, same maths (H316/H317):
+     Net sales   = Gross − Discounts − Returns − Cancellations
+   Shopify's single "Sales reversals" line is split in two (H317):
+     Returns       = orders cancelled after fulfilment
+     Cancellations = orders cancelled before fulfilment
      Total sales = Net + Shipping + Return fees + Taxes
    Free-shipping discounts come off shipping, not products, as in Shopify.
-   If H316 hasn't been run yet the card falls back to the older per-store
-   function (H308), where free shipping still shows under Discounts. */
+   If H317 hasn't been run yet the card falls back to the older per-store
+   function (H308), which already splits returns and cancellations but still
+   shows free shipping under Discounts. */
 type SalesBreakdown = {
-  gross_sales: number; discounts: number; sales_reversals: number; net_sales: number;
+  gross_sales: number; discounts: number; returns: number; cancellations: number; net_sales: number;
   shipping_charges: number; return_fees: number; taxes: number; total_sales: number;
 };
 const BREAKDOWN_ROWS: { key: keyof SalesBreakdown; label: string; neg?: boolean }[] = [
   { key: "gross_sales",      label: "Gross sales" },
   { key: "discounts",        label: "Discounts", neg: true },
-  { key: "sales_reversals",  label: "Sales reversals", neg: true },
+  { key: "returns",          label: "Returns", neg: true },
+  { key: "cancellations",    label: "Cancellations", neg: true },
   { key: "net_sales",        label: "Net sales" },
   { key: "shipping_charges", label: "Shipping charges" },
   { key: "return_fees",      label: "Return fees" },
@@ -140,7 +145,7 @@ const fromH308 = (r: ShopifySalesRow): SalesBreakdown => {
   const net = Number(r.net_sales || 0), ship = Number(r.shipping_charges || 0);
   return {
     gross_sales: Number(r.gross_sales || 0), discounts: Number(r.discounts || 0),
-    sales_reversals: Number(r.returns_amount || 0) + Number(r.cancellations || 0),
+    returns: Number(r.returns_amount || 0), cancellations: Number(r.cancellations || 0),
     net_sales: net, shipping_charges: ship, return_fees: 0, taxes: 0, total_sales: net + ship,
   };
 };
@@ -211,10 +216,12 @@ export default function HubDashboard() {
     const args = { p_from: from, p_to: to, p_store: store === "ALL" ? null : store };
 
     const prev = prevRange(from, to);
-    /* One row for the breakdown card: H316 if it exists, else H308's total row. */
+    /* One row for the breakdown card: H317 if it exists, else H308's total row.
+       H316 (no returns/cancellations split) is skipped in favour of H308. */
     const salesFor = async (a: typeof args): Promise<SalesBreakdown | null> => {
       const r = await supabase!.rpc("hub_sales_breakdown", a);
-      if (!r.error) return ((r.data as SalesBreakdown[] | null)?.[0]) ?? null;
+      const row = r.error ? null : ((r.data as SalesBreakdown[] | null)?.[0] ?? null);
+      if (!r.error && (!row || row.returns !== undefined)) return row;
       const o = await supabase!.rpc("hub_dashboard_shopify_sales_per_store", a);
       const t = o.error ? null : (o.data as ShopifySalesRow[] | null)?.find((x) => x.is_total);
       return t ? fromH308(t) : null;
