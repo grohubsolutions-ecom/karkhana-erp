@@ -1,0 +1,147 @@
+"use client";
+import { useEffect, useState } from "react";
+import { usePathname, useRouter } from "next/navigation";
+import { Lock } from "lucide-react";
+import Link from "next/link";
+import Sidebar from "./Sidebar";
+import CarrefourSidebar from "./carrefour/CarrefourSidebar";
+import MobileBar from "./MobileBar";
+import KarkhanaBell from "./KarkhanaBell";
+import SetPassword from "./SetPassword";
+import { supabase, isSupabaseConfigured } from "@/lib/supabase";
+import { PermissionsProvider, usePermissions } from "@/lib/usePermissions";
+import { requiredFor } from "@/lib/access";
+
+function AccessRestricted() {
+  return (
+    <div className="flex min-h-[70vh] flex-col items-center justify-center px-6 text-center">
+      <span className="mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-panel text-muted"><Lock size={24} /></span>
+      <h2 className="text-[18px] font-extrabold text-ink">You don&apos;t have access to this area</h2>
+      <p className="mt-1 max-w-sm text-[13px] text-muted">Your role doesn&apos;t include this section. If you need it, ask an administrator to grant you access.</p>
+      <Link href="/" className="mt-5 rounded-full bg-ink px-5 py-2.5 text-[13px] font-semibold text-white">Back to Home</Link>
+    </div>
+  );
+}
+
+// Inside the provider: has access to the shared permissions.
+/* THE SAME GATE, WITHOUT THE FACTORY CHROME.
+   FrameContent checks requiredFor(pathname) before rendering. The full-screen
+   branch returned children straight through, so every /online/* page was open
+   to anyone who could log in — Finance included. Adding the Hub routes to
+   ROUTE_PERMS changed nothing on its own, because on those pages nothing was
+   reading the map.
+
+   The rule has to be applied wherever a page renders, not wherever it happens
+   to be convenient. */
+function FullScreenGate({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname();
+  const { ready, can } = usePermissions();
+  if (!ready) return null;                       // nothing until we know
+  return can(requiredFor(pathname)) ? <>{children}</> : <AccessRestricted />;
+}
+
+function FrameContent({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname();
+  const { ready, can } = usePermissions();
+  const allowed = can(requiredFor(pathname));
+  const [navOpen, setNavOpen] = useState(false);
+  const isCarrefour = pathname === "/carrefour" || pathname.startsWith("/carrefour/");
+  return (
+    <div className="flex h-[100dvh] overflow-hidden bg-canvas">
+      {isCarrefour
+        ? <CarrefourSidebar open={navOpen} onClose={() => setNavOpen(false)} />
+        : <Sidebar open={navOpen} onClose={() => setNavOpen(false)} />}
+      <div className="flex min-w-0 flex-1 flex-col">
+        <MobileBar title={isCarrefour ? "Carrefour" : "Karkhana"} onOpen={() => setNavOpen(true)} right={<KarkhanaBell />} />
+        <main className="min-w-0 flex-1 overflow-y-auto overflow-x-hidden">
+          {!ready ? null : allowed ? children : <AccessRestricted />}
+        </main>
+      </div>
+    </div>
+  );
+}
+
+/* H306 (29 Oct 2026) — ON A PHONE, A COLD APP OPEN LANDS ON "/".
+   Zeeshan uses the ERP as a PWA on his phone. The last page he was on when he
+   closed the app would reload on reopen — he wanted the department chooser
+   every time instead, so he can pick where to go without first navigating out
+   of yesterday's screen. Desktop keeps the last-visited page.
+
+   This is a module-level flag so it survives client-side navigations but is
+   lost on a full page reload (cold open). SessionStorage would do the same
+   thing less reliably (private browsing throws). */
+let coldOpenHandled = false;
+
+export default function AppFrame({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname();
+  const router = useRouter();
+  const isLogin = pathname === "/login" || pathname === "/reset-password";
+  // The department chooser (/) and the new Online/Retail areas render full-screen
+  // (their own chrome), not inside the factory sidebar. Still auth-gated below.
+  /* Administration is one of the four boxes on the home screen, not a page
+     inside Karkhana — so it gets its own full-screen chrome like the others.
+     It was still rendering inside the factory sidebar, which put "Raw
+     Materials" and "Production" next to a page about Hub and FS Traders staff. */
+  const isFullScreen =
+    pathname === "/" ||
+    pathname === "/administration" || pathname.startsWith("/administration/") ||
+    // The employee portal is the whole app for the person using it. No sidebar,
+    // no department chrome — there is nowhere else for them to go.
+    pathname === "/me" ||
+    pathname === "/online" || pathname.startsWith("/online/") ||
+    pathname === "/retail" || pathname.startsWith("/retail/");
+  const [authReady, setAuthReady] = useState(false);
+  const [mustChange, setMustChange] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    if (isLogin) { setAuthReady(true); return; }
+    if (!isSupabaseConfigured || !supabase) { setAuthReady(true); setMustChange(false); return; }
+    supabase.auth.getSession().then(async ({ data }) => {
+      if (!data.session) { router.replace("/login"); return; }
+      const { data: prof } = await supabase!
+        .from("app_users").select("must_change_password").eq("id", data.session.user.id).maybeSingle();
+      setMustChange(!!prof?.must_change_password);
+      setAuthReady(true);
+    });
+  }, [isLogin, router]);
+
+  /* Cold-open redirect: once per fresh page load, on a phone, if the user
+     landed somewhere other than "/", send them to the department chooser. */
+  useEffect(() => {
+    if (coldOpenHandled) return;
+    if (!authReady || isLogin) return;
+    if (pathname === "/") { coldOpenHandled = true; return; }
+    coldOpenHandled = true;
+    if (typeof window === "undefined") return;
+    try {
+      if (window.matchMedia("(max-width: 767px)").matches) router.replace("/");
+    } catch { /* no matchMedia (very old browsers) — skip silently */ }
+  }, [authReady, isLogin, pathname, router]);
+
+  if (isLogin) return <>{children}</>;
+  if (!authReady) return null;
+  if (mustChange === null) return null;
+  if (mustChange) return <SetPassword onDone={() => setMustChange(false)} />;
+
+  /* Chooser + Online/Retail: authenticated, but full-screen — no factory
+     sidebar, no route gate. They still need PERMISSIONS, though.
+
+     This used to return children directly, outside the provider. Anything on
+     those pages calling usePermissions() therefore got the default context —
+     { ready: false, all: false, can: () => false } — which is indistinguishable
+     from "this person is allowed nothing". That is why the Administration box
+     never appeared on the home screen even for a super admin: it was not
+     refused, it was asked before anyone was listening.
+
+     The provider now wraps both branches. Only the chrome differs. */
+  if (isFullScreen) {
+    return <PermissionsProvider><FullScreenGate>{children}</FullScreenGate></PermissionsProvider>;
+  }
+
+  // Only now (fully authenticated) do we load permissions — one shared copy.
+  return (
+    <PermissionsProvider>
+      <FrameContent>{children}</FrameContent>
+    </PermissionsProvider>
+  );
+}

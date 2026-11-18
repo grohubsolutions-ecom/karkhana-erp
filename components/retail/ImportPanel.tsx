@@ -1,0 +1,1567 @@
+"use client";
+/* Import — one drop zone, six Nimbus file types.
+ *
+ * The old app had a single Import screen that worked out what you had dropped
+ * on it from the header row, and that is right: the person exporting from
+ * Nimbus is not thinking about which of six importers they need, they are
+ * thinking "here is today's file". Every rule below is ported from that app;
+ * the reasoning lives in lib/nimbus.ts next to the code it justifies.
+ *
+ * The three things worth knowing before changing anything here:
+ *
+ *   1. The sales file cannot tell card from JazzCash. Both arrive as "Other
+ *      Payment". They are resolved afterwards by the Non-cash payments file,
+ *      matched on store + date + exact time — so that file has to be dropped
+ *      AFTER the sales it refers to, or there is nothing to tag.
+ *
+ *   2. The bill-wise sale report has no item codes. It is refused here in
+ *      words, and refused again by a trigger in the database.
+ *
+ *   3. line_hash is a plain joined string, not a digest, and its shape is
+ *      load-bearing for compatibility with rows already in the old database.
+ */
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Upload, FileCheck2, AlertTriangle, CheckCircle2, X, Info, Check, Undo2, UserCheck } from "lucide-react";
+import { supabase, isSupabaseConfigured } from "@/lib/supabase";
+import { btnPrimary, btnGhost, inputCls } from "@/components/Modal";
+import {
+  DataTable, Pill, Select, PreviewNote, SourceNote,
+  money, unitForBranch, useIsPhone, useBranches, useEmployees, addDays, type Col,
+} from "@/components/retail/kit";
+import { readGrid, findHeaderRow, dropRepeatedHeaders } from "@/lib/readGrid";
+import {
+  detectKind, KIND_LABEL, normStore, withLineHashes, looksLikeMopCell,
+  parseSalesRows, parseExpenseRows, parsePaymentRows, parseCommRows, parseCommListRows, linkAdvances,
+  receiptNo, shopFromReceipts, shopFromStamps, shopFromFileName, shopFromStaffNames,
+  type ShopGuess, type ReceiptHigh, type StampHits,
+  type NimbusKind, type SaleRow, type ExpenseRow, type PaymentRow, type CommRow,
+} from "@/lib/nimbus";
+
+/* ── A DROPPED REQUEST IS NOT A BROKEN FILE ──────────────────────────────────
+ *
+ * A sales file goes up in chunks of 400 rows, so a ten-thousand-line export is
+ * twenty-five separate requests to Mumbai. On a shop's connection one of them
+ * will sometimes simply not arrive, and `fetch` rejects with the single least
+ * helpful sentence in web development:
+ *
+ *     TypeError: Failed to fetch
+ *
+ * which the panel printed verbatim. It says nothing about which request, how
+ * far the import had got, or whether anything was saved — so the honest reading
+ * is "the file is broken", and it is not: the connection blinked.
+ *
+ * So a request that fails at the NETWORK layer is retried, three times, backing
+ * off. Only network failures: a real error from Postgres — a constraint, a
+ * permission — is a fact about the data and is thrown straight through, because
+ * retrying it just fails three times more slowly.
+ */
+const isNetworkFlake = (e: unknown) => {
+  const m = (e as { message?: string })?.message ?? String(e ?? "");
+  return /failed to fetch|networkerror|network request failed|load failed|ERR_NETWORK|ERR_CONNECTION|timeout|aborted/i.test(m);
+};
+
+/* supabase-js does NOT throw when the fetch itself fails — it catches and hands
+   the failure back as `{ data: null, error }`, with the browser's message
+   inside. A retry that only watches for thrown exceptions therefore never fires
+   on the one failure it was written for, which is exactly how the first version
+   of this behaved: one dropped request, no retry, straight to the error banner.
+   So both shapes are checked. */
+type Res = { error?: { message?: string } | null };
+
+async function net<T>(fn: () => PromiseLike<T>, tries = 3): Promise<T> {
+  let last: unknown;
+  const pause = (i: number) =>
+    /* 400ms, 800ms — long enough for a wifi handover, short enough that a real
+       outage still fails while somebody is watching. */
+    new Promise((r) => setTimeout(r, 400 * 2 ** i));
+
+  for (let i = 0; i < tries; i++) {
+    try {
+      const res = await fn();
+      const err = (res as Res | null)?.error;
+      if (err && isNetworkFlake(err)) {
+        last = err;
+        if (i < tries - 1) { await pause(i); continue; }
+      }
+      return res;
+    } catch (e) {
+      if (!isNetworkFlake(e)) throw e;
+      last = e;
+      if (i < tries - 1) await pause(i);
+    }
+  }
+  throw last;
+}
+
+type Branch = { id: number; name: string; chain: string | null; nimbus_name: string | null };
+
+/** WHAT ONE LANDED FILE DID, for the phone result log.
+ *
+ *  `tone` is how the run READS, not whether it errored, and `quiet` is how a
+ *  figure is printed. A file whose lines were all already in is the line_hash
+ *  guard doing exactly its job — the best possible outcome of a second drop —
+ *  so that count is printed in the same ink as the rows that landed and never
+ *  in red. Somebody who reads "skipped" as "failed" re-exports the file and
+ *  starts hunting for a problem that does not exist. */
+type ImportResult = {
+  file: string;
+  kind: NimbusKind;
+  tone: "good" | "warn";
+  figures: { l: string; v: string; quiet?: boolean }[];
+  note: string;
+};
+
+type PendingAdv = ExpenseRow & { _k: number };
+
+/** The uploader itself — drop zone, preview, checks and the write.
+ *
+ *  It lives in a component rather than on a page of its own because there IS no
+ *  Import page any more. The owner's point, and he is right: a file is uploaded
+ *  while you are looking at the screen whose figures are short. Sales, Non-cash
+ *  and Expenses each open this; sending somebody to a separate screen to do it
+ *  was a step that existed for the code's convenience and nobody else's.
+ *
+ *  One component, three callers — not three copies. The parse rules, the
+ *  bill-wise guard, the PDF column check and the duplicate protection are the
+ *  same wherever it is opened from, which is the only way they stay the same.
+ *
+ *  `onDone` lets the screen that opened it reload once something has landed. */
+export function ImportPanel({ onDone, inShop, inShopKey }: {
+  onDone?: () => void;
+  /** The branch id of the shop this was opened from, when that shop is a single
+   *  branch. A single-store file dropped while standing in FC Paragon is FC
+   *  Paragon's — see the note on `autoBid` below. */
+  inShop?: number | null;
+  /** Whether ANY shop is selected, single-branch or not. Top Shop covers six,
+   *  so it is "in a shop" while naming no single branch — which is worth saying
+   *  differently from "no shop chosen at all". */
+  inShopKey?: string | null;
+} = {}) {
+  const phone = useIsPhone();
+  const fileRef = useRef<HTMLInputElement>(null);
+  /* The shared branch cache, which now carries nimbus_name for this screen —
+     rather than this screen fetching the same nine rows again on every mount. */
+  const { branches } = useBranches();
+  /* Shop staff, for attaching advances to a person. "shops" excludes Head
+     Office, which is right: an advance is to someone on a shop's payroll, and
+     a Head Office row is money between the shop and the office. The list is
+     cached module-wide, and this panel only mounts when the uploader is
+     actually opened, so this costs nothing on the screens behind it.
+     `allEmployees`, NOT `employees`: that one drops leavers, and an advance a
+     leaver took is still owed by the leaver. Passing the active-only list here
+     would have silently cancelled the leaver rule in linkAdvances and shown
+     "not matched" against a row it had in fact matched. */
+  const { allEmployees: staff } = useEmployees("shops");
+  const staffById = useMemo(() => new Map(staff.map((e) => [e.id, e])), [staff]);
+
+  /* Branch name lookup and employee grouping — for the post-import assignment
+     panel that surfaces unmatched advances. */
+  const branchNameFor = useMemo(() => {
+    const m = new Map<number, string>();
+    branches.forEach((b) => m.set(Number(b.id), b.name));
+    return (id: unknown) => m.get(Number(id)) ?? "—";
+  }, [branches]);
+
+  const byShopForAssign = useMemo(() => {
+    const m = new Map<string, typeof staff[number][]>();
+    staff.forEach((e) => {
+      const k = branchNameFor(e.branch_id);
+      (m.get(k) ?? m.set(k, []).get(k)!).push(e);
+    });
+    return [...m.entries()].sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([shop, list]) => [shop, list.slice().sort((a, b) => String(a.name).localeCompare(String(b.name)))] as const);
+  }, [staff, branchNameFor]);
+
+  const [fileName, setFileName] = useState("");
+  const [rows, setRows] = useState<string[][]>([]);
+  const [kind, setKind] = useState<NimbusKind>("unknown");
+  const [needBranch, setNeedBranch] = useState(false);
+  const [pickBranch, setPickBranch] = useState("");
+  /* Opened only by pressing "Change" — the picker is not on screen when the
+     branch is already known. */
+  const [changing, setChanging] = useState(false);
+  const [fatal, setFatal] = useState("");
+  const [warn, setWarn] = useState<string[]>([]);
+  /* Whether the grid was READ from the file or INFERRED from a page layout.
+     Its own state, not an entry in `warn`: that array is rebuilt from scratch
+     by the parse-warning effect below every time the parsed rows change, which
+     silently swallowed this notice the moment the file finished parsing — the
+     one moment it most needs to be on screen. */
+  const [inferred, setInferred] = useState(false);
+  /* What the database says about whose file this is — see the probe below. */
+  const [probe, setProbe] = useState<ShopGuess | null>(null);
+  const [probing, setProbing] = useState(false);
+  /* Recent sales imports, so a wrong one can be taken back out. */
+  type Batch = { id: number; filename: string | null; imported_at: string; lines: number; total: number };
+  const [batches, setBatches] = useState<Batch[]>([]);
+  const [undoOpen, setUndoOpen] = useState(false);
+  const [undoing, setUndoing] = useState<number | null>(null);
+  const [undoConfirm, setUndoConfirm] = useState<number | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState<string | null>(null);
+
+  /* EXPENSE CATEGORY REVIEW — the old Grohub retail app stopped at this point
+     and showed each expense row with a dropdown so the operator could classify
+     it (Purchasing, Salary, Head Office, Rent, Utilities, etc.) before the
+     import landed. The current `guessCat()` gets this right most of the time,
+     but things like "market payment" become "Purchasing" when the operator
+     knows it was Marketing. This state lets any auto-guessed category be
+     overridden in the preview, per row, exactly as the old app behaved. */
+  const EXPENSE_CATS = ["Expense", "Head Office", "Salary", "Advance", "Purchasing", "Rent", "Utilities", "Marketing", "Maintenance", "Other"] as const;
+  const [catOverrides, setCatOverrides] = useState<Record<number, string>>({});
+
+  /* PENDING ADVANCE ASSIGNMENTS — shown right after an expense import when
+     some advances could not be auto-matched. The panel asks the question
+     immediately while the person importing still has the context, rather
+     than relying on someone to find them in the Ledger tab later. */
+  const [pendingAdvs, setPendingAdvs] = useState<PendingAdv[]>([]);
+  const [assignPick, setAssignPick] = useState<Record<number, string>>({});
+  const [assignBusy, setAssignBusy] = useState<number | null>(null);
+  const [assignErr, setAssignErr] = useState<Record<number, string>>({});
+
+  /* THE RESULT LOG — one card per file that has actually landed.
+     A day's import is not one file, it is four or five dropped in sequence:
+     sales, then the account transactions, then the non-cash payments that tag
+     the sales just loaded, then the commission master. This screen kept a
+     single line of prose and threw it away the moment the next file was
+     chosen, so halfway through there was nothing on screen saying which files
+     were already in — and the only safe thing to do when you cannot remember
+     is drop them all again. The log is what makes that unnecessary, so it
+     deliberately survives Clear: only Clear log empties it. */
+  const [results, setResults] = useState<ImportResult[]>([]);
+
+  /* Chunk-by-chunk progress. A sales file goes up 400 lines at a time, and on
+     a phone on mobile data that is a minute during which the only feedback was
+     a button reading "Working…" — indistinguishable from a page that has died,
+     and the natural response to a dead page is to tap Import again, which
+     writes a second import batch. `total` of 0 means "counting, length not
+     known yet" and draws an indeterminate bar. */
+  const [prog, setProg] = useState<{ done: number; total: number; what: string } | null>(null);
+
+  function addResult(r: Omit<ImportResult, "file" | "kind">) {
+    setResults((prev) => [{ file: fileName, kind, ...r }, ...prev]);
+    /* The screen that opened this reloads — the figures it is showing are the
+       ones the file just changed. */
+    onDone?.();
+  }
+
+  /* Where the Receipt column sits, for the receipt-series probe. */
+  const rcptCol = useMemo(
+    () => (rows.length ? rows[0].findIndex((h) => h.trim() === "Receipt") : -1),
+    [rows],
+  );
+
+  /** UNDOING A WHOLE IMPORT.
+   *
+   *  A sale line is not a typed row and it has no business carrying a pencil:
+   *  there are 59,000 of them and they arrive a thousand at a time. What goes
+   *  wrong with sales is never one line — it is a whole file, dropped on the
+   *  wrong shop or twice. So the unit of undo is the file, which is exactly
+   *  what `retail_import_batches` already records: every line carries the
+   *  `import_batch_id` of the run that wrote it.
+   *
+   *  The count shown is read back live rather than taken from the batch's own
+   *  `inserted_count`, so a run whose rows have already gone says 0 instead of
+   *  offering to remove something that is not there. */
+  const loadBatches = useCallback(async () => {
+    if (!supabase) return;
+    const { data } = await supabase.from("retail_import_batches")
+      .select("id,filename,imported_at,inserted_count,total_sales")
+      .order("imported_at", { ascending: false }).limit(10);
+    const rows = (data ?? []) as { id: number; filename: string | null; imported_at: string; inserted_count: number | null; total_sales: number | null }[];
+    const out: Batch[] = [];
+    for (const b of rows) {
+      const { count } = await supabase.from("retail_sale_lines")
+        .select("id", { count: "exact", head: true }).eq("import_batch_id", b.id);
+      out.push({ id: b.id, filename: b.filename, imported_at: b.imported_at,
+                 lines: count ?? 0, total: Number(b.total_sales ?? 0) });
+    }
+    setBatches(out);
+  }, []);
+  useEffect(() => { if (undoOpen) loadBatches(); }, [undoOpen, loadBatches]);
+
+  /** Lines first, then the batch row. The other order would leave lines whose
+   *  batch no longer exists — invisible here and impossible to undo again. */
+  async function undoBatch(b: Batch) {
+    if (!supabase) return;
+    setUndoing(b.id); setFatal("");
+    const { error } = await supabase.from("retail_sale_lines").delete().eq("import_batch_id", b.id);
+    if (error) { setUndoing(null); setFatal(error.message); return; }
+    await supabase.from("retail_import_batches").delete().eq("id", b.id);
+    setUndoing(null); setUndoConfirm(null);
+    await loadBatches();
+    onDone?.();
+  }
+
+  const resolveBranch = useCallback((ns: string): number | null => {
+    const b = branches.find((x) => x.nimbus_name && normStore(x.nimbus_name) === ns);
+    return b ? b.id : null;
+  }, [branches]);
+
+  /* ── WHICH BRANCH IS A SINGLE-STORE FILE FOR? ───────────────────────────
+   *
+   * A Fashion Collection export has no Store column — the shop knows which shop
+   * it is, so it does not write it down. The importer used to stop and ask,
+   * every single time, with the answer sitting in plain sight: you are standing
+   * in that shop's Expenses screen with its name lit up in the menu.
+   *
+   * So it answers the question itself, from two things it can actually know:
+   *
+   *   1. THE SHOP YOU ARE IN. The uploader opens from Sales, Non-cash or
+   *      Expenses, and those screens are scoped to one shop. If that shop is a
+   *      single branch, the file is that branch's. Top Shop is six branches and
+   *      has no single answer, so it still asks — but Top Shop exports with a
+   *      Store column anyway, so it never reaches this.
+   *
+   *   2. THE FILE'S NAME. "FC DHA oct.csv", "fc-paragon-expenses.xlsx" — Nimbus
+   *      and the people using it put the shop in the filename more often than
+   *      not. Matched against each branch's `nimbus_name`, then its real name.
+   *      The name WINS over the shop you are in: somebody standing in FC
+   *      Paragon who opens a file called "FC DHA" meant FC DHA, and silently
+   *      filing it to Paragon because of where they happened to be standing is
+   *      exactly the mistake this is supposed to prevent.
+   *
+   * It is a default, not a decision. The picker is still there, it still shows
+   * what was chosen, and the Import button names the destination so it cannot
+   * be confirmed without being seen. */
+  const auto = useMemo((): ShopGuess | null => {
+    if (!needBranch) return null;
+    const pickable = branches.filter((b) => (b.chain ?? "") !== "Topshop");
+    const ok = (g: ShopGuess | null) =>
+      g && pickable.some((b) => b.id === g.branch_id) ? g : null;
+
+    /* THE FILE'S OWN NUMBERS FIRST. A receipt series or a set of timestamps is
+       a fact about the file; a file name is a habit and the shop you are in is
+       a coincidence. Where the numbers speak, nothing else gets a vote. */
+    const fromData = ok(probe);
+    if (fromData) return fromData;
+
+    const named = ok(shopFromFileName(fileName, branches));
+    if (named) return named;
+
+    if (inShop && pickable.some((b) => b.id === inShop)) {
+      return { branch_id: inShop, confidence: "likely", why: "it is the shop you are in" };
+    }
+    return null;
+  }, [needBranch, branches, fileName, inShop, probe]);
+
+  const autoBid = auto?.branch_id ?? null;
+
+  /* ── ASK THE DATABASE WHOSE FILE THIS IS ────────────────────────────────
+   *
+   * The two signals in lib/nimbus.ts need one thing each from the server, and
+   * only when a file has actually been dropped and could not name its own shop.
+   *
+   *   SALES: the highest receipt each branch has imported. Receipt numbers
+   *   climb, so the newest rows hold them — 50 recent rows per branch is
+   *   enough to find the top of each series, and it is 8 small reads rather
+   *   than an aggregate this project cannot add a function for.
+   *
+   *   NON-CASH: how many of the file's exact timestamps each branch already
+   *   owns a sale line for. One read, filtered to the file's own dates and
+   *   times, which is also precisely the join the classification will do.
+   */
+  useEffect(() => {
+    if (!needBranch || !rows.length || !supabase) { setProbe(null); return; }
+    let alive = true;
+    (async () => {
+      setProbing(true);
+      try {
+        if (kind === "sales_single") {
+          const nums = rows.slice(1).map((r) => receiptNo(r[rcptCol])).filter((n): n is number => n != null);
+          if (!nums.length) { if (alive) setProbe(null); return; }
+          const lo = Math.min(...nums), hi = Math.max(...nums);
+          /* ONE ROUND TRIP, NOT NINE. This was a `for…of` with an `await`
+             inside, so the nine shops were asked one after another and the
+             file sat there doing nothing while each 400-row read went to
+             Mumbai and back. They do not depend on each other, so they go
+             together. */
+          const highs: ReceiptHigh[] = (await Promise.all(branches.map(async (b) => {
+            /* 400, NOT 50, AND THE NUMBER IS MEASURED. A busy Fashion
+               Collection day is 200-plus lines, so 50 rows do not even cover
+               the latest day and the top of the series is missed: checked
+               against the live data, 50 rows understated FC DHA by 14 receipts
+               and FC Paragon by 15, while 300 was exact for all eight shops.
+               400 leaves room for a bigger day. It only ever mattered for the
+               sentence shown on screen — the shops' series are thousands
+               apart, so a high that is short by 14 still identifies the right
+               one — but a reason that quotes a number not in his data is a
+               reason he is right to distrust. */
+            const { data } = await supabase!.from("retail_sale_lines")
+              .select("receipt_no").eq("branch_id", b.id)
+              .order("sale_date", { ascending: false }).limit(400);
+            const top = ((data ?? []) as { receipt_no: string }[])
+              .map((x) => receiptNo(x.receipt_no) ?? 0).reduce((m, n) => (n > m ? n : m), 0);
+            return top > 0 ? { branch_id: b.id, high: top } : null;
+          }))).filter((x): x is ReceiptHigh => x != null);
+          if (alive) setProbe(shopFromReceipts(lo, hi, highs));
+          return;
+        }
+        if (kind === "payments") {
+          const pr = parsePaymentRows(rows, null, () => null).parsed;
+          if (!pr.length) { if (alive) setProbe(null); return; }
+          const dates = [...new Set(pr.map((p) => p.date))];
+          const times = [...new Set(pr.map((p) => p.time))];
+          const { data } = await supabase.from("retail_sale_lines")
+            .select("branch_id,sale_date,sale_time")
+            .in("sale_date", dates).in("sale_time", times.slice(0, 300)).limit(4000);
+          const own = new Set(pr.map((p) => p.date + "|" + p.time));
+          const per = new Map<number, Set<string>>();
+          ((data ?? []) as { branch_id: number; sale_date: string; sale_time: string }[]).forEach((l) => {
+            const k = l.sale_date + "|" + l.sale_time;
+            if (!own.has(k)) return;
+            if (!per.has(l.branch_id)) per.set(l.branch_id, new Set());
+            per.get(l.branch_id)!.add(k);
+          });
+          const hits: StampHits[] = [...per].map(([branch_id, set]) => ({ branch_id, hits: set.size }));
+          if (alive) setProbe(shopFromStamps(own.size, hits));
+          return;
+        }
+        if (kind === "expense_single") {
+          /* No Store column, no receipts, no times — but the Comments name
+             people, and people belong to a shop. Needs the staff list, which
+             the panel already has. */
+          const ci = rows[0].findIndex((h) => h.trim() === "Comments");
+          if (ci < 0 || !staff.length) { if (alive) setProbe(null); return; }
+          const notes = rows.slice(1).map((r) => r[ci] ?? "");
+          if (alive) setProbe(shopFromStaffNames(notes, staff));
+          return;
+        }
+        if (alive) setProbe(null);
+      } catch { if (alive) setProbe(null); }
+      finally { if (alive) setProbing(false); }
+    })();
+    return () => { alive = false; };
+  }, [needBranch, rows, kind, branches, rcptCol, staff]);
+
+  /* The picker's own value wins once somebody has touched it. */
+  const effectiveBid = pickBranch ? Number(pickBranch) : autoBid;
+  const forceBid = needBranch ? effectiveBid : null;
+  const destination = branches.find((b) => b.id === effectiveBid)?.name ?? "";
+  /* Top Shop covers six branches, so "the shop you are in" names no single one.
+     Worth saying out loud, because a single-store file opened from Top Shop is
+     almost always the wrong file — Top Shop exports with a Store column. */
+  const inShopIsMulti = inShop == null && !!inShopKey;
+
+  /* ── parse, per kind ─────────────────────────────────────────────────── */
+  const sales = useMemo(() => {
+    if (!rows.length || (kind !== "sales_multi" && kind !== "sales_single")) return null;
+    if (kind === "sales_single" && forceBid == null) return null;
+    return parseSalesRows(rows, kind === "sales_single" ? forceBid : null, resolveBranch);
+  }, [rows, kind, forceBid, resolveBranch]);
+
+  const expenses = useMemo(() => {
+    if (!rows.length || (kind !== "expense_multi" && kind !== "expense_single")) return null;
+    if (kind === "expense_single" && forceBid == null) return null;
+    return parseExpenseRows(rows, kind === "expense_single" ? forceBid : null, resolveBranch);
+  }, [rows, kind, forceBid, resolveBranch]);
+
+  const payments = useMemo(() => {
+    if (!rows.length || kind !== "payments") return null;
+    /* forceBid for the same reason the expense file needs it: a Fashion
+       Collection non-cash export names the chain in Store Name, not the shop,
+       so Paragon's file and DHA's are identical there. A store name that does
+       resolve still wins per row. */
+    return parsePaymentRows(rows, forceBid, resolveBranch);
+  }, [rows, kind, forceBid, resolveBranch]);
+
+  const comm = useMemo(() => {
+    if (!rows.length) return null;
+    if (kind === "comm_master") return parseCommRows(rows);
+    if (kind === "comm_list") return parseCommListRows(rows);
+    return null;
+  }, [rows, kind]);
+
+  /* WHO EACH ADVANCE BELONGS TO, worked out before anything is written.
+     An advance is an expense AND a debt; the file only knows the first half.
+     See linkAdvances in lib/nimbus.ts for why an ambiguous name is left
+     unlinked rather than guessed at. */
+  const adv = useMemo(
+    () => (expenses ? linkAdvances(expenses.parsed, staff) : null),
+    [expenses, staff],
+  );
+
+  async function onFile(f: File) {
+    setFatal(""); setWarn([]); setDone(null); setRows([]); setNeedBranch(false); setPickBranch("");
+    setChanging(false); setInferred(false); setCatOverrides({});
+    setFileName(f.name);
+
+    /* CSV, Excel or PDF — see lib/readGrid.ts. Everything below this line is
+       unchanged: the parsers have always worked on a grid of strings and do not
+       care which of the three it came out of. */
+    let grid;
+    try {
+      /* The predicate is what lets a PDF keep its empty columns: its headings
+         ARE its columns. See lib/readGrid.ts. */
+      grid = await readGrid(f, (cells) => detectKind(cells.map((c) => c.trim())) !== "unknown");
+    } catch (e) {
+      setFatal(`Could not open that file: ${e instanceof Error ? e.message : String(e)}`);
+      return;
+    }
+    const all = grid.rows.filter((r) => r.some((c) => c !== ""));
+    if (!all.length) { setFatal("Could not read any rows from that file."); return; }
+
+    /* WHERE THE TABLE STARTS. A Nimbus CSV begins with its header row; an Excel
+       export usually has a title above it and a PDF always has a report
+       heading. Rather than guess which row looks like headers, ask detectKind:
+       the first row it recognises IS the header row. */
+    const hi = findHeaderRow(all, (h) => detectKind(h) !== "unknown");
+    if (hi < 0) {
+      setFatal(grid.format === "pdf"
+        ? "No Nimbus column headings were found in that PDF. The table may not have come through — try the CSV or Excel export of the same report."
+        : "This does not look like a Nimbus export or a commission list — no Store, Account, Payment Mode, Item Code or Barcode column was found.");
+      setKind("unknown");
+      return;
+    }
+
+    /* Everything above the header row is the report's own title block. A
+       multi-page PDF reprints its headings, and those would arrive as a sale
+       with the item code "Item Code" if they were left in. */
+    const hdr = all[hi].map((h) => h.trim());
+    const parsed = dropRepeatedHeaders(all.slice(hi), hdr).filter((r) => r.length > 1);
+    const k = detectKind(hdr);
+    setKind(k);
+
+    /* A PDF has no table in it — only text at coordinates — so the rows and
+       columns below were worked out from where the words sit on the page. For a
+       machine-generated report that is reliable, and it is still inference, so
+       it is said out loud rather than hidden. The summary underneath shows the
+       line count and the totals; those are what to check it against. */
+    setInferred(!grid.exact);
+
+    /* THE PDF COLUMN GUARD, for sales files only.
+       parseSalesRows finds the payment-mode cell and then reads the money
+       columns by OFFSET from it — retail price is twelve to its left. For CSV
+       and Excel the grid IS the file, so the offsets are whatever the report
+       says. For a PDF the columns were inferred, and one column too many or too
+       few would not fail: it would read quantity where the discount should be
+       and import a plausible wrong number for every line.
+
+       Every sale row carries a payment mode, so a row without one means the
+       split is wrong. Refused outright — there is a CSV of the same report. */
+    if (!grid.exact && (k === "sales_multi" || k === "sales_single")) {
+      const data = parsed.slice(1).filter((r) => r.join("").trim());
+      const bad = data.filter((r) => !r.some(looksLikeMopCell)).length;
+      if (bad) {
+        setFatal(`The columns in this PDF could not be read reliably — ${bad.toLocaleString()} of ${data.length.toLocaleString()} rows have no payment mode where one is expected. A sales file's figures are read by column position, so importing this could file the wrong amount against every line. Use the CSV or Excel export of the same report.`);
+        setRows([]);
+        return;
+      }
+    }
+
+    /* The bill-wise guard. A bill-wise sale report has one row per receipt and
+       therefore no item code. Commissions are per item and cannot be rebuilt
+       from it, and uploading it on top of an item-wise day doubles that day's
+       sales. Refused here in words, and again by a trigger in Postgres. */
+    if (k === "sales_multi" || k === "sales_single") {
+      const ci = hdr.indexOf("Item Code");
+      const anyCode = ci >= 0 && parsed.slice(1).some((r) => (r[ci] ?? "").trim() !== "" && !/^total/i.test((r[ci] ?? "").trim()));
+      if (!anyCode) {
+        setFatal("This is the BILL-WISE sale report — it has no item codes. Commissions are calculated per item and cannot be built from it, and uploading it on top of an item-wise day doubles that day's sales. In Nimbus, choose the item-wise (line-item) sale export instead.");
+        return;
+      }
+    }
+
+    setRows(parsed);
+    if (k === "sales_single" || k === "expense_single") setNeedBranch(true);
+    /* A non-cash file whose Store Name matches no branch needs the same
+       treatment — "Fashion collection" is the chain, not the shop. Checked
+       against the header's own column rather than assumed, so a genuine
+       all-stores export still routes itself and is never asked about. */
+    if (k === "payments") {
+      const si = parsed[0].findIndex((h) => h.trim() === "Store Name");
+      const named = si >= 0 && parsed.slice(1).some((r) => {
+        const v = (r[si] ?? "").trim();
+        return v !== "" && resolveBranch(normStore(v)) != null;
+      });
+      if (!named) setNeedBranch(true);
+    }
+  }
+
+  /* HOW WERE THIS FILE'S DATES READ? Only interesting when they were
+     all-numeric, which is the one shape that is genuinely ambiguous —
+     10/9/2026 is 9 October or 10 September and the cell does not say. Decided
+     once per file in lib/nimbus.ts, reported here because a date read a month
+     out does not error: the non-cash file joins on branch + date + time, so it
+     would match nothing, tag nothing, and look like a clean import. */
+  const dateOrder = sales?.dateOrder ?? expenses?.dateOrder ?? payments?.dateOrder ?? "none";
+
+  /* Whichever kind is loaded, these drive the summary strip. */
+  const summary = useMemo(() => {
+    if (sales) {
+      const ok = sales.parsed.filter((p) => p.branch_id);
+      return [
+        { l: "Line items", v: sales.parsed.length.toLocaleString() },
+        { l: "Matched to a shop", v: ok.length.toLocaleString() },
+        { l: "Shop-days", v: String(new Set(ok.map((p) => p.branch_id + "|" + p.sale_date)).size) },
+        { l: "Total sales", v: money(ok.reduce((t, p) => t + p.sales_amount, 0)) },
+      ];
+    }
+    if (expenses) {
+      const exp = expenses.parsed.filter((p) => p.txn_type === "expense").reduce((t, p) => t + p.amount, 0);
+      const inc = expenses.parsed.filter((p) => p.txn_type === "income").reduce((t, p) => t + p.amount, 0);
+      return [
+        { l: "Transactions", v: expenses.parsed.length.toLocaleString() },
+        { l: "Total expense", v: money(exp) },
+        { l: "Misc income", v: money(inc) },
+        { l: "Date range", v: `${expenses.minD ?? "—"} → ${expenses.maxD ?? "—"}` },
+      ];
+    }
+    if (payments) {
+      const modes = new Map<string, number>();
+      payments.parsed.forEach((p) => modes.set(p.modeRaw, (modes.get(p.modeRaw) ?? 0) + 1));
+      return [
+        { l: "Payments in file", v: payments.parsed.length.toLocaleString() },
+        { l: "Card", v: String(payments.parsed.filter((p) => p.pm === "meezan_card").length) },
+        { l: "JazzCash", v: String(payments.parsed.filter((p) => p.pm === "jazzcash").length) },
+        { l: "Modes seen", v: [...modes.keys()].slice(0, 2).join(", ") || "—" },
+      ];
+    }
+    if (comm) return [
+      { l: "Items", v: comm.length.toLocaleString() },
+      { l: "With a rate", v: String(comm.filter((c) => c.percentage > 0 || c.commission > 0).length) },
+      { l: "—", v: "" }, { l: "—", v: "" },
+    ];
+    return null;
+  }, [sales, expenses, payments, comm]);
+
+  /* Unknown store names, surfaced before anything is written. */
+  useEffect(() => {
+    const w: string[] = [];
+    if (sales?.unknownStores.size) w.push(`${sales.unknownStores.size} store name(s) not recognised: ${[...sales.unknownStores].slice(0, 4).join(", ")}. Those lines will be skipped — set the shop's Nimbus name on the Branches screen first.`);
+    if (expenses?.unknown.size) w.push(`${expenses.unknown.size} store name(s) not recognised: ${[...expenses.unknown].slice(0, 4).join(", ")}. Those rows will be skipped.`);
+    if (payments?.unknown.size) {
+      w.push(`Store name(s) not recognised: ${[...payments.unknown].slice(0, 4).join(", ")}. Those payments will be skipped — pick the shop above, or set its Nimbus name on the Branches screen.`);
+    }
+    /* ADVANCES THAT COULD NOT BE ATTACHED TO ANYBODY.
+       Said before the button is pressed, not after, because the fix is upstream
+       — a note that names the person, or the person added to Staff — and
+       re-importing the corrected file is free. */
+    if (adv && adv.seen > adv.matched) {
+      const miss = adv.seen - adv.matched;
+      w.push(
+        `${miss} of ${adv.seen} advance${adv.seen === 1 ? "" : "s"} could not be attached to a person`
+        + (adv.ambiguous ? ` (${adv.ambiguous} named someone who matches two or more staff equally — not guessed at)` : "")
+        + `. Those rows still import as expenses, but no staff balance moves. Put the person's name in the Nimbus note, or add them in Employees, and re-import — it replaces rather than doubles.`,
+      );
+    }
+    setWarn(w);
+  }, [sales, expenses, payments, branches, resolveBranch, adv]);
+
+  /* THE UPLOAD LOG IS HOW THE DASHBOARD KNOWS WHAT IS MISSING.
+     It records that a given shop-day HAS been uploaded, for a given KIND of
+     file. Absence is the signal — the reminder lists every shop-day with no
+     stamp and names the file still owed.
+
+     So the kind written here has to match the kind the reminder looks for, for
+     all three: sales, expenses, noncash. Stamping only "sales" (which is what
+     this screen used to do) leaves the other two permanently unstamped, and a
+     reminder that reports every day as missing forever is a reminder people
+     switch off. `unit` is the branch id as text, which is what the dashboard
+     keys on too. */
+  async function stampUploads(pairs: { branch_id: number | null; date: string | null }[], kind: string) {
+    if (!supabase || !pairs.length) return;
+    /* The unit is unitForBranch(), not the branch id. Top Shop exports as one
+       combined all-stores file, so its six branches share the unit "topshop";
+       each Fashion Collection shop is "b<id>". This is the old app's key, kept
+       so the migrated three years of rows still line up with what is written
+       from today. Stamping the bare branch id orphans all of them and makes
+       the dashboard report one missing Top Shop file as six missing days. */
+    /* A DAY WITH NO ROWS IN THE FILE IS AN ANSWER, NOT A GAP.
+     *
+     * This used to stamp only the dates that actually appear in the file, and
+     * that is wrong for the one kind of file people complain about. A Nimbus
+     * export is a continuous DATE RANGE: "all expenses, 13 to 20 October". If a
+     * shop spent nothing on the 18th, the 18th has no rows — so it was never
+     * stamped, and the dashboard asked for that day's expense file for ever,
+     * no matter how many times it was uploaded.
+     *
+     * Measured on the live log before this change: of the 63 shop-day-kind
+     * slots in the dashboard's seven-day window, exactly two were unstamped —
+     * FC DHA expenses on the 18th and Top Shop expenses on the 20th — both
+     * days inside files that had already been imported.
+     *
+     * So the whole span the file covers is stamped, for every unit the file
+     * mentions. Inside its own range a missing day means "nothing happened",
+     * which is accounted for. Outside it we still know nothing, so nothing is
+     * claimed. */
+    const units = new Set<string>();
+    const dates: string[] = [];
+    pairs.forEach((p) => {
+      if (!p.date) return;
+      dates.push(p.date);
+      const u = unitForBranch(branches.find((x) => x.id === Number(p.branch_id)) as never);
+      if (u) units.add(u);
+    });
+    if (!units.size || !dates.length) return;
+    dates.sort();
+    const from = dates[0];
+    const to = dates[dates.length - 1];
+
+    const stamps: { unit: string; log_date: string; kind: string }[] = [];
+    for (const u of units) {
+      /* A sanity ceiling. A three-year export should stamp its three years, but
+         a mis-parsed date must not write ten thousand rows. */
+      let n = 0;
+      for (let d = from; d <= to && n < 800; d = addDays(d, 1), n++) {
+        stamps.push({ unit: u, log_date: d, kind });
+      }
+    }
+    if (stamps.length) {
+      await supabase.from("retail_upload_log")
+        .upsert(stamps, { onConflict: "unit,log_date,kind", ignoreDuplicates: true });
+    }
+  }
+
+  /* ── run ─────────────────────────────────────────────────────────────── */
+  async function run() {
+    if (!supabase) return;
+    setBusy(true); setFatal(""); setDone(null);
+    /* Set as the sales upload walks the file, so a connection that dies for
+       good can be reported as "it got this far" instead of as a mystery. */
+    let doneSoFar = 0;
+    let partialBatch: number | null = null;
+    try {
+      if (sales) {
+        const ok = sales.parsed.filter((p) => p.branch_id);
+        if (!ok.length) { setFatal("No line matched a branch — nothing to import."); setBusy(false); return; }
+        const total = ok.reduce((t, p) => t + p.sales_amount, 0);
+        const { data: batch, error: be } = await supabase.from("retail_import_batches")
+          .insert({ filename: fileName, row_count: sales.parsed.length, total_sales: total })
+          .select("id").single();
+        if (be) throw be;
+        const batchId = (batch as { id: number }).id;
+
+        const hashed = withLineHashes(ok);
+        let inserted = 0;
+        setProg({ done: 0, total: hashed.length, what: "Uploading lines" });
+        for (let i = 0; i < hashed.length; i += 400) {
+          const chunk = hashed.slice(i, i + 400).map(({ _store, _ns, ...rest }: SaleRow & { line_hash: string }) => {
+            void _store; void _ns;
+            return { ...rest, import_batch_id: batchId };
+          });
+          const { data, error } = await net(() => supabase!.from("retail_sale_lines")
+            .upsert(chunk, { onConflict: "line_hash", ignoreDuplicates: true }).select("id"));
+          if (error) throw error;
+          inserted += (data as unknown[] | null)?.length ?? 0;
+          /* How far it got, kept outside the loop so the catch below can say so
+             if the connection goes for good. */
+          doneSoFar = inserted; partialBatch = batchId;
+          /* Lines SENT, not lines inserted — the bar is how far through the file
+             we are, and the duplicate guard means those two are different
+             numbers on any re-import. */
+          setProg({ done: Math.min(i + 400, hashed.length), total: hashed.length, what: "Uploading lines" });
+        }
+        const skipped = hashed.length - inserted;
+        await supabase.from("retail_import_batches").update({ inserted_count: inserted, skipped_count: skipped }).eq("id", batchId);
+
+        setProg({ done: hashed.length, total: hashed.length, what: "Stamping the upload log" });
+        await stampUploads(ok.map((p) => ({ branch_id: p.branch_id, date: p.sale_date })), "sales");
+
+        setDone(`${inserted.toLocaleString()} new line${inserted === 1 ? "" : "s"} added.` +
+          (skipped ? ` ${skipped.toLocaleString()} were already in — that is the duplicate guard working, not an error.` : ""));
+        addResult({
+          tone: "good",
+          figures: [
+            { l: "New lines added", v: inserted.toLocaleString() },
+            { l: "Already in — duplicate guard", v: skipped.toLocaleString(), quiet: true },
+          ],
+          note: skipped
+            ? "Those lines were already in, matched on line_hash. Dropping the same file twice changes nothing, which is what that number means."
+            : "Every line in the file was new.",
+        });
+      }
+
+      else if (expenses) {
+        /* APPLY CATEGORY OVERRIDES from the review dropdowns before importing.
+           The operator may have reclassified rows in the preview — those
+           overrides live in `catOverrides` keyed by the row's index in
+           `expenses.parsed`. */
+        const reviewed = expenses.parsed.map((p, i) => {
+          const ov = catOverrides[i];
+          return ov && ov !== p.category ? { ...p, category: ov } : p;
+        });
+        const ok = reviewed.filter((p) => p.branch_id);
+        if (!ok.length) { setFatal("No row matched a branch — nothing to import."); setBusy(false); return; }
+        /* The RPC, not a client-side delete-then-insert. It scopes its own
+           delete from the payload and lands on a unique dedupe_key, which is
+           what makes re-importing an overlapping range safe. */
+        const { data, error } = await supabase.rpc("retail_import_nimbus_expenses", {
+          p_branch_ids: [...new Set(ok.map((p) => p.branch_id))],
+          p_min_date: expenses.minD,
+          p_max_date: expenses.maxD,
+          p_rows: ok.map(({ _store, _ns, ...rest }: ExpenseRow) => { void _store; void _ns; return rest; }),
+          /* The other half of an advance. Without these the money imports as
+             an expense and never reaches the person who took it. */
+          p_adv_rows: adv?.rows ?? [],
+        });
+        if (error) throw error;
+        setProg({ done: ok.length, total: ok.length, what: "Stamping the upload log" });
+        await stampUploads(ok.map((p) => ({ branch_id: p.branch_id, date: p.expense_date })), "expenses");
+        const res = data as { inserted?: number; advances?: number; expenses_replaced?: number } | null;
+        const advN = res?.advances ?? 0;
+        setDone(
+          `${(res?.inserted ?? 0).toLocaleString()} expense rows imported. `
+          + (advN ? `${advN.toLocaleString()} advance${advN === 1 ? "" : "s"} charged to the staff ledger. ` : "")
+          + `${(res?.expenses_replaced ?? 0).toLocaleString()} previously-imported rows in the same range were replaced, so an overlapping re-import cannot double anything.`
+          + (adv && adv.seen > adv.matched
+            ? ` ${(adv.seen - adv.matched).toLocaleString()} advance${adv.seen - adv.matched === 1 ? "" : "s"} named nobody the shop's staff list recognises — those imported as expenses only, and can be added by hand in the person's Ledger.`
+            : ""),
+        );
+        addResult({
+          tone: adv && adv.seen > adv.matched ? "warn" : "good",
+          figures: [
+            { l: "Rows imported", v: (res?.inserted ?? 0).toLocaleString() },
+            ...(adv?.seen ? [{ l: "Advances linked", v: `${advN.toLocaleString()} of ${adv.seen.toLocaleString()}` }] : []),
+            { l: "Replaced in this range", v: (res?.expenses_replaced ?? 0).toLocaleString(), quiet: true },
+          ],
+          note: "Importing replaces previously-imported Nimbus expenses inside the file's own date range, so an overlapping re-import cannot double anything.",
+        });
+
+        /* SURFACE UNMATCHED ADVANCES IMMEDIATELY — the popup Kashif asked for.
+           Rather than burying them in a done-message sentence, open a panel
+           listing each one with a picker so the person importing can assign
+           them right now while they still have the context. */
+        if (adv && adv.seen > adv.matched) {
+          const unmatched = expenses.parsed.filter(
+            (p: ExpenseRow) => p.category === "Advance" && p.txn_type === "expense" && !adv.who.has(p),
+          );
+          if (unmatched.length) {
+            setPendingAdvs(unmatched.map((r, i) => ({ ...r, _k: i })));
+            setAssignPick({}); setAssignErr({});
+          }
+        }
+      }
+
+      else if (payments) {
+        const mapped = payments.parsed.filter((p) => p.branch_id).map((p) => ({ ...p, bid: p.branch_id as number }));
+        if (!mapped.length) { setFatal("No payment matched a branch."); setBusy(false); return; }
+        const minD = mapped.reduce((a, p) => (a < p.date ? a : p.date), mapped[0].date);
+        const maxD = mapped.reduce((a, p) => (a > p.date ? a : p.date), mapped[0].date);
+
+        const key = new Map<string, string>();
+        mapped.forEach((p) => key.set(`${p.bid}|${p.date}|${p.time}`, p.pm));
+
+        const lines: { id: number; branch_id: number; sale_date: string; sale_time: string | null }[] = [];
+        setProg({ done: 0, total: 0, what: "Reading the sales already imported" });
+        /* THIS PAGER HAD NO `order by` AT ALL, AND IT IS DECIDING WHAT GETS
+           TAGGED. Without a total order, LIMIT/OFFSET gives Postgres no
+           obligation to return rows in the same sequence between two requests —
+           so a line could be read twice, or skipped and then never tagged as
+           card or JazzCash, leaving revenue sitting as "unclassified" with
+           nothing to show it was missed. Every sibling read in this department
+           carries that warning; this one was written without it.
+           A keyset cursor on `id` fixes the correctness and the speed at once:
+           it is a total order by construction, and it does not read and discard
+           the rows it skips (measured 8 ms a page against 307 ms by offset). */
+        let afterId = 0;
+        for (;;) {
+          const { data, error } = await supabase.from("retail_sale_lines")
+            .select("id,branch_id,sale_date,sale_time").gte("sale_date", minD).lte("sale_date", maxD)
+            .gt("id", afterId).order("id", { ascending: true }).limit(1000);
+          if (error) throw error;
+          const got = (data as typeof lines) ?? [];
+          lines.push(...got);
+          /* Total unknown while paging — there is no count query here and adding
+             one would be a second round trip for a progress bar. */
+          setProg({ done: lines.length, total: 0, what: "Reading the sales already imported" });
+          if (got.length < 1000) break;
+          afterId = Number(got[got.length - 1].id);
+        }
+
+        const byMode: Record<string, number[]> = {};
+        lines.forEach((l) => {
+          const m = key.get(`${l.branch_id}|${l.sale_date}|${l.sale_time ?? ""}`);
+          if (m) (byMode[m] = byMode[m] ?? []).push(l.id);
+        });
+        const toTag = Object.values(byMode).reduce((t, a) => t + a.length, 0);
+        setProg({ done: 0, total: toTag, what: "Tagging sale lines" });
+        let updated = 0;
+        for (const mode of Object.keys(byMode)) {
+          const ids = byMode[mode];
+          for (let i = 0; i < ids.length; i += 300) {
+            const { error } = await supabase.from("retail_sale_lines")
+              .update({ payment_method: mode }).in("id", ids.slice(i, i + 300));
+            if (error) throw error;
+            updated += Math.min(300, ids.length - i);
+            setProg({ done: updated, total: toTag, what: "Tagging sale lines" });
+          }
+        }
+        setProg({ done: toTag, total: toTag, what: "Stamping the upload log" });
+        await stampUploads(mapped.map((p) => ({ branch_id: p.bid as number, date: p.date })), "noncash");
+        setDone(updated === 0
+          ? "No sale line matched. This file tags sales that are already imported, matched on shop + date + exact time — import that shop's sales first, then drop this again."
+          : `${updated.toLocaleString()} sale lines tagged as card or JazzCash.`);
+        addResult({
+          /* Nothing matched is not an error and not a success — it is almost
+             always the files dropped in the wrong order, so it reads amber and
+             says which file to drop first. */
+          tone: updated === 0 ? "warn" : "good",
+          figures: [
+            { l: "Sale lines tagged", v: updated.toLocaleString() },
+            { l: "Payments in file", v: mapped.length.toLocaleString(), quiet: true },
+          ],
+          note: updated === 0
+            ? "Nothing matched. This file only tags sales that are already in, on shop + date + exact time — import that shop's sales first, then drop this again."
+            : "Matched on shop + date + exact time, which is the only way card and JazzCash can be told apart.",
+        });
+      }
+
+      else if (comm) {
+        let n = 0;
+        setProg({ done: 0, total: comm.length, what: "Updating rates" });
+        for (let i = 0; i < comm.length; i += 500) {
+          const { error } = await supabase.from("retail_commission_master")
+            .upsert(comm.slice(i, i + 500) as CommRow[], { onConflict: "item_code" });
+          if (error) throw error;
+          n += Math.min(500, comm.length - i);
+          setProg({ done: n, total: comm.length, what: "Updating rates" });
+        }
+        setDone(`${n.toLocaleString()} commission rates updated.`);
+        addResult({
+          tone: "good",
+          figures: [{ l: "Rates updated", v: n.toLocaleString() }],
+          note: "Matched on item code, so re-uploading the master corrects rates rather than adding them again.",
+        });
+      }
+    } catch (e) {
+      /* "TypeError: Failed to fetch" is not a message, it is a shrug. Say what
+         was happening, how far it got, and what to do — and say the one thing
+         that actually matters, which is that nothing has been lost. Every line
+         carries a line_hash and the column is unique, so dropping the same file
+         again picks up exactly where this stopped and re-sends nothing. */
+      if (isNetworkFlake(e)) {
+        /* The batch row is left in place on purpose: the lines that DID land
+           belong to it, so "Undo a previous import" can still remove them. */
+        if (partialBatch != null) {
+          await supabase.from("retail_import_batches")
+            .update({ inserted_count: doneSoFar }).eq("id", partialBatch)
+            .then(undefined, () => {});
+        }
+        setFatal(
+          `The connection to the database dropped${doneSoFar ? ` after ${doneSoFar.toLocaleString()} line${doneSoFar === 1 ? "" : "s"} had gone in` : ""}, and did not come back after three tries. ` +
+          `This is the network, not the file. Nothing is lost and nothing is duplicated — drop the same file again and it will carry on from where it stopped.`
+        );
+      } else {
+        setFatal((e as { message?: string })?.message ?? String(e));
+      }
+    }
+    setProg(null);
+    setBusy(false);
+    /* On a phone the result log and the error banner both sit up by the drop
+       zone, while the Import button is halfway down the page. Without this the
+       run ends with the progress bar simply vanishing from under the thumb and
+       nothing on screen saying whether it worked — so go back to the top, where
+       the answer is, with the box for the next file beside it. */
+    if (phone) window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  /* Clear takes the FILE away, not the log. Somebody clearing to drop the next
+     file still needs to see which ones have already landed. */
+  function reset() {
+    setRows([]); setFileName(""); setFatal(""); setWarn([]); setDone(null); setNeedBranch(false); setPickBranch(""); setInferred(false);
+    setProg(null); setPendingAdvs([]); setAssignPick({}); setAssignErr({});
+    if (fileRef.current) fileRef.current.value = "";
+  }
+
+  /** Assign one unmatched advance to a person's salary ledger, right here in the
+   *  import flow. Same write as UnassignedAdvances.tsx — employee_id, the paying
+   *  shop (not the person's own), the date, the amount. */
+  async function assignAdv(r: PendingAdv) {
+    const empId = Number(assignPick[r._k] || 0);
+    if (!supabase || !empId) return;
+    setAssignBusy(r._k); setAssignErr((f) => ({ ...f, [r._k]: "" }));
+    const { error } = await supabase.from("retail_employee_ledger").insert({
+      employee_id: empId,
+      branch_id: r.branch_id,
+      entry_date: r.expense_date,
+      advance: Math.abs(r.amount),
+      purchase_credit: 0, paid: 0,
+      purchase_details: (r.description || "Advance") + " (assigned at import)",
+      source: "advance",
+    });
+    setAssignBusy(null);
+    if (error) { setAssignErr((f) => ({ ...f, [r._k]: error.message })); return; }
+    setPendingAdvs((prev) => prev.filter((p) => p._k !== r._k));
+    onDone?.();
+  }
+
+  /* THE PHONE CARD FOR A SALES PREVIEW answers one question: did this line find
+     its shop? So the shop is the title — it is the cell carrying the red
+     "unmatched" pill — the item is the grey line under it, and the amount is the
+     figure on the right. The receipt number is hidden on a phone: it is a raw
+     POS reference nobody checks before pressing Import, and on a 390px card it
+     costs a whole labelled pair that Date, Qty and MOP can use. It is still
+     there on the computer, where the column is free. */
+  const saleCols: Col<SaleRow>[] = [
+    { head: "Date", muted: true, cell: (p) => p.sale_date },
+    { head: "Shop", bold: true, phone: "title", cell: (p) => p.branch_id ? (branches.find((b) => b.id === p.branch_id)?.name ?? p._store) : <Pill tone="bad">{p._store || "unmatched"}</Pill> },
+    { head: "Receipt", muted: true, phone: "hide", cell: (p) => p.receipt_txn || "—" },
+    { head: "Item", phone: "meta", cell: (p) => p.item_name || p.item_code || "—" },
+    { head: "Qty", right: true, cell: (p) => p.quantity },
+    { head: "Amount", right: true, bold: true, cell: (p) => money(p.sales_amount) },
+    { head: "MOP", cell: (p) =>
+        p.payment_method === "credit" ? <Pill tone="bad">Credit (udhaar)</Pill>
+        : p.payment_method === "cash" ? <Pill tone="good">Cash</Pill>
+        : p.payment_method === "online" ? <Pill tone="info">Online</Pill>
+        : <Pill tone="warn">{p.mop_raw || "unclassified"}</Pill> },
+  ];
+  /* Same reasoning: the shop is what you are checking matched, the category is
+     what the money was, and the amount is the figure. */
+  const expCols: Col<ExpenseRow>[] = [
+    { head: "Date", muted: true, cell: (p) => p.expense_date },
+    { head: "Shop", bold: true, phone: "title", cell: (p) => p.branch_id ? (branches.find((b) => b.id === p.branch_id)?.name ?? p._store) : <Pill tone="bad">{p._store}</Pill> },
+    { head: "Type", cell: (p) => p.txn_type === "income" ? <Pill tone="good">Income</Pill> : <Pill tone="warn">Expense</Pill> },
+    { head: "Category", phone: "meta", cell: (p) => {
+      const ri = expenses?.parsed.indexOf(p) ?? -1;
+      const cur = catOverrides[ri] ?? p.category;
+      /* Income rows keep their category as-is — the dropdown is for expenses. */
+      if (p.txn_type === "income") return <span>{cur}</span>;
+      return (
+        <select value={cur}
+          onChange={(e) => setCatOverrides((prev) => ({ ...prev, [ri]: e.target.value }))}
+          className="rounded border border-line bg-surface px-1.5 py-0.5 text-[12px] text-ink outline-none dark:border-white/10 dark:bg-white/[0.06] dark:text-white">
+          {EXPENSE_CATS.map((c) => <option key={c} value={c}>{c}</option>)}
+        </select>
+      );
+    }},
+    { head: "Description", muted: true, cell: (p) => p.description ?? "—" },
+    /* WHO THE ADVANCE IS CHARGED TO — read-only, and only when the file has
+       advances in it at all. Read-only on purpose: these rows are about to be
+       written as money owed, and the place to correct a person is the Ledger,
+       after the fact, where the correction is recorded as an edit rather than
+       made silently on the way in. A row that matched nobody says so here
+       instead of looking like an ordinary expense. */
+    ...(adv?.seen ? [{
+      head: "Advance to", phone: "meta" as const,
+      cell: (p: ExpenseRow) => {
+        if (p.category !== "Advance" || p.txn_type !== "expense") return <span className="text-hint">—</span>;
+        const id = adv.who.get(p);
+        const e = id ? staffById.get(id) : null;
+        if (!e) return <Pill tone="bad">not matched</Pill>;
+        /* A one-character match is marked, not hidden. "SWEEPER" against a
+           staff record reading "SWEAPER" is almost certainly the same person,
+           but it is the one kind of match worth a glance before it becomes
+           money owed, so it is the one kind that looks different. */
+        return adv.near.has(p)
+          ? <Pill tone="warn">{e.name} ~</Pill>
+          : <Pill tone="good">{e.name}</Pill>;
+      },
+    }] : []),
+    { head: "Paid via", muted: true, cell: (p) => p.paid_via },
+    { head: "Amount", right: true, bold: true, cell: (p) => money(p.amount) },
+  ];
+  /* This table has no right-aligned column, so the automatic card would have
+     found no figure for the right-hand slot and buried the store in a pair.
+     "Becomes" is the answer the file exists to give — card or JazzCash — so it
+     is the lead; Time stays a pair because the match is on the exact second and
+     a wrong time is the usual reason nothing tags. */
+  const payCols: Col<PaymentRow>[] = [
+    { head: "Date", muted: true, phone: "meta", cell: (p) => p.date },
+    { head: "Time", muted: true, cell: (p) => p.time },
+    { head: "Store", bold: true, phone: "title", cell: (p) => p.store },
+    /* The shop this is going to, which for a Fashion Collection file is NOT
+       what the Store column says. Shown because it is now inferred. */
+    { head: "Filed to", cell: (p) => p.branch_id
+        ? (branches.find((b) => b.id === p.branch_id)?.name ?? String(p.branch_id))
+        : <Pill tone="bad">no shop</Pill> },
+    { head: "Mode in file", cell: (p) => p.modeRaw || "—" },
+    { head: "Becomes", phone: "lead", cell: (p) => p.pm === "jazzcash" ? <Pill tone="warn">JazzCash</Pill> : <Pill tone="info">Card</Pill> },
+  ];
+  /* No hints: the automatic card is already right here — item code identifies
+     the row, the name is the grey line, and the percentage is the figure
+     somebody opened the commission master to check. */
+  const commCols: Col<CommRow>[] = [
+    { head: kind === "comm_list" ? "Barcode" : "Item code", bold: true, cell: (c) => c.item_code },
+    { head: "Item name", muted: true, cell: (c) => c.item_name ?? "—" },
+    { head: "Retail", right: true, cell: (c) => money(c.retail_price) },
+    { head: "Commission", right: true, cell: (c) => money(c.commission) },
+    { head: "%", right: true, bold: true, cell: (c) => c.percentage },
+  ];
+
+  const readyCount = sales ? sales.parsed.filter((p) => p.branch_id).length
+    : expenses ? expenses.parsed.filter((p) => p.branch_id).length
+    : payments ? payments.parsed.filter((p) => p.branch_id).length : comm ? comm.length : 0;
+
+  const fcBranches = branches.filter((b) => (b.chain ?? "") !== "Topshop");
+
+  /* ON A PHONE THERE IS NO DRAG, so the dashed box becomes the button itself.
+     A drop target that is only a label is a dead end on the device the shop
+     actually has in its hand. Above 767.98px this is the same <div> it always
+     was, so the computer site is untouched. */
+  const Zone = phone ? "button" : "div";
+
+  /* THE ZONE SAID "DROP A NIMBUS EXPORT HERE" AND NOTHING HANDLED A DROP.
+     Dragging a file onto it did what dragging a file onto any page does: the
+     browser navigated away from the app and opened the file. An instruction the
+     screen does not honour is worse than no instruction, so it is honoured now.
+     `dragDepth` rather than a boolean: dragover/dragleave fire for every child
+     element the pointer crosses, so a single flag flickers off the moment the
+     cursor passes over the icon inside the zone. */
+  const [dragDepth, setDragDepth] = useState(0);
+  const dragProps = phone ? {} : {
+    onDragEnter: (e: React.DragEvent) => { e.preventDefault(); setDragDepth((d) => d + 1); },
+    onDragOver:  (e: React.DragEvent) => { e.preventDefault(); },
+    onDragLeave: (e: React.DragEvent) => { e.preventDefault(); setDragDepth((d) => Math.max(0, d - 1)); },
+    onDrop: (e: React.DragEvent) => {
+      e.preventDefault();
+      setDragDepth(0);
+      const f = e.dataTransfer?.files?.[0];
+      /* One file at a time on purpose. A day's import is sales, then the
+         account transactions, then the non-cash payments that tag the sales
+         just loaded — the ORDER matters, and a handful dropped together would
+         be imported in whatever order the browser hands them over. */
+      if (f) onFile(f);
+    },
+  };
+
+  return (
+    <div>
+      {rows.length > 0 && (
+        <div className="mb-3 flex justify-end">
+          <button onClick={reset} className={btnGhost}><X size={15} /> Clear</button>
+        </div>
+      )}
+
+      {/* The picker sits OUTSIDE the zone. Inside it, a programmatic .click()
+          would bubble back up to the zone's own handler and re-open the picker
+          for ever — it is hidden either way, so where it lives changes nothing
+          on screen. */}
+      <input ref={fileRef} type="file"
+        accept=".csv,.xlsx,.xls,.pdf,text/csv,application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
+        className="hidden"
+        onChange={(e) => { const f = e.target.files?.[0]; if (f) onFile(f); }} />
+
+      <Zone
+        {...(phone ? { type: "button" as const, onClick: () => fileRef.current?.click() } : {})}
+        {...dragProps}
+        className={`mt-5 w-full rounded-card border border-dashed p-6 text-center transition ${
+          dragDepth > 0
+            ? "border-ink bg-salmon-soft dark:border-white/40 dark:bg-white/[0.08]"
+            : "border-line bg-surface dark:border-white/[0.12] dark:bg-[#201c17]"}`}>
+        <span className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-panel text-ink dark:bg-white/[0.08] dark:text-white"><Upload size={22} /></span>
+        <p className="mt-3 text-[14px] font-semibold text-ink dark:text-[#f4f1ea]">
+          {phone ? "Tap to choose a file" : dragDepth > 0 ? "Let go to read it" : "Drop any NimbusRMS export here"}
+        </p>
+        <p className="mt-1 text-[12.5px] text-muted dark:text-[#a89f93]">
+          Sales, account transactions, non-cash payments or the commission master.
+        </p>
+        {/* The formats, said plainly. People were converting Excel files by hand
+            because nothing on this screen said they did not have to. */}
+        <p className="mt-1 text-[12px] text-hint dark:text-[#8a8175]">
+          CSV, Excel (.xlsx / .xls) or PDF — the file says which report it is.
+        </p>
+        <p className="mt-0.5 text-[12px] text-hint dark:text-[#8a8175]">
+          Or drop a custom commission list with Barcode and Commission columns.
+        </p>
+        {phone
+          /* A <button> inside a <button> is not valid HTML — the parser lifts it
+             out of the card and the layout comes apart. The whole card is the
+             control here, so this only has to look like the thing you tap. */
+          ? <span className={`${btnPrimary} mx-auto mt-4`}>Choose file</span>
+          : <button onClick={() => fileRef.current?.click()} className={`${btnPrimary} mx-auto mt-4`}>Choose file</button>}
+        {fileName && (
+          <p className="mt-3 flex flex-wrap items-center justify-center gap-2 text-[12.5px] font-semibold text-muted dark:text-[#a89f93]">
+            <FileCheck2 size={14} /> {fileName}
+            {kind !== "unknown" && <Pill tone="info">{KIND_LABEL[kind]}</Pill>}
+          </p>
+        )}
+      </Zone>
+
+      {fatal && (
+        <div className="mt-4 flex gap-3 rounded-card border border-danger/30 bg-danger-soft p-4 dark:border-danger/30 dark:bg-danger/10">
+          <AlertTriangle size={18} className="mt-0.5 flex-none text-danger" />
+          <p className="text-[13px] font-medium leading-relaxed text-danger">{fatal}</p>
+        </div>
+      )}
+
+      {/* ── THE BRANCH QUESTION, ASKED ONLY WHEN IT IS A QUESTION ────────
+          The old Grohub app did not ask when you were standing in a shop. One
+          line decided it:
+
+              const _scopedBid = scopedDefaultVal() …
+              if (_scopedBid) { runImport(_scopedBid); return; }
+
+          — straight past the prompt, no dialog, no dropdown. That is what "I
+          just import the file and click OK" was: there was nothing to answer,
+          because the menu had already answered it.
+
+          This port asked every time, even with the answer on screen in the
+          sidebar. So now it only asks when it genuinely does not know: no shop
+          chosen, or a shop that covers several branches. When it does know, it
+          says so in one quiet line with a way to change it — which is one more
+          safeguard than the original had, and it costs nothing to read. */}
+      {/* STILL WORKING IT OUT. Two or three small reads, so it is usually gone
+          before it is read — but a silent pause in front of a money import
+          invites a click on whatever is nearest. */}
+      {needBranch && probing && !effectiveBid && (
+        <p className="mt-4 px-1 text-[12.5px] text-muted dark:text-[#a89f93]">
+          Working out which shop this file is from…
+        </p>
+      )}
+
+      {needBranch && effectiveBid && !changing && (
+        <p className="mt-4 flex flex-wrap items-center gap-x-2 gap-y-1 px-1 text-[12.5px] text-muted dark:text-[#a89f93]">
+          <Check size={14} className="flex-none text-success" />
+          <span>
+            {pickBranch ? <>Filing to <strong className="text-ink dark:text-[#e7e2d8]">{destination}</strong>.</>
+              : <>This is <strong className="text-ink dark:text-[#e7e2d8]">{destination}</strong>
+                 {auto?.why ? <> — {auto.why}</> : null}.</>}
+          </span>
+          <button onClick={() => setChanging(true)}
+            className="font-semibold text-ink underline underline-offset-2 dark:text-[#e7e2d8]">Change</button>
+        </p>
+      )}
+
+      {needBranch && (!effectiveBid || changing) && (
+        <div className="mt-4 flex flex-wrap items-center gap-3 rounded-card border border-line bg-periwinkle-soft p-4 dark:border-white/[0.06] dark:bg-white/[0.04]">
+          <Info size={18} className="flex-none text-ink dark:text-white" />
+          {/* WHEN IT GENUINELY CANNOT TELL, IT SAYS WHAT IT TRIED.
+              A bare "which branch is it?" reads as the app not bothering. The
+              file has no Store column, its receipt series matched no shop and
+              its name says nothing — that is worth one sentence, because every
+              one of those is something the person can fix at the source. */}
+          <p className="flex-1 text-[12.5px] font-medium text-ink dark:text-[#e7e2d8]">
+            {changing ? <>Filing this to a different shop.</> : <>
+              This file does not say which shop it is from, and nothing in it matched one.
+              {kind === "sales_single" && <> Its receipt numbers do not carry on from any shop already
+                imported — which happens when that shop&apos;s earlier days have not been imported yet.</>}
+              {kind === "payments" && <> Its timestamps match no sale already imported — the sales file
+                for these days goes in first, and then this routes itself.</>}
+              {kind === "expense_single" && <> An account file carries no receipt numbers or times,
+                so there is nothing in it to go on.</>}
+              {inShopIsMulti && <> You are in a shop that covers several branches, so that cannot
+                answer it either.</>}
+            </>}
+          </p>
+          <Select value={String(effectiveBid ?? "")}
+            onChange={(v) => { setPickBranch(v); setChanging(false); }} className="max-md:w-full">
+            <option value="">Pick a branch…</option>
+            {fcBranches.map((b) => <option key={b.id} value={String(b.id)}>{b.name}</option>)}
+          </Select>
+        </div>
+      )}
+
+      {/* A PDF HAS NO TABLE IN IT — only text at coordinates — so the rows and
+          columns were worked out from where the words sit on the page. For a
+          machine-generated report that is reliable, and it is still inference,
+          so it is said out loud rather than hidden. The summary underneath is
+          what to check it against. */}
+      {dateOrder !== "none" && rows.length > 0 && (
+        <div className="mt-4 flex gap-3 rounded-card border border-line bg-periwinkle-soft p-4 dark:border-white/[0.06] dark:bg-white/[0.04]">
+          <Info size={18} className="mt-0.5 flex-none text-ink dark:text-white" />
+          <p className="text-[12.5px] font-medium leading-relaxed text-ink dark:text-[#e7e2d8]">
+            {dateOrder === "unknowable" ? <>
+              This file writes its dates as <strong>numbers only</strong> — and every one of them could
+              be read either way round, so there is nothing in the file that says which.
+              Read as <strong>day/month</strong>. <strong>Check the date range below</strong> before
+              importing; if it is a month out, that is why.
+            </> : <>
+              This file writes its dates as <strong>numbers only</strong>, with no month name, so
+              which number is the month had to be worked out from the whole file. Read as
+              <strong>{dateOrder === "mdy" ? " month/day" : " day/month"}</strong>, giving the range
+              below. Worth a glance — a date a month out imports cleanly and tags nothing.
+            </>}
+          </p>
+        </div>
+      )}
+
+      {inferred && rows.length > 0 && (
+        <div className="mt-4 flex gap-3 rounded-card border border-line bg-periwinkle-soft p-4 dark:border-white/[0.06] dark:bg-white/[0.04]">
+          <Info size={18} className="mt-0.5 flex-none text-ink dark:text-white" />
+          <p className="text-[12.5px] font-medium leading-relaxed text-ink dark:text-[#e7e2d8]">
+            This is a <strong>PDF</strong>, so the columns were worked out from the layout of the page
+            rather than read from the file. Check the line count and the total below against the report
+            before importing — the CSV or Excel export of the same report is exact and needs no checking.
+          </p>
+        </div>
+      )}
+
+      {warn.map((w, i) => (
+        <div key={i} className="mt-3 flex gap-3 rounded-card border border-line bg-amber-soft p-4 dark:border-white/[0.06] dark:bg-amber/10">
+          <AlertTriangle size={18} className="mt-0.5 flex-none text-amber-strong dark:text-amber" />
+          <p className="text-[12.5px] font-medium leading-relaxed text-ink dark:text-[#e7e2d8]">{w}</p>
+        </div>
+      ))}
+
+      {/* The computer keeps the one banner it had, word for word. The phone gets
+          the log below instead, whose newest card says the same thing. */}
+      {done && !phone && (
+        <div className="mt-4 flex gap-3 rounded-card border border-success/30 bg-success-soft p-4 dark:border-success/30 dark:bg-success/10">
+          <CheckCircle2 size={18} className="mt-0.5 flex-none text-success" />
+          <p className="text-[13px] font-medium leading-relaxed text-ink dark:text-[#e7e2d8]">{done}</p>
+        </div>
+      )}
+
+      {/* ASSIGN UNMATCHED ADVANCES — shown after an expense import when some
+          advances could not be auto-linked to a person. The person importing
+          picks who took each one, and it goes straight to that person's salary
+          ledger. "Skip for now" leaves them as plain expenses — they will
+          appear on the Ledger tab under "Unassigned advances" later. */}
+      {pendingAdvs.length > 0 && (
+        <div className="mt-4 rounded-card border border-amber/30 bg-amber-soft p-5 dark:border-amber/30 dark:bg-amber/10">
+          <div className="mb-3 flex items-start gap-2.5">
+            <AlertTriangle size={18} className="mt-0.5 flex-none text-amber-strong dark:text-amber" />
+            <div className="flex-1">
+              <h3 className="text-[14px] font-bold text-ink dark:text-[#f4f1ea]">
+                {money(pendingAdvs.reduce((t, r) => t + Math.abs(r.amount), 0))} across{" "}
+                {pendingAdvs.length} advance{pendingAdvs.length === 1 ? "" : "s"} — who took {pendingAdvs.length === 1 ? "it" : "them"}?
+              </h3>
+              <p className="mt-1 text-[12.5px] text-ink dark:text-[#e7e2d8]">
+                These imported as expenses but nobody was charged. Pick the person — their salary
+                ledger updates immediately.
+              </p>
+            </div>
+            <button onClick={() => setPendingAdvs([])}
+              className="flex-none text-[12px] font-semibold text-muted underline underline-offset-2 dark:text-[#a89f93]">
+              Skip for now
+            </button>
+          </div>
+          <div className="space-y-2">
+            {pendingAdvs.map((r) => (
+              <div key={r._k} className="rounded-lg border border-line bg-surface p-3 dark:border-white/[0.06] dark:bg-[#201c17]">
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[13.5px] font-bold text-ink dark:text-[#f4f1ea]">
+                      {money(Math.abs(r.amount))}
+                    </div>
+                    <div className="mt-0.5 text-[12px] text-muted dark:text-[#a89f93]">
+                      {branchNameFor(r.branch_id)} · {r.expense_date} · {r.description || "no note"}
+                    </div>
+                  </div>
+                  <select value={assignPick[r._k] ?? ""}
+                    onChange={(e) => setAssignPick((p) => ({ ...p, [r._k]: e.target.value }))}
+                    className={`${inputCls} min-w-[190px] max-md:w-full`}>
+                    <option value="">Who took it?</option>
+                    {byShopForAssign.map(([shop, list]) => (
+                      <optgroup key={shop} label={shop}>
+                        {list.map((e) => (
+                          <option key={e.id} value={String(e.id)}>
+                            {e.name}{e.active === false ? " (ended)" : ""}
+                          </option>
+                        ))}
+                      </optgroup>
+                    ))}
+                  </select>
+                  <button onClick={() => assignAdv(r)}
+                    disabled={!assignPick[r._k] || assignBusy === r._k}
+                    className={`${btnPrimary} max-md:w-full`}>
+                    {assignBusy === r._k ? "…" : <><UserCheck size={14} /> Assign</>}
+                  </button>
+                </div>
+                {assignErr[r._k] && (
+                  <p className="mt-1 text-[11.5px] font-semibold text-danger">{assignErr[r._k]}</p>
+                )}
+              </div>
+            ))}
+          </div>
+          <p className="mt-3 text-[11.5px] text-muted dark:text-[#a89f93]">
+            Skip for now leaves them unlinked — they can still be assigned later in the Ledger tab
+            under &ldquo;Unassigned advances&rdquo;.
+          </p>
+        </div>
+      )}
+
+      {/* THE RESULT LOG, PHONE ONLY. One card per file that landed, newest
+          first: what the file was taken to be, how many rows went in, and how
+          many were already there. Cards rather than a table because the numbers
+          are two or three per file and a table of three columns on a 390px
+          screen is a table you scroll sideways for nothing. */}
+      {phone && results.length > 0 && (
+        <div className="mt-5 space-y-2">
+          <div className="flex items-center justify-between gap-3">
+            <h3 className="text-[13px] font-bold text-ink dark:text-[#f4f1ea]">Landed in this sitting</h3>
+            <button onClick={() => setResults([])}
+              className="rounded-full border border-line bg-surface px-3 py-1.5 text-[12px] font-semibold text-muted dark:border-white/10 dark:bg-white/[0.06] dark:text-[#a89f93]">
+              Clear log
+            </button>
+          </div>
+          {results.map((r, i) => (
+            <div key={i} className={`rounded-card border p-3.5 ${r.tone === "warn"
+              ? "border-amber-strong/40 bg-amber-soft dark:border-white/[0.08] dark:bg-amber/10"
+              : "border-success/30 bg-success-soft dark:border-success/30 dark:bg-success/10"}`}>
+              <div className="flex items-start gap-2.5">
+                {r.tone === "warn"
+                  ? <AlertTriangle size={16} className="mt-0.5 flex-none text-amber-strong dark:text-amber" />
+                  : <CheckCircle2 size={16} className="mt-0.5 flex-none text-success" />}
+                <div className="min-w-0 flex-1">
+                  <div className="break-all text-[13.5px] font-bold text-ink dark:text-[#f4f1ea]">{r.file}</div>
+                  <div className="mt-0.5 text-[12px] text-muted dark:text-[#a89f93]">{KIND_LABEL[r.kind]}</div>
+                </div>
+              </div>
+              <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 border-t border-line pt-3 dark:border-white/[0.08]">
+                {r.figures.map((f, j) => (
+                  <div key={j} className="min-w-0">
+                    {/* `quiet` is grey, never red. A duplicate skip is the
+                        line_hash guard working — the best outcome a second drop
+                        of the same file can have — and a red number there sends
+                        somebody hunting for a problem that does not exist. */}
+                    <dd className={`text-[18px] font-extrabold tabular-nums ${f.quiet ? "text-muted dark:text-[#a89f93]" : "text-ink dark:text-[#f4f1ea]"}`}>{f.v}</dd>
+                    <dt className="text-[11px] uppercase leading-tight tracking-wide text-hint dark:text-[#8a8175]">{f.l}</dt>
+                  </div>
+                ))}
+              </dl>
+              <p className="mt-2.5 text-[12px] leading-relaxed text-muted dark:text-[#a89f93]">{r.note}</p>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {kind === "payments" && rows.length > 0 && (
+        <SourceNote>
+          A Nimbus sales export cannot tell card from JazzCash — both come through as &ldquo;Other
+          Payment&rdquo;. This file is what resolves them, matched on <strong>shop + date + exact
+          time</strong>. So the sales for these days have to be imported first; if nothing matches,
+          that is the reason.
+        </SourceNote>
+      )}
+
+      {summary && !fatal && (
+        <>
+          {/* The commission master only has two figures worth printing, so the
+              other two are invisible spacers that keep the computer's 4-across
+              row square. On a phone an invisible card is just 70px of blank
+              scroll, so there it is dropped rather than hidden. */}
+          <div className="mt-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
+            {(phone ? summary.filter((s) => s.l !== "—") : summary).map(({ l, v }, i) => (
+              <div key={i} className={`rounded-card border border-line bg-surface p-4 dark:border-white/[0.06] dark:bg-[#201c17] ${l === "—" ? "opacity-0" : ""}`}>
+                <div className="text-[19px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">{v}</div>
+                <div className="text-[12px] font-medium text-muted dark:text-[#a89f93]">{l}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Reversed on a phone so Import is the first thing under the warnings
+              rather than sitting below a caption about the preview, and full
+              width because it is the one button on the screen that writes. */}
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-3 max-md:flex-col-reverse max-md:items-stretch">
+            <p className="text-[12.5px] text-muted dark:text-[#a89f93]">Showing the first 50 rows for checking.</p>
+            <button onClick={run} disabled={busy || readyCount === 0} className={`${btnPrimary} max-md:w-full`}>
+              {/* THE DESTINATION IS ON THE BUTTON. The branch is now chosen for
+                  you, so the one place it must be impossible to miss is the
+                  control that writes. */}
+              {busy ? "Working…"
+                : kind === "payments" ? (destination
+                    ? `Classify ${readyCount.toLocaleString()} payments in ${destination}`
+                    : `Classify ${readyCount.toLocaleString()} payments`)
+                : (kind === "comm_master" || kind === "comm_list") ? `Update ${readyCount.toLocaleString()} commission rates`
+                : destination ? `Import ${readyCount.toLocaleString()} rows into ${destination}`
+                : `Import ${readyCount.toLocaleString()} rows`}
+            </button>
+          </div>
+
+          {/* PROGRESS, PHONE ONLY — `phone &&`, not a media query, so nothing new
+              can render at 1024px. See the note on `prog`: the old feedback was
+              a button reading "Working…", which on mobile data is the same thing
+              as a page that has died. */}
+          {phone && busy && prog && (
+            <div className="mt-3 rounded-card border border-line bg-surface p-3.5 dark:border-white/[0.06] dark:bg-[#201c17]">
+              <div className="flex items-center justify-between gap-3 text-[12.5px] font-semibold text-ink dark:text-[#e7e2d8]">
+                <span>{prog.what}…</span>
+                <span className="tabular-nums text-muted dark:text-[#a89f93]">
+                  {prog.total ? `${prog.done.toLocaleString()} / ${prog.total.toLocaleString()}` : prog.done.toLocaleString()}
+                </span>
+              </div>
+              <span className="mt-2 block h-1.5 w-full overflow-hidden rounded-full bg-panel dark:bg-white/[0.08]">
+                <span className={`block h-full rounded-full bg-ink dark:bg-white ${prog.total ? "transition-[width]" : "animate-pulse"}`}
+                  style={{ width: prog.total ? `${Math.min(100, Math.round((prog.done / prog.total) * 100))}%` : "35%" }} />
+              </span>
+              <p className="mt-2 text-[11.5px] text-hint dark:text-[#8a8175]">Keep this screen open until it finishes.</p>
+            </div>
+          )}
+
+          {sales && <DataTable cols={saleCols} rows={sales.parsed.slice(0, 50)} minWidth={900} empty="Nothing to show." />}
+          {expenses && <DataTable cols={expCols} rows={expenses.parsed.slice(0, 50)} minWidth={900} empty="Nothing to show." />}
+          {payments && <DataTable cols={payCols} rows={payments.parsed.slice(0, 50)} minWidth={720} empty="Nothing to show." />}
+          {comm && <DataTable cols={commCols} rows={comm.slice(0, 50)} minWidth={720} empty="Nothing to show." />}
+        </>
+      )}
+
+      {(kind === "sales_multi" || kind === "sales_single") && rows.length > 0 && (
+        <SourceNote>
+          Every line carries a <strong>line_hash</strong> — shop, day, receipt, item, quantity,
+          amount and time, joined. The column is unique, so dropping the same file in twice changes
+          nothing; the second run reports the lines as skipped. Two identical items on one receipt
+          are two real sales and get <code>|#2</code> appended rather than being collapsed.
+        </SourceNote>
+      )}
+      {(kind === "expense_multi" || kind === "expense_single") && rows.length > 0 && (
+        <SourceNote>
+          Importing <strong>replaces</strong> previously-imported Nimbus expenses for these branches
+          within the file&apos;s own date range, so an overlapping re-import is safe. The sign in the
+          Amount column decides direction: negative is an expense, positive is misc income.
+          {!!adv?.seen && <>
+            {" "}An <strong>advance</strong> is both: the money leaves the till and the person owes
+            it. Nimbus has no employee column, so the name is read out of the note and matched
+            against that shop&apos;s active staff — full name first, then a single name. If two
+            people fit equally well <strong>neither is charged</strong>; a wrong ledger is worse
+            than an unlinked row, and the count above says how many.
+          </>}
+        </SourceNote>
+      )}
+
+      {/* ── TAKE A WHOLE IMPORT BACK OUT ──────────────────────────────────
+          Collapsed, because it is for the day something went in wrong — the
+          wrong shop, or the same file twice — and a destructive control should
+          not sit open next to the one you press every morning. */}
+      <div className="mt-6 border-t border-line pt-4 dark:border-white/[0.06]">
+        <button onClick={() => setUndoOpen((v) => !v)}
+          className="inline-flex items-center gap-2 rounded-full border border-line bg-surface px-3.5 py-2 text-[12.5px] font-semibold text-ink transition hover:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:hover:bg-white/[0.12]">
+          <Undo2 size={14} /> {undoOpen ? "Hide" : "Undo"} a previous import
+        </button>
+
+        {undoOpen && (
+          <div className="mt-3 overflow-hidden rounded-card border border-line dark:border-white/[0.06]">
+            <table className="w-full text-[13px]">
+              <thead className="bg-panel/70 text-left text-[12px] uppercase tracking-wide text-muted dark:bg-white/[0.04] dark:text-[#a89f93]">
+                <tr>
+                  <th className="px-4 py-2.5 font-semibold">File</th>
+                  <th className="px-4 py-2.5 font-semibold">Imported</th>
+                  <th className="px-4 py-2.5 text-right font-semibold">Lines still in</th>
+                  <th className="px-4 py-2.5 text-right font-semibold">Sales</th>
+                  <th className="px-4 py-2.5" />
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-line dark:divide-white/[0.05]">
+                {batches.length === 0 ? (
+                  <tr><td colSpan={5} className="px-4 py-8 text-center text-muted dark:text-[#a89f93]">No imports recorded yet.</td></tr>
+                ) : batches.map((b) => (
+                  <tr key={b.id} className="text-ink dark:text-[#e7e2d8]">
+                    <td className="px-4 py-2.5 font-semibold">{b.filename || `Import #${b.id}`}</td>
+                    <td className="px-4 py-2.5 text-muted dark:text-[#a89f93]">{String(b.imported_at).slice(0, 10)}</td>
+                    <td className="px-4 py-2.5 text-right tabular-nums">{b.lines.toLocaleString()}</td>
+                    <td className="px-4 py-2.5 text-right tabular-nums">{money(b.total)}</td>
+                    <td className="px-4 py-2.5 text-right">
+                      {b.lines === 0 ? (
+                        <span className="text-[11.5px] text-hint">already removed</span>
+                      ) : undoConfirm === b.id ? (
+                        <span className="flex items-center justify-end gap-1">
+                          <button onClick={() => undoBatch(b)} disabled={undoing === b.id}
+                            className="rounded-full bg-danger px-2.5 py-1.5 text-[12px] font-semibold text-white transition hover:opacity-90 disabled:opacity-50">
+                            {undoing === b.id ? "Removing…" : `Remove ${b.lines.toLocaleString()} lines`}
+                          </button>
+                          <button onClick={() => setUndoConfirm(null)} className="rounded-full px-2 py-1.5 text-[12px] font-semibold text-muted dark:text-[#a89f93]">Keep</button>
+                        </span>
+                      ) : (
+                        <button onClick={() => setUndoConfirm(b.id)}
+                          className="rounded-full border border-line px-3 py-1.5 text-[12px] font-semibold text-muted transition hover:bg-danger-soft hover:text-danger dark:border-white/10 dark:text-[#a89f93]">
+                          Undo
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="border-t border-line px-4 py-2.5 text-[11.5px] text-muted dark:border-white/[0.06] dark:text-[#a89f93]">
+              Removes every sale line that came in with that file. Expenses and non-cash tags are
+              not touched — those replace themselves on the next import of the same range.
+            </p>
+          </div>
+        )}
+      </div>
+
+      <PreviewNote />
+    </div>
+  );
+}

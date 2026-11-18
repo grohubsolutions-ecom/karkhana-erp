@@ -1,0 +1,182 @@
+"use client";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { usePathname, useRouter } from "next/navigation";
+import { Bell } from "lucide-react";
+import { supabase, isSupabaseConfigured } from "@/lib/supabase";
+import { usePermissions } from "@/lib/usePermissions";
+
+/* THE NOTIFICATION BAR — the same one on both sides.
+ *
+ * The boss and the employee are told different things, but by the same
+ * machinery: hub_my_notifications() returns whatever was addressed to whoever
+ * is signed in, and there is no parameter to ask with, so this component
+ * cannot show one person another person's work.
+ *
+ * IT CLEARS ON READING, NOT ON ARRIVING. Opening the panel marks everything in
+ * it as read, because that is the moment the person has actually seen it. A
+ * badge that clears on page load teaches people to ignore the badge.
+ */
+
+type Note = {
+  id: number; kind: string; title: string; body: string | null;
+  article_id: string | null; task_id: string | null;
+  created_at: string; read_at: string | null;
+};
+
+const TONE: Record<string, string> = {
+  assigned:      "bg-periwinkle-soft text-periwinkle-strong dark:bg-white/[0.10] dark:text-periwinkle",
+  returned:      "bg-salmon-soft text-red-800 dark:bg-white/[0.10] dark:text-salmon",
+  submitted:     "bg-panel text-muted dark:bg-white/[0.06] dark:text-[#a89f93]",
+  completed:     "bg-success-soft text-success dark:bg-white/[0.10]",
+  ads_pending:   "bg-amber-soft text-amber-strong dark:bg-white/[0.10] dark:text-amber",
+  ads_approved:  "bg-success-soft text-success dark:bg-white/[0.10]",
+  ads_rejected:  "bg-salmon-soft text-red-800 dark:bg-white/[0.10] dark:text-salmon",
+};
+
+function ago(iso: string) {
+  const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
+}
+
+export default function HubBell({ dark = false, align = "right", size = "md" }: { dark?: boolean; align?: "left" | "right"; size?: "md" | "lg" }) {
+  const [items, setItems] = useState<Note[]>([]);
+  const [open, setOpen] = useState(false);
+  const router = useRouter();
+  const box = useRef<HTMLDivElement | null>(null);
+  /* The bell lives in the header, which stays put while pages change under it.
+     Going anywhere closes the list, so it is never left open over a new page. */
+  const path = usePathname();
+  useEffect(() => { setOpen(false); }, [path]);
+
+  /* A NOTIFICATION IS NOT A DOOR.
+     This used to send anyone who tapped a notification to the article page.
+     For an employee that opened the Hub department — a place he has no
+     business in — and the article page carries the cost, the retail price,
+     the ads budget and every other man's progress. The route gate would have
+     refused him eventually, but being walked to a locked door tells him the
+     room exists and roughly what is in it.
+     Only somebody who can actually open articles is taken anywhere. For
+     everyone else the notification is what it says it is: a message. */
+  const { can } = usePermissions();
+  const canOpenArticles = can(["hub.articles.view", "hub.articles.manage"]);
+
+  const load = useCallback(async () => {
+    if (!isSupabaseConfigured || !supabase) return;
+    const { data } = await supabase.rpc("hub_my_notifications", { p_unread_only: false });
+    setItems((data as Note[]) ?? []);
+  }, []);
+
+  /* ONE BELL ASKS, NOT TWO.
+     The Hub shows this bell twice — in the sidebar on a desktop, in the header
+     on a phone — and CSS hides whichever does not fit the screen. Both used to
+     poll every minute regardless. A hidden element has no offsetParent, so the
+     one you cannot see now stays quiet. */
+  const shown = () => !!box.current && box.current.offsetParent !== null;
+  useEffect(() => { if (shown()) load(); }, [load]);
+
+  /* Checked every minute while somebody is looking at the tab, and not at all
+     while they are not. A background tab polling all day costs a free-tier
+     quota and tells nobody anything. */
+  useEffect(() => {
+    const t = setInterval(() => { if (document.visibilityState === "visible" && shown()) load(); }, 60000);
+    return () => clearInterval(t);
+  }, [load]);
+
+  useEffect(() => {
+    const away = (e: MouseEvent) => {
+      if (box.current && !box.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", away);
+    return () => document.removeEventListener("mousedown", away);
+  }, []);
+
+  const unread = items.filter((n) => !n.read_at).length;
+
+  async function toggle() {
+    const next = !open;
+    setOpen(next);
+    if (next && unread > 0 && supabase) {
+      const { error } = await supabase.rpc("hub_notification_read", { p_id: null });
+      /* Cleared on screen only if the database agreed — otherwise the badge
+         would vanish now and come back on the next check a minute later. */
+      if (!error) setItems((prev) => prev.map((n) => ({ ...n, read_at: n.read_at ?? new Date().toISOString() })));
+    }
+  }
+
+  return (
+    <div className="relative" ref={box}>
+      <button onClick={toggle} aria-label={unread ? `${unread} unread notifications` : "Notifications"}
+        className={`relative flex items-center justify-center rounded-full transition ${size === "lg" ? `h-11 w-11 ${dark ? "active:bg-white/10" : "active:bg-panel dark:active:bg-white/[0.08]"}` : "h-8 w-8"} ${dark
+          ? "border border-white/20 text-white/70 hover:bg-white/10 hover:text-white"
+          : "text-muted hover:bg-panel hover:text-ink dark:text-[#a89f93] dark:hover:bg-white/[0.08] dark:hover:text-white"}`}>
+        <Bell size={size === "lg" ? 20 : 16} />
+        {unread > 0 && (
+          <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-danger px-1 text-[10px] font-bold leading-none text-white">
+            {unread > 9 ? "9+" : unread}
+          </span>
+        )}
+      </button>
+
+      {/* On a phone the list opens as a sheet over a dimmed page: a tap
+          outside closes it, and the page behind does not scroll meanwhile. */}
+      {open && <div className="fixed inset-0 z-40 bg-black/25 sm:bg-transparent md:hidden" onClick={() => setOpen(false)} />}
+      {open && (
+        /* WHERE THIS PANEL OPENS, and why it used to fall off the screen.
+         *
+         * It was `absolute right-0` with a fixed 380px width. That pins the
+         * panel's RIGHT edge to the bell and grows it leftward — fine for a
+         * bell in the top-right corner, wrong for this one, which sits inside
+         * a 248px sidebar on the LEFT. 248 − 380 put a third of the panel past
+         * the left edge of the window, unreachable.
+         *
+         * Two rules now instead of one:
+         *   phone   a fixed sheet with a gutter on both sides. It cannot run
+         *           off an edge because it is measured from the window, not
+         *           from the bell.
+         *   desktop anchored to the bell and opening INTO the page — from its
+         *           left edge in the sidebar, from its right edge in the phone
+         *           header, which is where `align` comes from.
+         */
+        <div className={[
+          "fixed inset-x-2 top-[calc(60px+env(safe-area-inset-top))] z-50 max-h-[calc(100dvh-150px)] overflow-y-auto overscroll-contain rounded-card border border-line",
+          "bg-surface shadow-card dark:border-white/10 dark:bg-[#201c17]",
+          "sm:absolute sm:inset-x-auto sm:top-full sm:mt-2 sm:w-[360px]",
+          align === "left" ? "sm:left-0" : "sm:right-0",
+        ].join(" ")}>
+          <div className="sticky top-0 border-b border-line bg-surface px-4 py-2.5 text-[12px] font-bold text-ink dark:border-white/10 dark:bg-[#201c17] dark:text-[#f4f1ea]">
+            Notifications
+          </div>
+          {items.length === 0 ? (
+            <p className="px-4 py-8 text-center text-[13px] text-muted dark:text-[#a89f93]">Nothing yet.</p>
+          ) : (
+            items.map((n) => (
+              <button key={n.id} type="button"
+                onClick={() => {
+                  setOpen(false);
+                  if (canOpenArticles && n.article_id) router.push(`/online/articles/${n.article_id}`);
+                }}
+                className={`block w-full border-b border-line px-4 py-3 text-left transition last:border-0 dark:border-white/[0.06] ${
+                  canOpenArticles && n.article_id
+                    ? "hover:bg-panel/60 dark:hover:bg-white/[0.04]"
+                    : "cursor-default"}`}>
+                <div className="flex items-start gap-2">
+                  <span className={`mt-0.5 shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${TONE[n.kind] ?? TONE.submitted}`}>
+                    {n.kind.replace(/_/g, " ")}
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-[13px] font-semibold text-ink dark:text-[#f4f1ea]">{n.title}</span>
+                    {n.body && <span className="mt-0.5 block text-[12px] leading-snug text-muted dark:text-[#a89f93]">{n.body}</span>}
+                    <span className="mt-1 block text-[11px] text-hint dark:text-[#8a8175]">{ago(n.created_at)}</span>
+                  </span>
+                </div>
+              </button>
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  );
+}

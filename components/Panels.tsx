@@ -1,0 +1,95 @@
+"use client";
+import { useState, useEffect } from "react";
+import { Boxes, FileText, ArrowRight, Flame } from "lucide-react";
+import IconChip from "./IconChip";
+import { materials, approvals } from "@/lib/sampleData";
+
+// Variables, so .dark can redefine them — see globals.css.
+const DOT: Record<string, string> = {
+  salmon: "var(--dot-salmon)",
+  amber: "var(--dot-amber)",
+  lavender: "var(--dot-lavender)",
+  periwinkle: "var(--dot-periwinkle)",
+  pink: "var(--dot-pink)",
+};
+// Variables, so .dark can redefine them — see globals.css.
+const TILE: Record<string, string> = {
+  salmon: "var(--tint-salmon)",
+  amber: "var(--tint-amber)",
+  lavender: "var(--tint-lavender)",
+  periwinkle: "var(--tint-periwinkle)",
+  pink: "var(--tint-pink)",
+};
+
+export function StockPanel() {
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => { const t = setTimeout(() => setMounted(true), 80); return () => clearTimeout(t); }, []);
+  return (
+    <div className="rounded-card bg-surface p-5 shadow-card">
+      <div className="mb-4 flex items-center gap-3">
+        <IconChip Icon={Boxes} size={32} />
+        <h3 className="text-[15px] font-bold">Raw-Material Stock</h3>
+      </div>
+      <div className="space-y-3.5">
+        {materials.map((m, i) => (
+          <div key={m.name} className="flex items-center gap-3">
+            <span
+              className="h-2.5 w-2.5 shrink-0 rounded-full"
+              style={{ background: DOT[m.accent] }}
+            />
+            <span className="w-32 shrink-0 text-[13.5px] font-medium text-ink">{m.name}</span>
+            <div className="h-2 flex-1 overflow-hidden rounded-full bg-panel">
+              <div
+                className="h-full rounded-full transition-[width] duration-700 ease-out"
+                style={{ width: mounted ? `${m.pct}%` : "0%", background: DOT[m.accent], transitionDelay: `${i * 90}ms` }}
+              />
+            </div>
+            <span className="w-28 shrink-0 text-right text-[12.5px] tnum text-muted">
+              {m.qty}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+export function ApprovalsPanel() {
+  return (
+    <div className="rounded-card bg-surface p-5 shadow-card">
+      <div className="mb-4 flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <IconChip Icon={FileText} size={32} />
+          <h3 className="text-[15px] font-bold">Pending Approvals</h3>
+        </div>
+        <button className="flex items-center gap-1 text-[12.5px] font-semibold text-muted hover:text-ink">
+          View all <ArrowRight size={14} />
+        </button>
+      </div>
+      <div className="space-y-2.5">
+        {approvals.map((a) => (
+          <div
+            key={a.no}
+            className="flex items-center gap-3 rounded-xl2 p-3"
+            style={{ background: TILE[a.accent] }}
+          >
+            <span className="flex h-8 w-8 items-center justify-center rounded-full bg-white/70 text-ink">
+              {a.urgent ? (
+                <Flame size={15} className="text-salmon-strong" />
+              ) : (
+                <FileText size={15} />
+              )}
+            </span>
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-[13px] font-bold text-ink">{a.no}</div>
+              <div className="truncate text-[11.5px] text-ink/70">{a.who}</div>
+            </div>
+            <span className="shrink-0 rounded-full bg-ink/10 px-2 py-0.5 text-[10.5px] font-semibold text-ink/80">
+              {a.tag}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}

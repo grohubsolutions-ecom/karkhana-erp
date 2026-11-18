@@ -1,0 +1,221 @@
+"use client";
+/* ADD NEW ARTICLE — the form, and every article saved so far beside it.
+ *
+ * The Articles list used to be a separate page under Factory. It lives here
+ * now: the form on the left, the list on the right, so an article can be
+ * made and checked in one place instead of two.
+ *
+ * The form stays pinned while the list scrolls — on a wide screen the button
+ * you came for never scrolls away behind two hundred rows. On a narrow one
+ * they stack, form first.
+ */
+import { useState } from "react";
+import Link from "next/link";
+import { Shirt, Loader2, BookOpen, Pencil } from "lucide-react";
+import Topbar from "@/components/Topbar";
+import ArticlesList from "@/components/ArticlesList";
+import { supabase, isSupabaseConfigured } from "@/lib/supabase";
+import { usePermissions } from "@/lib/usePermissions";
+
+const inp = "mt-1 w-full rounded-xl2 border border-line bg-surface px-3 py-2.5 text-[13.5px] text-ink outline-none focus:border-ink/30";
+const SECTIONS = [
+    { v: "40", l: "40 · Baby/Newborn" }, { v: "41", l: "41 · Kids" },
+  { v: "42", l: "42 · Child" }, { v: "43", l: "43 · Ladies" },
+  { v: "44", l: "44 · Men" }, { v: "60", l: "60 · Shoes" },
+  { v: "61", l: "61 · Accessories" },
+];
+
+type Made = { code?: string; system_barcode?: string; manual_barcode?: string; section?: string };
+
+export default function AddArticlePage() {
+  const { can } = usePermissions();
+  const allowed = can(["articles.manage", "production.entry"]);
+
+  const [name, setName] = useState("");
+  const [section, setSection] = useState("");
+  const [manual, setManual] = useState("");
+  /* Factory articles are made; warehouse articles are bought and resold.
+     Kept apart so a recipe never lands on something that was never cut. */
+  const [owner, setOwner] = useState("factory");
+  const [gtype, setGtype] = useState("");
+  const [size, setSize] = useState("");
+  const [cost, setCost] = useState("");
+  const [retail, setRetail] = useState("");
+  const [gst, setGst] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [made, setMade] = useState<Made | null>(null);
+  /* Tells the list beside the form to reload, and which recipe to open. */
+  const [reloadKey, setReloadKey] = useState(0);
+  const [recipeBc, setRecipeBc] = useState<string | null>(null);
+
+  function reset() {
+    setName(""); setSection(""); setManual(""); setOwner("factory"); setGtype(""); setSize("");
+    setCost(""); setRetail(""); setGst(""); setErr(""); setMade(null);
+  }
+
+  async function save() {
+    if (!isSupabaseConfigured || !supabase) return;
+    setErr("");
+    if (!name.trim()) { setErr("Give the article a name."); return; }
+    if (!section) { setErr("Which section does it belong to?"); return; }
+    setBusy(true);
+    const { data, error } = await supabase.rpc("add_article", {
+      p_name: name.trim(), p_section: section,
+      p_manual_barcode: manual.trim() || null,
+      p_garment_type: gtype.trim() || null, p_size: size.trim() || null,
+      p_cost_price: cost ? parseFloat(cost) : null,
+      p_retail_price: retail ? parseFloat(retail) : null,
+      p_gst_rate: gst ? parseFloat(gst) : null, p_code: null,
+    });
+    setBusy(false);
+    if (error) { setErr(error.message); return; }
+    const row = data as Made & { id?: string };
+    /* The article is created as Factory; Warehouse is set straight after.
+       That second step used to write to the table directly, which the table
+       silently ignores — so every "Warehouse" article came out as Factory.
+       It goes through update_article_details (K177) now, and if it is
+       refused the article still exists, so say exactly that. */
+    if (owner !== "factory" && row?.id) {
+      const { error: oErr } = await supabase.rpc("update_article_details", {
+        p_id: row.id, p_patch: { owner },
+      });
+      if (oErr) setErr(`Created, but it could not be marked as Warehouse: ${oErr.message}`);
+    }
+    setMade(row);
+    setReloadKey((k) => k + 1);
+  }
+
+  const margin = cost && retail ? parseFloat(retail) - parseFloat(cost) : null;
+
+  return (
+    <>
+      <Topbar title="Add New Article" subtitle="Define a garment, give it a barcode — and every article saved so far, beside it" />
+
+      <div className="px-6 pb-12">
+        <div className="grid grid-cols-1 gap-5 xl:grid-cols-[440px_minmax(0,1fr)] xl:items-start">
+        <div className="xl:sticky xl:top-4">
+          {made ? (
+            <div className="rounded-card border border-line bg-surface p-8 text-center shadow-card">
+              <span className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-success-soft text-ink"><Shirt size={24} /></span>
+              <p className="mt-3 text-[15px] font-semibold text-ink">{name || "Article"} created</p>
+              {/* The form (and its error line) is gone once this card shows, so
+                  a problem after the save has to be shown here or not at all. */}
+              {err && <p className="mx-auto mt-2 max-w-sm rounded-xl2 bg-danger-soft px-3 py-2 text-[12.5px] font-medium text-danger">{err}</p>}
+
+              <div className="mx-auto mt-4 max-w-xs rounded-xl2 border border-[#166534]/25 bg-success-soft p-4">
+                <p className="text-[11.5px] font-bold uppercase tracking-wide text-ink/55">System barcode</p>
+                <p className="mt-1 font-mono text-[32px] font-extrabold leading-none tracking-tight text-ink">{made.system_barcode ?? "—"}</p>
+                {/* Shown here too, because if you typed one you want to see it
+                    took — not go hunting for it in a list afterwards. */}
+                {made.manual_barcode && (
+                  <p className="mt-2 font-mono text-[13px] text-ink/70">also {made.manual_barcode}</p>
+                )}
+                <p className="mt-1.5 text-[11.5px] text-ink/55">{made.code}</p>
+              </div>
+
+              <p className="mx-auto mt-4 max-w-sm text-[12.5px] leading-relaxed text-muted">
+                It has no recipe yet, so an order cannot calculate its material.
+                Add it now, or later with the Recipe button on it in the list.
+              </p>
+
+              <div className="mt-5 flex flex-wrap justify-center gap-2">
+                <button onClick={reset} className="rounded-xl2 bg-ink px-5 py-2.5 text-[13px] font-semibold text-white">Add another</button>
+                {made.system_barcode && (
+                  <button onClick={() => setRecipeBc(made.system_barcode ?? null)}
+                    className="flex items-center gap-1.5 rounded-xl2 border border-line px-4 py-2.5 text-[13px] font-semibold text-ink/75 hover:bg-panel">
+                    <BookOpen size={14} /> Add its recipe
+                  </button>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="rounded-card border border-line bg-surface p-6 shadow-card">
+              <p className="text-[13px] text-muted">
+                The barcode is generated when you save — {section || "??"}-000001 upward, counting inside its own section. It cannot be typed.
+              </p>
+
+              <div className="mt-4">
+                <label className="block text-[12px] font-medium text-muted">Article name *</label>
+                <input value={name} onChange={(e) => setName(e.target.value)} autoFocus
+                  placeholder="e.g. Men Cotton Tracksuit" className={inp} />
+              </div>
+
+              <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <label className="block text-[12px] font-medium text-muted">Belongs to *</label>
+                  <select value={owner} onChange={(e) => setOwner(e.target.value)} className={inp}>
+                    <option value="factory">Factory — we make it</option>
+                    <option value="warehouse">Warehouse — we store and supply</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[12px] font-medium text-muted">Section *</label>
+                  <select value={section} onChange={(e) => setSection(e.target.value)} className={inp}>
+                    <option value="">Choose…</option>
+                    {SECTIONS.map((x) => <option key={x.v} value={x.v}>{x.l}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[12px] font-medium text-muted">Manual barcode</label>
+                  <input value={manual} onChange={(e) => setManual(e.target.value)}
+                    placeholder="if one is already printed" className={inp} />
+                </div>
+                <div>
+                  <label className="block text-[12px] font-medium text-muted">Type</label>
+                  <input value={gtype} onChange={(e) => setGtype(e.target.value)} placeholder="Shirt / Trouser" className={inp} />
+                </div>
+                <div>
+                  <label className="block text-[12px] font-medium text-muted">Size</label>
+                  <input value={size} onChange={(e) => setSize(e.target.value)} placeholder="M, 2-6Y…" className={inp} />
+                </div>
+              </div>
+
+              <div className="mt-4 grid grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-[12px] font-medium text-muted">Cost price</label>
+                  <input type="number" value={cost} onChange={(e) => setCost(e.target.value)} className={inp} />
+                </div>
+                <div>
+                  <label className="block text-[12px] font-medium text-muted">Retail price</label>
+                  <input type="number" value={retail} onChange={(e) => setRetail(e.target.value)} className={inp} />
+                </div>
+                <div>
+                  <label className="block text-[12px] font-medium text-muted">GST %</label>
+                  <input type="number" value={gst} onChange={(e) => setGst(e.target.value)} placeholder="18" className={inp} />
+                </div>
+              </div>
+
+              {margin !== null && (
+                <p className="mt-2.5 text-[12.5px] text-ink/70">
+                  Margin <b className="text-ink">Rs {margin.toLocaleString()}</b>
+                  {gst && retail ? ` · GST Rs ${(parseFloat(retail) * parseFloat(gst) / 100).toFixed(0)} · sells at Rs ${(parseFloat(retail) * (1 + parseFloat(gst) / 100)).toFixed(0)} inc` : ""}
+                </p>
+              )}
+
+              {err && <p className="mt-3 text-[12.5px] font-medium text-danger">{err}</p>}
+
+              <div className="mt-5 flex items-center gap-2">
+                {/* Bottom left, as asked — everything already saved is one
+                    click away rather than somewhere else entirely. */}
+                <Link href="/edit-record"
+                  className="flex items-center gap-1.5 whitespace-nowrap rounded-xl2 border border-line px-3.5 py-2.5 text-[12.5px] font-semibold text-ink/70 hover:bg-panel">
+                  <Pencil size={14} /> Edit record
+                </Link>
+                <button onClick={reset} className="ml-auto whitespace-nowrap rounded-xl2 border border-line px-4 py-2.5 text-[13px] font-semibold text-ink/70 hover:bg-panel">Clear</button>
+                <button onClick={save} disabled={busy || !allowed}
+                  className="flex items-center gap-1.5 whitespace-nowrap rounded-xl2 bg-ink px-6 py-2.5 text-[13px] font-semibold text-white disabled:opacity-50">
+                  {busy && <Loader2 size={15} className="animate-spin" />} Create article
+                </button>
+              </div>
+              {!allowed && <p className="mt-2 text-right text-[12px] text-hint">You do not have permission to add articles.</p>}
+            </div>
+          )}
+        </div>
+
+        <ArticlesList reloadKey={reloadKey} recipeFor={recipeBc} onRecipeOpened={() => setRecipeBc(null)} />
+        </div>
+      </div>
+    </>
+  );
+}

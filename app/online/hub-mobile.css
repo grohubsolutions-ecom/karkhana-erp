@@ -1,0 +1,51 @@
+/* HUB ON A PHONE — rules that only apply inside the Hub (html.hub, set by
+   app/online/layout.tsx and /me) and only below the desktop width.
+   Nothing here touches another department: the class is removed when you
+   leave the Hub. */
+
+@media (max-width: 767.98px) {
+  /* Nothing may push the page sideways. `clip` cuts off overflow without
+     turning the box into a scroll area, so sticky headers inside still work. */
+  html.hub .hub-clip { overflow-x: clip; }
+  html.hub body { overflow-x: clip; }
+
+  /* iPhones zoom the whole page when you tap into a box whose text is smaller
+     than 16px — and then the page sits zoomed in, sliding left and right.
+     16px stops that on every input, including the ones in shared dialogs. */
+  html.hub input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
+  html.hub select,
+  html.hub textarea { font-size: 16px !important; }
+
+  /* A quick second tap no longer zooms the page (pinch-zoom still works), and
+     the grey flash iOS paints on every tap is gone — buttons show their own
+     pressed state instead. */
+  html.hub { touch-action: manipulation; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+  html.hub * { -webkit-tap-highlight-color: transparent; }
+
+  /* While a dialog or sheet is open, the page behind it stays still. Scrolling
+     inside a dialog stops at its end instead of dragging the page. */
+  html.hub:has(.fixed.inset-0) { overflow: hidden; }
+  html.hub:has(.fixed.inset-0) body { overflow: hidden; }
+  html.hub .fixed.inset-0 .overflow-y-auto,
+  html.hub .fixed.inset-0.overflow-y-auto { overscroll-behavior: contain; }
+
+  /* Buttons in dialogs (shared with other departments, so styled from here)
+     get a thumb-sized height. */
+  html.hub .fixed.inset-0 button.rounded-full { min-height: 44px; }
+  html.hub .fixed.inset-0 button[aria-label="Close"] { min-width: 44px; display: inline-flex; align-items: center; justify-content: center; }
+
+  /* The tab bar steps aside while typing, so it never sits on top of the
+     keyboard or the box being typed in. */
+  html.hub:has(input:not([type="checkbox"]):not([type="radio"]):focus, textarea:focus) .hub-tabbar { display: none; }
+
+  /* Every pill button and pill link on a Hub page is at least 40px tall on a
+     phone, and an icon-only one at least 40px wide — Apple and Google both ask
+     for 44–48; 40 is the floor that keeps dense lists dense. */
+  html.hub .hub-clip button.rounded-full,
+  html.hub .hub-clip a.rounded-full { min-height: 40px; }
+  html.hub .hub-clip button.rounded-full[aria-label],
+  html.hub .hub-clip button.rounded-full[title] { min-width: 40px; }
+
+  /* Dates and times open the phone's own picker; keep them full height. */
+  html.hub input[type="date"], html.hub input[type="time"] { min-height: 44px; }
+}

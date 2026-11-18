@@ -1,0 +1,33 @@
+-- 0098_paid_days_from_join_date.sql — SUPERSEDED BY 0099. DO NOT RUN.
+--
+-- This file is deliberately empty of statements.
+--
+-- WHAT IT TRIED TO DO
+--   Stop paying somebody for the Sundays before they were hired, by counting
+--   days off only from their join date.
+--
+-- WHY IT FAILED
+--   It read s.join_date inside a subquery within an aggregate that grouped only
+--   by emp_id:
+--
+--     ERROR: subquery uses ungrouped column "s.join_date" from outer query
+--
+--   Postgres is right to refuse. Inside a GROUP BY, every column must either be
+--   grouped or aggregated, and join_date was neither. I was reaching out of the
+--   group to a value the group could not see.
+--
+-- WHY IT IS NOT WORTH FIXING
+--   0099 rewrote the same function around a different idea: instead of counting
+--   day types and then multiplying, it values EVERY DAY separately — what that
+--   day was worth, at the rate in force on it. join_date falls out naturally
+--   there, one row at a time, with no aggregate to fight:
+--
+--     when d.is_off then case when s.join_date is null
+--                              or d.day_date >= s.join_date then 1 else 0 end
+--
+--   The join-date rule, the mid-month raise and the worked holiday are all the
+--   same rule in 0099 rather than three special cases. Patching this file would
+--   leave two migrations doing the same job by different means, and the one that
+--   ran second would silently win.
+--
+-- RUN 0099. It contains everything this was for.

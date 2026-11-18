@@ -1,0 +1,404 @@
+"use client";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useLiveTables } from "@/lib/useLiveTables";
+import { ShoppingBag, Clock, Truck, Wallet, TrendingUp, Search, RefreshCw, Phone, MessageCircle, ChevronRight } from "lucide-react";
+import { supabase, isSupabaseConfigured } from "@/lib/supabase";
+import { AddOrder, ImportOrders } from "@/components/OrdersEntry";
+import ShopifySync from "@/components/ShopifySync";
+import { HubRange, Segmented, PageActions, useIsPhone, Sheet, Detail, waNumber } from "@/components/HubUI";
+import { rangeDates, num, rs } from "@/lib/dateRange";
+
+type Order = Record<string, unknown>;
+type View = "list" | "cities" | "status" | "stores";
+
+type OrdersSummary = {
+  total: number; pending: number; dispatched: number; cancelled: number;
+  delivered: number; returned: number; in_transit: number;
+  value: number; avg_value: number;
+};
+
+const STORES = [
+  { code: "ALL", label: "All stores" }, { code: "LM", label: "Little Minors" },
+  { code: "TS", label: "TopShop" }, { code: "TRZ", label: "Trenzee" },
+];
+/* Only the statuses an ORDER actually carries. "Delivered" and "Returned" were
+   listed here, but they belong to the courier's parcel, not the Shopify order —
+   no order ever holds them, so choosing either always showed "Nothing matches".
+   Delivery and returns are on the Shipments and Returns pages. */
+const STATUSES = ["All", "Pending", "Dispatched", "Cancelled"];
+const VIEWS: { key: View; label: string; short: string }[] = [
+  { key: "list", label: "Orders", short: "Orders" }, { key: "cities", label: "By City", short: "City" },
+  { key: "status", label: "By Status", short: "Status" }, { key: "stores", label: "By Store", short: "Store" },
+];
+
+function statusClass(s: string) {
+  switch (s) {
+    case "Dispatched": return "bg-periwinkle-soft text-periwinkle-strong dark:bg-white/[0.08] dark:text-periwinkle";
+    case "Delivered": return "bg-success-soft text-success dark:bg-white/[0.08] dark:text-success";
+    case "Cancelled": return "bg-danger-soft text-danger dark:bg-white/[0.08] dark:text-danger";
+    case "Returned": return "bg-panel text-muted dark:bg-white/[0.06] dark:text-[#a89f93]";
+    default: return "bg-amber-soft text-amber-strong dark:bg-white/[0.08] dark:text-amber";
+  }
+}
+
+/* PAID ONLINE vs CASH ON DELIVERY.
+ *
+ *   Shopify's financial_status is already synced into online_orders by both the
+ *   webhook and the hourly sync — the page simply never asked for it.
+ *
+ *   PAID means the customer paid on the website before the parcel moved. That
+ *   money is already yours; it is not a COD receivable and never appears in a
+ *   courier settlement.
+ *
+ *   PENDING is the normal state of a COD order and stays that way until the
+ *   courier collects and settles. It is not a problem, so it is shown quietly
+ *   rather than in a warning colour.
+ *
+ *   REFUNDED / VOIDED matter because the order still exists and still shows a
+ *   value, but the money went back. Those are called out.
+ */
+function payLabel(v: unknown) {
+  const s = String(v ?? "").toUpperCase();
+  const chip = (text: string, cls: string) => (
+    <span className={`inline-block rounded-full px-2.5 py-1 text-[11.5px] font-semibold ${cls}`}>{text}</span>
+  );
+  if (s === "PAID")                      return chip("Paid online", "bg-success-soft text-emerald-800");
+  if (s === "PARTIALLY_PAID")            return chip("Part paid",   "bg-amber-soft text-amber-900");
+  if (s === "REFUNDED")                  return chip("Refunded",    "bg-salmon-soft text-red-800");
+  if (s === "PARTIALLY_REFUNDED")        return chip("Part refund", "bg-salmon-soft text-red-800");
+  if (s === "VOIDED")                    return chip("Voided",      "bg-salmon-soft text-red-800");
+  if (s === "PENDING" || s === "")       return <span className="text-[12px] text-muted dark:text-[#a89f93]">COD</span>;
+  return <span className="text-[12px] text-muted dark:text-[#a89f93]">{s.replace(/_/g, " ").toLowerCase()}</span>;
+}
+
+export default function OrdersPage() {
+  const [orders, setOrders] = useState<Order[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState("");
+  const [store, setStore] = useState("ALL");
+  const [status, setStatus] = useState("All");
+  const [q, setQ] = useState("");
+  const [summary, setSummary] = useState<OrdersSummary | null>(null);
+  const [view, setView] = useState<View>("list");
+  const [preset, setPreset] = useState("30d");
+  const [cf, setCf] = useState(""); const [ct, setCt] = useState("");
+  /* The true number of matching orders, counted by the database — the list
+     itself stops at 1,000, so its length is not the answer. */
+  const [matchCount, setMatchCount] = useState<number | null>(null);
+  const [grouped, setGrouped] = useState<{ name: string; count: number; amt: number }[]>([]);
+  const phone = useIsPhone();
+  /* ONE ORDER, IN FULL. On a phone the table's eight columns do not fit, so a
+     tap opens the order in a sheet — with the address (fetched then, not for
+     every row) and buttons to call or WhatsApp the customer. */
+  const [open, setOpen] = useState<Order | null>(null);
+  const [more, setMore] = useState<Order | null>(null);
+  useEffect(() => {
+    setMore(null);
+    if (!open?.id || !supabase) return;
+    let live = true;
+    supabase.from("online_orders").select("address,item_count,tags,note,cancel_reason,payment_gateway,fulfillment_status")
+      .eq("id", open.id as number).maybeSingle()
+      .then(({ data }) => { if (live) setMore((data as Order) ?? {}); });
+    return () => { live = false; };
+  }, [open]);
+
+  /* Rows are for the TABLE only. The cards come from hub_orders_summary(),
+     because PostgREST caps a response at 1,000 rows whatever .limit() asks for
+     — so counting the returned array reported "1,000 orders" on every single
+     range, which was the size of the page, not the size of the business.
+     A request token keeps a slow older query from painting over a newer one. */
+  const reqId = useRef(0);
+
+  const load = useCallback(async (opts?: { silent?: boolean; figuresOnly?: boolean }) => {
+    if (!isSupabaseConfigured || !supabase) { setLoading(false); return; }
+    const my = ++reqId.current;
+    if (!opts?.silent) setLoading(true);
+    setErr("");
+    const [from, to] = rangeDates(preset, cf, ct);
+    const term = q.trim();
+    let q2 = supabase.from("online_orders")
+      .select("id,order_number,store_code,order_date,customer_name,phone,city,amount,status,financial_status", { count: "exact" })
+      // Newest first, and genuinely so. order_date alone is a DATE, so a day's
+      // worth of orders all tie and come back in whatever order the planner
+      // felt like — which is why the newest order was not reliably at the top.
+      // shopify_created_at breaks the tie by the actual minute it was placed.
+      .order("order_date", { ascending: false, nullsFirst: false })
+      .order("shopify_created_at", { ascending: false, nullsFirst: false })
+      .limit(1000);
+    // A search ignores the date window. Somebody typing an order number wants
+    // that order, not that order if it happens to fall in the selected period —
+    // and an order from 2025 falls outside every preset except All time.
+    if (!term) {
+      if (from) q2 = q2.gte("order_date", from);
+      if (to) q2 = q2.lte("order_date", to);
+    }
+    if (store !== "ALL") q2 = q2.eq("store_code", store);
+    /* The status filter runs in the database. Filtering the loaded page only
+       ever searched the first 1,000 orders. */
+    if (status !== "All") q2 = q2.eq("status", status);
+
+    if (term) {
+      // Strip a leading # so "#4715" and "4715" both find the order, and match
+      // the number anywhere so "TRZ1153" finds "#TRZ1153".
+      /* Double-quoted, because a comma or bracket in the search ("Khan, Ali")
+         is part of the filter syntax and broke the whole query. */
+      const bare = term.replace(/^#/, "").replace(/["\\]/g, "");
+      const v = `"%${bare}%"`;
+      q2 = q2.or(`order_number.ilike.${v},customer_name.ilike.${v},phone.ilike.${v},city.ilike.${v}`);
+    }
+
+    const by = view === "cities" ? "city" : view === "status" ? "status" : view === "stores" ? "store" : null;
+    const [rowsRes, sumRes, grpRes] = await Promise.all([
+      opts?.figuresOnly ? Promise.resolve({ data: null, error: null, count: null }) : q2,
+      supabase.rpc("hub_orders_summary", {
+        p_from: from, p_to: to, p_store: store === "ALL" ? null : store,
+      }),
+      /* BY CITY / STATUS / STORE are grouped in the database over every
+         matching order. They were grouped here from the first 1,000. */
+      by && !opts?.figuresOnly
+        ? supabase.rpc("hub_orders_breakdown", {
+            p_by: by, p_from: from, p_to: to, p_store: store === "ALL" ? null : store,
+            p_status: status, p_q: term || null,
+          })
+        : Promise.resolve({ data: null, error: null }),
+    ]);
+    if (my !== reqId.current) return;
+    const firstErr = rowsRes.error ?? sumRes.error ?? grpRes.error;
+    if (firstErr) setErr(firstErr.message);
+    // figuresOnly leaves the existing list in place rather than blanking it
+    if (!opts?.figuresOnly) {
+      setOrders((rowsRes.data as Order[]) ?? []);
+      setMatchCount(typeof rowsRes.count === "number" ? rowsRes.count : null);
+      setGrouped(((grpRes.data as { name: string; orders: number; value: number }[]) ?? [])
+        .map((g) => ({ name: g.name, count: Number(g.orders), amt: Number(g.value) })));
+    }
+    setSummary((sumRes.data as OrdersSummary[])?.[0] ?? null);
+    setLoading(false);
+  }, [preset, cf, ct, store, q, status, view]);
+  useEffect(() => { load(); }, [load]);
+
+  /* Shopify pushes order, payment and fulfilment changes to shopify-webhook,
+     which writes to online_orders. This is what turns that write into something
+     visible without a manual refresh. */
+  /* Only online_orders: a courier status change does not alter this list. */
+  /* A LIVE UPDATE REFRESHES THE FIGURES, NOT THE LIST.
+     Shopify fires several webhooks for one order — created, paid, fulfilled —
+     and each was pulling 1,000 rows into any open tab. The cards are database
+     aggregates and cost almost nothing; the row list is the expensive part and
+     the part that changes least. Refresh, or any filter change, pulls rows. */
+  useLiveTables(["online_orders"], useCallback(() => load({ silent: true, figuresOnly: true }), [load]));
+
+  /* SEARCH HAS TO ASK THE DATABASE, NOT THE PAGE.
+     This filtered the rows already loaded, and PostgREST returns at most 1,000
+     whatever is asked for. With 2,080 orders, searching for one that happened
+     to sit outside the first 1,000 returned "Nothing matches these filters" —
+     indistinguishable from the order not existing. Two real orders were
+     reported missing that way, and both were in the table all along.
+
+     Now a search term goes to the server and the date window is dropped with
+     it: somebody typing an order number is looking for that order, not for
+     that order within the last 30 days. */
+  /* Everything is filtered by the database now — store, status, search and
+     dates — so the rows that came back ARE the matching orders. */
+  const filtered = orders;
+
+  // every figure below is counted in the database, so it is the real total and
+  // not however many rows happened to fit in one response
+  const S = summary;
+  const cards = [
+    { label: "Orders", value: (S?.total ?? 0).toLocaleString(), Icon: ShoppingBag, bg: "bg-periwinkle-soft" },
+    { label: "Pending", value: (S?.pending ?? 0).toLocaleString(), Icon: Clock, bg: "bg-amber-soft" },
+    { label: "Dispatched", value: (S?.dispatched ?? 0).toLocaleString(), Icon: Truck, bg: "bg-lavender-soft" },
+    // Delivered is not a property of an order — the courier owns it, in
+    // online_logistics. Counting it on online_orders.status is why this card
+    // always read 0.
+    { label: "Delivered", value: (S?.delivered ?? 0).toLocaleString(), Icon: Truck, bg: "bg-success-soft" },
+    { label: "Order value", value: rs(Number(S?.value ?? 0)), Icon: Wallet, bg: "bg-pink-soft" },
+    { label: "Avg order", value: rs(Number(S?.avg_value ?? 0)), Icon: TrendingUp, bg: "bg-salmon-soft" },
+  ];
+
+  const maxCount = Math.max(...grouped.map((g) => g.count), 1);
+
+  return (
+    <div className="px-4 py-4 sm:px-6 md:px-10 md:py-8">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="hidden md:block">
+          <h1 className="text-[22px] font-extrabold tracking-tight text-ink dark:text-[#f4f1ea]">Orders</h1>
+          <p className="mt-1 text-[13px] text-muted dark:text-[#a89f93]">Online orders across Little Minors, TopShop &amp; Trenzee.</p>
+        </div>
+        <PageActions>
+          <ShopifySync onDone={load} />
+          <AddOrder onDone={load} />
+          <ImportOrders onDone={load} />
+          <button onClick={() => load()} className="flex items-center justify-center gap-2 rounded-full border border-line bg-surface px-4 py-2 text-[13px] font-semibold text-ink transition hover:bg-panel dark:border-white/10 dark:bg-white/[0.06] dark:text-white dark:hover:bg-white/[0.12]">
+            <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> Refresh
+          </button>
+        </PageActions>
+      </div>
+
+      <HubRange preset={preset} setPreset={setPreset} cf={cf} setCf={setCf} ct={ct} setCt={setCt}
+        right={
+          <>
+            <select value={store} onChange={(e) => setStore(e.target.value)} className="rounded-full border border-line bg-surface px-3.5 py-2 text-[13px] font-medium text-ink outline-none dark:border-white/10 dark:bg-white/[0.05] dark:text-white">
+              {STORES.map((s) => <option key={s.code} value={s.code}>{s.label}</option>)}
+            </select>
+            <select value={status} onChange={(e) => setStatus(e.target.value)} className="rounded-full border border-line bg-surface px-3.5 py-2 text-[13px] font-medium text-ink outline-none dark:border-white/10 dark:bg-white/[0.05] dark:text-white">
+              {STATUSES.map((s) => <option key={s}>{s}</option>)}
+            </select>
+            <div className="flex items-center gap-2 rounded-full border border-line bg-surface px-3.5 py-2 dark:border-white/10 dark:bg-white/[0.05]">
+              <Search size={15} className="text-hint dark:text-[#8a8175]" />
+              <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search order, name, phone" className="w-40 bg-transparent text-[13px] outline-none placeholder:text-hint sm:w-48 dark:text-[#f4f1ea] dark:placeholder:text-[#6f675c]" />
+            </div>
+          </>
+        } />
+
+      <div className="mt-5 grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
+        {cards.map(({ label, value, Icon, bg }) => (
+          <div key={label} className={`rounded-card border border-line ${bg} p-3.5 sm:p-4 dark:border-white/[0.06] dark:bg-[#201c17]`}>
+            <div className="flex items-center gap-2.5 sm:block">
+              <span className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-full bg-ink text-white sm:flex dark:bg-white dark:text-[#141414]"><Icon size={15} /></span>
+              <div className="min-w-0 sm:mt-3">
+                <div className="max-sm:truncate text-[15px] font-extrabold tabular-nums text-ink sm:text-[18px] dark:text-[#f4f1ea]">{loading ? "—" : value}</div>
+                <div className="text-[12px] font-medium text-muted dark:text-[#a89f93]">{label}</div>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <Segmented className="mt-5" value={view} onChange={setView} options={VIEWS} />
+
+      {phone ? (
+        <div className="mt-3 space-y-2">
+          {loading ? Array.from({ length: 6 }).map((_, i) => <div key={i} className="h-[76px] animate-pulse rounded-xl2 bg-panel/70 dark:bg-white/[0.05]" />)
+          : err ? <p className="px-4 py-10 text-center text-[13px] text-danger">Couldn&apos;t load orders: {err}</p>
+          : (view === "list" ? filtered.length === 0 : grouped.length === 0) ? <p className="px-4 py-14 text-center text-[13px] text-muted dark:text-[#a89f93]">{orders.length === 0 ? "No orders in this period — fills once the Shopify sync is live." : "Nothing matches these filters."}</p>
+          : view === "list" ? filtered.slice(0, 500).map((o, i) => (
+              <button key={i} type="button" onClick={() => setOpen(o)}
+                className="flex w-full items-center gap-3 rounded-xl2 border border-line bg-surface px-4 py-3 text-left transition active:scale-[0.99] active:bg-panel dark:border-white/[0.06] dark:bg-[#201c17] dark:active:bg-white/[0.05]">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="truncate text-[14.5px] font-bold text-ink dark:text-[#f4f1ea]">{String(o.order_number ?? "—")}</span>
+                    <span className="shrink-0 rounded-md bg-panel px-1.5 py-0.5 text-[10.5px] font-bold text-muted dark:bg-white/[0.06] dark:text-[#a89f93]">{String(o.store_code ?? "")}</span>
+                    <span className="ml-auto shrink-0 text-[14.5px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">{rs(num(o.amount))}</span>
+                  </div>
+                  <div className="mt-1 flex items-center gap-2">
+                    <span className="min-w-0 flex-1 truncate text-[13px] text-ink dark:text-[#e7e2d8]">{String(o.customer_name ?? "—")}</span>
+                    <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold ${statusClass(String(o.status))}`}>{String(o.status ?? "—")}</span>
+                  </div>
+                  <div className="mt-0.5 flex items-center gap-2 text-[12px] text-muted dark:text-[#a89f93]">
+                    <span className="truncate">{String(o.city ?? "—")} · {String(o.order_date ?? "—")}</span>
+                    <span className="ml-auto shrink-0">{payLabel(o.financial_status)}</span>
+                  </div>
+                </div>
+                <ChevronRight size={16} className="shrink-0 text-hint" />
+              </button>
+            ))
+          : grouped.map((g) => (
+              <div key={g.name} className="rounded-xl2 border border-line bg-surface px-4 py-3 dark:border-white/[0.06] dark:bg-[#201c17]">
+                <div className="flex items-baseline gap-3">
+                  <span className="min-w-0 flex-1 truncate text-[14px] font-bold text-ink dark:text-[#f4f1ea]">{g.name}</span>
+                  <span className="shrink-0 text-[12.5px] tabular-nums text-muted dark:text-[#a89f93]">{g.count.toLocaleString()} orders</span>
+                  <span className="shrink-0 text-[14px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">{rs(g.amt)}</span>
+                </div>
+                <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-panel dark:bg-white/[0.06]">
+                  <div className="h-full rounded-full bg-periwinkle" style={{ width: `${Math.max((g.count / maxCount) * 100, 2)}%` }} />
+                </div>
+              </div>
+            ))}
+          {!loading && !err && (view === "list" ? filtered.length > 0 : grouped.length > 0) && (
+            <p className="px-1 pt-1 text-[12px] text-hint dark:text-[#8a8175]">
+              {view === "list"
+                ? `Showing ${Math.min(filtered.length, 500).toLocaleString()} of ${(matchCount ?? filtered.length).toLocaleString()} orders${(matchCount ?? 0) > 500 ? " — narrow the dates or search to see the rest" : ""}`
+                : `${grouped.reduce((a, g) => a + g.count, 0).toLocaleString()} orders in ${grouped.length.toLocaleString()} groups`}
+            </p>
+          )}
+        </div>
+      ) : (
+      <div className="mt-4 overflow-hidden rounded-card border border-line bg-surface dark:border-white/[0.06] dark:bg-[#201c17]">
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[640px] text-left text-[13px]">
+            <thead>
+              <tr className="border-b border-line text-[11.5px] uppercase tracking-wide text-hint dark:border-white/[0.06] dark:text-[#8a8175]">
+                {view === "list" ? <><th className="px-4 py-3 font-semibold">Order #</th><th className="px-4 py-3 font-semibold">Store</th><th className="px-4 py-3 font-semibold">Date</th><th className="px-4 py-3 font-semibold">Customer</th><th className="px-4 py-3 font-semibold">City</th><th className="px-4 py-3 text-right font-semibold">Amount</th><th className="px-4 py-3 font-semibold">Payment</th><th className="px-4 py-3 font-semibold">Status</th></>
+                : <><th className="px-4 py-3 font-semibold">{view === "cities" ? "City" : view === "status" ? "Status" : "Store"}</th><th className="px-4 py-3 text-right font-semibold">Orders</th><th className="px-4 py-3 text-right font-semibold">Value</th><th className="hidden px-4 py-3 font-semibold sm:table-cell">Share</th></>}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-line dark:divide-white/[0.05]">
+              {loading ? (
+                Array.from({ length: 8 }).map((_, i) => <tr key={i}><td colSpan={view === "list" ? 8 : 4} className="px-4 py-3"><div className="h-4 animate-pulse rounded bg-panel/70 dark:bg-white/[0.05]" /></td></tr>)
+              ) : err ? (
+                <tr><td colSpan={view === "list" ? 8 : 4} className="px-4 py-12 text-center text-[13px] text-danger">Couldn&apos;t load orders: {err}</td></tr>
+              ) : (view === "list" ? filtered.length === 0 : grouped.length === 0) ? (
+                <tr><td colSpan={view === "list" ? 8 : 4} className="px-4 py-16 text-center text-[13px] text-muted dark:text-[#a89f93]">{orders.length === 0 ? "No orders in this period — fills once the Shopify sync is live." : "Nothing matches these filters."}</td></tr>
+              ) : view === "list" ? (
+                filtered.slice(0, 500).map((o, i) => (
+                  <tr key={i} className="text-ink transition hover:bg-panel/50 dark:text-[#e7e2d8] dark:hover:bg-white/[0.03]">
+                    <td className="px-4 py-3 font-semibold">{String(o.order_number ?? "—")}</td>
+                    <td className="px-4 py-3 text-muted dark:text-[#a89f93]">{String(o.store_code ?? "—")}</td>
+                    <td className="px-4 py-3 text-muted dark:text-[#a89f93]">{String(o.order_date ?? "—")}</td>
+                    <td className="px-4 py-3">{String(o.customer_name ?? "—")}</td>
+                    <td className="px-4 py-3 text-muted dark:text-[#a89f93]">{String(o.city ?? "—")}</td>
+                    <td className="px-4 py-3 text-right font-semibold tabular-nums">{rs(num(o.amount))}</td>
+                    <td className="px-4 py-3">{payLabel(o.financial_status)}</td>
+                    <td className="px-4 py-3"><span className={`inline-block rounded-full px-2.5 py-1 text-[11.5px] font-semibold ${statusClass(String(o.status))}`}>{String(o.status ?? "—")}</span></td>
+                  </tr>
+                ))
+              ) : (
+                grouped.map((g) => (
+                  <tr key={g.name} className="text-ink transition hover:bg-panel/50 dark:text-[#e7e2d8] dark:hover:bg-white/[0.03]">
+                    <td className="px-4 py-3 font-semibold">{g.name}</td>
+                    <td className="px-4 py-3 text-right tabular-nums">{g.count.toLocaleString()}</td>
+                    <td className="px-4 py-3 text-right font-semibold tabular-nums">{rs(g.amt)}</td>
+                    <td className="hidden px-4 py-3 sm:table-cell">
+                      <div className="h-2 w-full max-w-[140px] overflow-hidden rounded-full bg-panel dark:bg-white/[0.06]">
+                        <div className="h-full rounded-full bg-periwinkle" style={{ width: `${Math.max((g.count / maxCount) * 100, 2)}%` }} />
+                      </div>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+        {!loading && !err && (view === "list" ? filtered.length > 0 : grouped.length > 0) && (
+          <div className="border-t border-line px-4 py-3 text-[12px] text-hint dark:border-white/[0.06] dark:text-[#8a8175]">
+            {/* Says how many there really are, so a list that stops at 500 is
+                never mistaken for all of them. */}
+            {view === "list"
+              ? `Showing ${Math.min(filtered.length, 500).toLocaleString()} of ${(matchCount ?? filtered.length).toLocaleString()} orders${(matchCount ?? 0) > 500 ? " — narrow the dates or search to see the rest" : ""}`
+              : `${grouped.reduce((a, g) => a + g.count, 0).toLocaleString()} orders in ${grouped.length.toLocaleString()} groups`}
+          </div>
+        )}
+      </div>
+      )}
+
+      <Sheet open={!!open} onClose={() => setOpen(null)}
+        title={<span className="flex items-center gap-2">{String(open?.order_number ?? "")}<span className={`rounded-full px-2 py-0.5 text-[11.5px] font-semibold ${statusClass(String(open?.status))}`}>{String(open?.status ?? "")}</span></span>}
+        subtitle={`${String(open?.store_code ?? "")} · ${String(open?.order_date ?? "")}`}
+        footer={open && (open.phone ? (
+          <div className="grid grid-cols-2 gap-2">
+            <a href={`tel:${String(open.phone)}`} className="flex h-12 items-center justify-center gap-2 rounded-full bg-ink text-[14px] font-semibold text-white active:opacity-80 dark:bg-white dark:text-[#141414]"><Phone size={17} /> Call</a>
+            {waNumber(open.phone)
+              ? <a href={`https://wa.me/${waNumber(open.phone)}`} target="_blank" rel="noreferrer" className="flex h-12 items-center justify-center gap-2 rounded-full border border-line text-[14px] font-semibold text-ink active:bg-panel dark:border-white/10 dark:text-white"><MessageCircle size={17} /> WhatsApp</a>
+              : <span className="flex h-12 items-center justify-center rounded-full border border-line text-[13px] text-muted dark:border-white/10">No WhatsApp number</span>}
+          </div>) : undefined)}>
+        {open && (
+          <div>
+            <Detail label="Customer">{String(open.customer_name ?? "—")}</Detail>
+            <Detail label="Phone">{String(open.phone ?? "—")}</Detail>
+            <Detail label="City">{String(open.city ?? "—")}</Detail>
+            <Detail label="Address">{more ? String(more.address || "—") : <span className="text-hint">loading…</span>}</Detail>
+            <Detail label="Amount">{rs(num(open.amount))}</Detail>
+            <Detail label="Payment">{payLabel(open.financial_status)}</Detail>
+            {more?.item_count != null && <Detail label="Items">{String(more.item_count)}</Detail>}
+            {Array.isArray(more?.tags) && (more!.tags as string[]).length > 0 && <Detail label="Tags">{(more!.tags as string[]).join(", ")}</Detail>}
+            {more?.cancel_reason ? <Detail label="Cancelled">{String(more.cancel_reason)}</Detail> : null}
+            {more?.note ? <Detail label="Note">{String(more.note)}</Detail> : null}
+          </div>
+        )}
+      </Sheet>
+      {!isSupabaseConfigured && <p className="mt-4 text-center text-[12px] text-hint dark:text-[#8a8175]">Preview build · connect Supabase to load live orders.</p>}
+    </div>
+  );
+}
