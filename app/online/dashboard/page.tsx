@@ -194,7 +194,12 @@ export default function HubDashboard() {
   const [summary, setSummary] = useState<DashSummary | null>(null);
   const [counts, setCounts] = useState<DashCounts | null>(null);
   const [cancels, setCancels] = useState<DashCancels | null>(null);
-  const [salesNow, setSalesNow] = useState<SalesBreakdown | null>(null);
+  /* H318 (19 Nov 2026): the breakdown is now kept per store (LM / TS / TRZ /
+     ALL) so the card can show one COLUMN per store instead of just the
+     combined totals. salesPrev stays totals-only — the change arrows are only
+     meaningful against the ALL column; a per-store delta clutters the card
+     without adding much. */
+  const [salesNow, setSalesNow] = useState<Record<string, SalesBreakdown>>({});
   const [salesPrev, setSalesPrev] = useState<SalesBreakdown | null>(null);
 
   /* EVERY FIGURE ON THIS PAGE IS COUNTED IN THE DATABASE.
@@ -216,15 +221,25 @@ export default function HubDashboard() {
     const args = { p_from: from, p_to: to, p_store: store === "ALL" ? null : store };
 
     const prev = prevRange(from, to);
-    /* One row for the breakdown card: H317 if it exists, else H308's total row.
-       H316 (no returns/cancellations split) is skipped in favour of H308. */
-    const salesFor = async (a: typeof args): Promise<SalesBreakdown | null> => {
+    /* H318: fetch ALL store rows for the breakdown. The per-store split lives
+       in H308's hub_dashboard_shopify_sales_per_store. If that one is missing
+       (very old schema), fall back to H317's single-row hub_sales_breakdown as
+       the ALL column, with no per-store columns. */
+    const salesForAll = async (a: typeof args): Promise<Record<string, SalesBreakdown>> => {
+      const o = await supabase!.rpc("hub_dashboard_shopify_sales_per_store", a);
+      if (!o.error && Array.isArray(o.data)) {
+        const m: Record<string, SalesBreakdown> = {};
+        for (const r of (o.data as ShopifySalesRow[])) m[r.store_code] = fromH308(r);
+        return m;
+      }
       const r = await supabase!.rpc("hub_sales_breakdown", a);
       const row = r.error ? null : ((r.data as SalesBreakdown[] | null)?.[0] ?? null);
-      if (!r.error && (!row || row.returns !== undefined)) return row;
-      const o = await supabase!.rpc("hub_dashboard_shopify_sales_per_store", a);
-      const t = o.error ? null : (o.data as ShopifySalesRow[] | null)?.find((x) => x.is_total);
-      return t ? fromH308(t) : null;
+      return row ? { ALL: row } : {};
+    };
+    /* salesPrev stays totals-only — the change arrows read only the ALL column. */
+    const salesForTotal = async (a: typeof args): Promise<SalesBreakdown | null> => {
+      const m = await salesForAll(a);
+      return m.ALL ?? null;
     };
     const [sum, br, rt, cnt, cx, sNow, sPrev] = await Promise.all([
       supabase.rpc("hub_dashboard_summary", args),
@@ -232,8 +247,8 @@ export default function HubDashboard() {
       supabase.rpc("hub_return_rates", { p_months: 3 }),
       supabase.rpc("hub_dashboard_counts", args),
       supabase.rpc("hub_dashboard_cancellations", args),
-      salesFor(args),
-      prev ? salesFor({ ...args, p_from: prev[0], p_to: prev[1] }) : Promise.resolve(null),
+      salesForAll(args),
+      prev ? salesForTotal({ ...args, p_from: prev[0], p_to: prev[1] }) : Promise.resolve(null),
     ]);
     if (my !== reqId.current) return;          // superseded by a newer request
     const firstErr = sum.error ?? br.error ?? cnt.error;
@@ -527,31 +542,72 @@ export default function HubDashboard() {
       </div>
 
       {/* TOTAL SALES BREAKDOWN — Shopify's own finance card, line for line.
-          Respects the store picker above; the arrow compares with the same
-          number of days just before the chosen dates. */}
+          H318 (19 Nov 2026): one COLUMN per store (LM / TS / TRZ / All) so
+          each store reads on its own without the picker above. The arrow stays
+          on the All-stores column only — a per-store delta added clutter with
+          no payoff. On a narrow screen the table scrolls sideways rather than
+          wrapping, so every row stays aligned. */}
       <div className="mt-3 rounded-card border border-line bg-surface p-3 sm:mt-5 sm:p-5 dark:border-white/[0.06] dark:bg-[#201c17]">
         <h3 className="text-[13.5px] font-bold text-ink sm:text-[14px] dark:text-[#f4f1ea]">Total sales breakdown</h3>
         <p className="mt-0.5 text-[12px] text-muted dark:text-[#a89f93]">
-          Breakdown of amount spent (subtotal, taxes, shipping, sales reversals, discounts, fees, etc.)
+          Breakdown of amount spent (subtotal, taxes, shipping, sales reversals, discounts, fees, etc.) — one column per store, All stores on the right.
         </p>
-        <div className="mt-3">
-          {BREAKDOWN_ROWS.map((row, i) => {
-            const v = Number(salesNow?.[row.key] ?? 0);
-            const p = salesPrev ? Number(salesPrev[row.key] ?? 0) : null;
+        {(() => {
+          /* The columns, in the owner's preferred order: Little Minors, TopShop,
+             Trenzee, then the totals. Only render the stores we have data for,
+             to avoid an empty Trenzee column when no TRZ orders fell in the
+             chosen dates. */
+          const COLS: { code: string; label: string }[] = [
+            { code: "LM",  label: "Little Minors" },
+            { code: "TS",  label: "TopShop" },
+            { code: "TRZ", label: "Trenzee" },
+            { code: "ALL", label: "All stores" },
+          ].filter((c) => salesNow[c.code] !== undefined || c.code === "ALL");
+          const cell = (code: string, key: keyof SalesBreakdown, neg?: boolean) => {
+            const sb = salesNow[code];
+            const v = sb ? Number(sb[key] ?? 0) : 0;
             return (
-              <div key={row.key}
-                className={`flex items-center justify-between gap-3 rounded-lg px-2.5 py-2.5 ${i % 2 ? "bg-panel/70 dark:bg-white/[0.04]" : ""}`}>
-                <span className="text-[13.5px] text-blue-700 dark:text-[#9db8f0]">{row.label}</span>
-                <span className="flex items-center gap-3">
-                  <b className="whitespace-nowrap text-[13.5px] tabular-nums text-ink dark:text-[#f4f1ea]">
-                    {loading ? "—" : (row.neg && v > 0 ? "−" : "") + rs(v)}
-                  </b>
-                  <Change now={v} prev={loading ? null : p} />
-                </span>
-              </div>
+              <td key={code} className={`whitespace-nowrap px-3 py-2 text-right tabular-nums ${code === "ALL" ? "bg-panel/60 font-semibold dark:bg-white/[0.04]" : "text-ink dark:text-[#f4f1ea]"}`}>
+                {loading ? "—" : (neg && v > 0 ? "−" : "") + rs(v)}
+              </td>
             );
-          })}
-        </div>
+          };
+          return (
+            <div className="mt-3 -mx-3 overflow-x-auto sm:-mx-5">
+              <table className="w-full min-w-[520px] text-[13px]">
+                <thead>
+                  <tr className="border-b border-line text-[11px] uppercase tracking-wide text-muted dark:border-white/[0.06] dark:text-[#a89f93]">
+                    <th className="sticky left-0 z-10 bg-surface px-3 py-2 text-left font-semibold dark:bg-[#201c17]">Line</th>
+                    {COLS.map((c) => (
+                      <th key={c.code} className={`whitespace-nowrap px-3 py-2 text-right font-semibold ${c.code === "ALL" ? "bg-panel/60 text-ink dark:bg-white/[0.04] dark:text-[#f4f1ea]" : ""}`}>
+                        {c.label}
+                      </th>
+                    ))}
+                    {/* The vs-previous arrow only on the All column, below the header. */}
+                    <th className="px-2 py-2 text-right text-[11px] font-semibold">vs prev</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {BREAKDOWN_ROWS.map((row, i) => {
+                    const vAll = Number(salesNow["ALL"]?.[row.key] ?? 0);
+                    const p = salesPrev ? Number(salesPrev[row.key] ?? 0) : null;
+                    return (
+                      <tr key={row.key} className={i % 2 ? "bg-panel/40 dark:bg-white/[0.02]" : ""}>
+                        <td className="sticky left-0 z-10 bg-inherit px-3 py-2 text-left text-[13.5px] text-blue-700 dark:text-[#9db8f0]">
+                          {row.label}
+                        </td>
+                        {COLS.map((c) => cell(c.code, row.key, row.neg))}
+                        <td className="px-2 py-2 text-right">
+                          <Change now={vAll} prev={loading ? null : p} />
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          );
+        })()}
       </div>
 
       <div className="mt-4 grid gap-4 lg:grid-cols-2">
