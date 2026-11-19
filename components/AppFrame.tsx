@@ -23,6 +23,7 @@ import "../app/kk-mobile.css";
    1024px and up: the computer layout is unchanged. */
 function usesOwnPhoneLayer(pathname: string) {
   return pathname === "/me" ||
+    pathname === "/wage-desk" ||
     pathname === "/online" || pathname.startsWith("/online/") ||
     pathname === "/retail" || pathname.startsWith("/retail/");
 }
@@ -118,6 +119,9 @@ export default function AppFrame({ children }: { children: React.ReactNode }) {
     // The employee portal is the whole app for the person using it. No sidebar,
     // no department chrome — there is nowhere else for them to go.
     pathname === "/me" ||
+    // K199 — the wage desk is a portal of its own, same reasoning as /me: the
+    // wage supervisor has nowhere else to go, so no factory sidebar.
+    pathname === "/wage-desk" ||
     pathname === "/online" || pathname.startsWith("/online/") ||
     pathname === "/retail" || pathname.startsWith("/retail/");
   const [authReady, setAuthReady] = useState(false);

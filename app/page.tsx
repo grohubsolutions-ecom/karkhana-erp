@@ -2,7 +2,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Factory, ShoppingBag, Store, ShoppingCart, ShieldCheck, ChevronRight, LogOut } from "lucide-react";
+import { Factory, ShoppingBag, Store, ShoppingCart, ShieldCheck, Wallet, ChevronRight, LogOut } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import ThemeToggle from "@/components/ThemeToggle";
 import { usePermissions } from "@/lib/usePermissions";
@@ -22,6 +22,11 @@ const DEPARTMENTS = [
        Karkhana admin are Karkhana people, and neither needs reports. */
     needs: ["inventory.view", "production.view", "reports.view", "employees.manage", "payments.manage",
             "khana.view", "karkhana.admin"] },
+  /* K199 — the daily wage desk is its own portal. The wage supervisor has
+     only this box, so he is taken straight into it (see below); the owner
+     sees it beside the other departments. */
+  { href: "/wage-desk", title: "Daily Wage Desk", subtitle: "Karkhana daily workers · check in/out & cash pay", icon: Wallet, light: "bg-success-soft", chip: "dark:bg-success",
+    needs: ["wages.desk"] },
   { href: "/online", title: "Hub Department", subtitle: "Online orders · Little Minors, TopShop, Trenzee", icon: ShoppingBag, light: "bg-periwinkle-soft", chip: "dark:bg-periwinkle",
     needs: ["hub.dashboard.view", "hub.orders.view", "hub.logistics.view", "hub.finance.view", "hub.attendance.view"] },
   /* These two permissions never existed. The table has retail.access and, since
@@ -74,13 +79,22 @@ export default function DepartmentChooser() {
     if (onlyKarkhana) router.replace(landing);
   }, [onlyKarkhana, landing, router]);
 
+  /* ONE DOOR, NO LOBBY — for the wage supervisor (K199).
+     His login opens the wage desk and nothing else. Without this he fell
+     through to /me ("Not linked yet"), and on a phone every cold open of the
+     app lands here first, so a bookmark to /wage-desk never survived. */
+  const onlyWageDesk = ready && visible.length === 1 && visible[0].href === "/wage-desk";
+  useEffect(() => {
+    if (onlyWageDesk) router.replace("/wage-desk");
+  }, [onlyWageDesk, router]);
+
   useEffect(() => {
     if (!isSupabaseConfigured || !supabase) return;
     supabase.auth.getSession().then(({ data }) => setEmail(data.session?.user?.email ?? ""));
   }, []);
 
   /* Nothing to choose — do not flash a one-box chooser on the way through. */
-  if (onlyKarkhana) return <div className="min-h-screen bg-canvas dark:bg-[#17140f]" />;
+  if (onlyKarkhana || onlyWageDesk) return <div className="min-h-screen bg-canvas dark:bg-[#17140f]" />;
 
   async function signOut() {
     if (supabase) await supabase.auth.signOut();

@@ -78,6 +78,10 @@ export const ROUTE_PERMS: Record<string, string[] | null> = {
   "/administration/attendance": ["employees.manage"],
   /* The Karkhana admin's own room: Karkhana logins and job roles only. */
   "/karkhana/team": ["karkhana.admin"],
+  /* K198/K199 — the daily wage desk. Its own portal: Karkhana daily-wage
+     workers, their punches and the cash paid. The database refuses everyone
+     without wages.desk; super admins pass as always. */
+  "/wage-desk": ["wages.desk"],
 
   /* THE HUB. Until now not one /online/* path was listed here, so every Hub
      page was open to anyone who could log in — Finance included. The
@@ -128,9 +132,9 @@ export function karkhanaLanding(can: (req: string[] | null) => boolean): string 
 }
 
 /* Anything that opens a door OTHER than Karkhana on the home screen: the Hub,
-   FS Traders, Administration. Someone with none of these has one department
-   only, so "All departments" would lead him in a circle. Mirrors the `needs`
-   lists on the home screen (app/page.tsx). */
+   FS Traders, Administration, the wage desk. Someone with none of these has
+   one department only, so "All departments" would lead him in a circle.
+   Mirrors the `needs` lists on the home screen (app/page.tsx). */
 export const OTHER_DEPARTMENT_PERMS = [
   "hub.dashboard.view", "hub.orders.view", "hub.logistics.view", "hub.finance.view", "hub.attendance.view",
   "retail.access", "retail.dashboard.view", "retail.sales.view", "retail.cashbook.view",
@@ -138,6 +142,7 @@ export const OTHER_DEPARTMENT_PERMS = [
   "carrefour.view", "carrefour.upload", "carrefour.orders.view", "carrefour.orders.manage",
   "carrefour.accounts.view", "carrefour.accounts.manage",
   "users.manage", "roles.manage",
+  "wages.desk",
 ];
 
 export function hasAny(perms: Set<string>, required: string[] | null): boolean {
