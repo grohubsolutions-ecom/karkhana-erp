@@ -451,6 +451,67 @@ export default function CprDetail({ row, onClose }: { row: Row; onClose: () => v
           </div>
         </div>
 
+        {/* THE BANK PICTURE — PostEx only (H320, 19 Nov 2026).
+            PostEx pays in two halves and only one of them is the CPR Net Total.
+            Before H320 the panel showed the Net Total alone, so on
+            CPR-ILZG6757435 it read "229,048.71" while the bank got 315,030 —
+            the 85,981 gap was the returns' upfront that PostEx had paid at
+            dispatch and is now clawing back through this CPR's Reserve. These
+            four lines make the whole payout visible.
+            Older CPRs imported before H320 have 0 in all four columns — in
+            that case the section is hidden, not shown empty, so the panel
+            still looks right until the CPR is re-imported. */}
+        {(() => {
+          if (isOwnEx) return null;
+          const upT   = n(row.upfront_total);
+          const resT  = n(row.reserve_total);
+          const upDel = n(row.upfront_delivered);
+          const upRet = n(row.upfront_returns);     // stored as magnitude
+          if (upT === 0 && resT === 0) return null;  // pre-H320 row
+          const bank = upT + resT;
+          return (
+            <div className="mt-4 rounded-card border border-line p-3.5 dark:border-white/10">
+              <div className="flex items-baseline justify-between">
+                <div className="text-[13px] font-semibold text-ink dark:text-[#f4f1ea]">Bank picture</div>
+                <div className="text-[11.5px] text-hint dark:text-[#8a8175]">what hit your account for this CPR</div>
+              </div>
+              <div className="-mx-4 mt-2 overflow-x-auto px-4 sm:mx-0 sm:px-0">
+                <table className="w-full text-[13px]">
+                  <tbody>
+                    <tr className="border-b border-line/60 dark:border-white/[0.06]">
+                      <td className="py-1.5 text-muted dark:text-[#a89f93]">Already received upfront (at dispatch)</td>
+                      <td className="py-1.5 text-right tabular-nums font-semibold text-ink dark:text-[#f4f1ea]">{money(upT)}</td>
+                    </tr>
+                    {upDel !== 0 && (
+                      <tr>
+                        <td className="py-0.5 pl-4 text-[12px] text-hint dark:text-[#8a8175]">· for delivered parcels</td>
+                        <td className="py-0.5 text-right tabular-nums text-[12px] text-hint dark:text-[#8a8175]">{money(upDel)}</td>
+                      </tr>
+                    )}
+                    {upRet !== 0 && (
+                      <tr>
+                        <td className="py-0.5 pl-4 text-[12px] text-hint dark:text-[#8a8175]">· for returned parcels (being clawed back here)</td>
+                        <td className="py-0.5 text-right tabular-nums text-[12px] text-hint dark:text-[#8a8175]">{money(upRet)}</td>
+                      </tr>
+                    )}
+                    <tr className="border-b border-line/60 dark:border-white/[0.06]">
+                      <td className="py-1.5 text-muted dark:text-[#a89f93]">Reserve settled with this CPR</td>
+                      <td className="py-1.5 text-right tabular-nums font-semibold text-ink dark:text-[#f4f1ea]">{money(resT)}</td>
+                    </tr>
+                    <tr>
+                      <td className="pt-2 text-[13px] font-bold text-ink dark:text-[#f4f1ea]">Bank total for this CPR</td>
+                      <td className="pt-2 text-right text-[15px] font-extrabold tabular-nums text-ink dark:text-[#f4f1ea]">{money(bank)}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <div className="mt-1.5 text-[11.5px] text-hint dark:text-[#8a8175]">
+                Upfront was paid earlier (at dispatch, ~70% of COD). Reserve is the balance paid with this CPR and already has the returns' upfront taken out — that is why Reserve is often small, and why Bank total matches the PostEx statement, not Net Total.
+              </div>
+            </div>
+          );
+        })()}
+
         {!loading && parcels.length > 0 && (
           <div className="mt-4 rounded-card border border-line p-3.5 dark:border-white/10">
             <div className="text-[13px] font-semibold text-ink dark:text-[#f4f1ea]">Reconcile against Shopify</div>

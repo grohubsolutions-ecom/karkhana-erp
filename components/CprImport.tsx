@@ -47,6 +47,13 @@ import Modal, { btnPrimary, btnGhost } from "@/components/Modal";
 type CprRow = {
   tracking_id: string; status: string;
   cod: number; net: number; fee: number; tax: number; paid_on: string | null;
+  /* H320 (19 Nov 2026) — PostEx CPRs only. Each row carries two extra numbers:
+       upfront  = v[1], the ~70% of COD PostEx paid us at dispatch (every parcel)
+       reserve  = v[2], the balance PostEx is paying with THIS CPR (delivered +
+                  returns clawback — often small, sometimes negative on returns)
+     Bank total = Upfront + Reserve  (what hit the account across both payouts)
+     OwnEx has no upfront, so these stay undefined on OwnEx rows. */
+  upfront?: number; reserve?: number;
 };
 /** One settlement. A PostEx CPR export can hold 93 of these in a single PDF. */
 type Batch = {
@@ -57,9 +64,14 @@ type Batch = {
   declaredNet?: number;            // the file's own net, computed from its summary
   computedNet?: number;            // the same figure summed from the rows
   /* The receipt's own working, stored so the page can show the calculation the
-     way the courier does instead of one unexplained number. */
+     way the courier does instead of one unexplained number.
+     H320: upfront_* / reserve_* sum the per-row columns above, split by
+     delivered vs returned, so the panel can show "bank got X, this CPR covers Y,
+     earlier upfront covered Z". PostEx-only; OwnEx leaves them at 0. */
   summary?: { gross: number; shipping: number; gst: number;
-              wh_income: number; wh_sales: number; net: number };
+              wh_income: number; wh_sales: number; net: number;
+              upfront_total?: number; reserve_total?: number;
+              upfront_delivered?: number; upfront_returns?: number };
   courier: "PostEx" | "OwnEx";
   problem?: string;                // set when the file contradicts itself
 };
@@ -263,9 +275,15 @@ function parsePostExCpr(flat: string): Batch[] {
       if (!ns || ns.length < 9) continue;
       // COD · Upfront · Reserve · Shipping · UpfrontChg · GST · WHinc · WHsales · Net
       const v = ns.slice(0, 9).map((x) => Number(x.replace(/,/g, "").replace("(", "-").replace(")", "")));
+      /* H320: keep the per-parcel upfront (v[1]) and reserve (v[2]). Signs are
+         preserved — on a returned row the reserve is negative (clawback) and
+         the upfront is still positive (it was paid earlier). The panel wants
+         the magnitude of the returns' upfront for display; summation keeps the
+         raw value. */
       rows.push({
         tracking_id: m[1], status: st[1],
         cod: n2(v[0]), fee: n2(v[3] + v[5]), tax: n2(v[6] + v[7]), net: n2(v[8]),
+        upfront: n2(v[1]), reserve: n2(v[2]),
         paid_on: `${d[3]}-${d[2]}-${d[1]}`,
       });
     }
@@ -283,6 +301,21 @@ function parsePostExCpr(flat: string): Batch[] {
     else if (declaredNet !== undefined && Math.abs(declaredNet - computedNet) > 1)
       problem = `rows total ${computedNet}, the summary says ${declaredNet}`;
 
+    /* H320: sum the per-row upfront/reserve, split by delivered vs returned.
+         upfront_total     = Σ upfront, every row (what PostEx paid at dispatch)
+         reserve_total     = Σ reserve, every row (what this CPR is paying now)
+         upfront_delivered = Σ upfront, delivered rows only
+         upfront_returns   = Σ upfront, returned rows only (stored as magnitude —
+                             these are the returns PostEx paid for earlier and
+                             is now clawing back, so the panel can show the
+                             clawback line clearly).
+       bank_total = upfront_total + reserve_total, computed on read. */
+    const sumUp     = n2(rows.reduce((t, r) => t + (r.upfront ?? 0), 0));
+    const sumRes    = n2(rows.reduce((t, r) => t + (r.reserve ?? 0), 0));
+    const sumUpDel  = n2(rows.filter((r) => isDelivered(r.status))
+                           .reduce((t, r) => t + (r.upfront ?? 0), 0));
+    const sumUpRet  = n2(Math.abs(rows.filter((r) => !isDelivered(r.status))
+                           .reduce((t, r) => t + (r.upfront ?? 0), 0)));
     out.push({ ref, date: `${d[3]}-${d[2]}-${d[1]}`, rows, courier: "PostEx",
                declaredCount: ship ? Number(ship[1]) : undefined,
                declaredNet, computedNet, problem,
@@ -290,6 +323,8 @@ function parsePostExCpr(flat: string): Batch[] {
                  gross: unParen(tot[1]), shipping: unParen(ship[2]), gst: unParen(gst[1]),
                  wh_income: unParen(whi[1]), wh_sales: unParen(whs[1]),
                  net: declaredNet ?? 0,
+                 upfront_total: sumUp, reserve_total: sumRes,
+                 upfront_delivered: sumUpDel, upfront_returns: sumUpRet,
                } : undefined });
   }
   if (duplicates) out.push({ ref: "__dupes__", date: "", rows: [], courier: "PostEx",
