@@ -55,7 +55,9 @@ export default function Login() {
     if (error) {
       setResetErr(/rate|seconds|too many/i.test(error.message)
         ? "A link was sent very recently. Wait a minute, check your inbox and spam folder, then try again."
-        : error.message);
+        : /sending|smtp|mail/i.test(error.message)
+          ? "The reset email could not be sent right now. Ask the office to reset your password (Administration → Users → Reset) — you'll choose your own on your next sign-in."
+          : error.message);
       return;
     }
     const [u, d] = String(email).split("@");
