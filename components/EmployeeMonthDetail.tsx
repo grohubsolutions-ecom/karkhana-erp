@@ -126,6 +126,9 @@ export default function EmployeeMonthDetail({
   const extraByDay = new Map(extras.map((x) => [Number(x.day.slice(8, 10)), Number(x.portion)]));
   // From the database: a local salary ÷ 30 × days cannot see a mid-month raise.
   const gross = Number(row.gross ?? 0);
+  /* H321: gross already has the minus-hours cut taken off. The breakdown
+     starts from the days' pay BEFORE it, so the cut is seen coming off. */
+  const daysPay = gross + Number(row.hours_deduction ?? 0);
   const given = Number(row.given_days ?? 0);
   const cut = Number(row.advance_cut ?? row.advances ?? 0);
   const carried = Number(row.carried ?? 0);
@@ -347,7 +350,7 @@ export default function EmployeeMonthDetail({
           <div className="space-y-1 text-muted dark:text-[#a89f93]">
             <div className="flex justify-between">
               <span>Earned over {dayCount(row.counted_days)} counted days, at each day&rsquo;s own rate</span>
-              <span className="tabular-nums">{rs(gross)}</span>
+              <span className="tabular-nums">{rs(daysPay)}</span>
             </div>
             {Number(row.extra_days) > 0 && (
               <div className="text-[11.5px] text-emerald-700">
@@ -369,7 +372,7 @@ export default function EmployeeMonthDetail({
               <div className={`flex justify-between ${Number(row.time_balance) < 0 ? "text-red-700" : Number(row.time_balance) > 0 ? "text-emerald-700" : ""}`}>
                 <span>
                   Hours balance {Number(row.time_balance) > 0 ? "+" : Number(row.time_balance) < 0 ? "− " : ""}{hm(row.time_balance)} — worked {hm(row.worked_minutes)} of {hm(row.required_minutes)} over {row.balance_days} days
-                  {Number(row.hours_deduction) > 0 ? " · minus hours cut, already off Earned" : " · plus or even, nothing cut"}
+                  {Number(row.hours_deduction) > 0 ? " · minus hours cut from salary" : " · plus or even, nothing cut"}
                 </span>
                 <span className="tabular-nums">{Number(row.hours_deduction) > 0 ? `− ${rs(row.hours_deduction)}` : "Rs 0"}</span>
               </div>

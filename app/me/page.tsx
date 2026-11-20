@@ -187,6 +187,8 @@ export default function MyPortal() {
      That local sum cannot know a rate changed mid-month, which is precisely how
      Hamza Khan's August was overstated by Rs 7,700. */
   const gross = Number(pay?.gross ?? 0);
+  /* H321: the days' pay before the minus-hours cut, for the breakdown. */
+  const daysPay = gross + Number(pay?.hours_deduction ?? 0);
   const given = Number(pay?.given_days ?? 0);
   /* What actually comes off: the amount chosen when the month was paid, or —
      before it is paid — the whole advance. */
@@ -417,7 +419,7 @@ export default function MyPortal() {
                       </span>
                     )}
                   </dt>
-                  <dd className="shrink-0 font-semibold tabular-nums text-ink dark:text-[#e7e2d8]">{money(gross)}</dd>
+                  <dd className="shrink-0 font-semibold tabular-nums text-ink dark:text-[#e7e2d8]">{money(daysPay)}</dd>
                 </div>
                 {/* Everything that came off, or could have, said out loud. */}
                 {Number(pay?.absent) > 0 && (
@@ -444,7 +446,7 @@ export default function MyPortal() {
                       <span className={`ml-1.5 font-semibold ${hTone(ht.balance)}`}>{signed(ht.balance)}</span>
                       <span className="mt-0.5 block text-[11.5px] text-hint dark:text-[#8a8175]">
                         {Number(pay?.hours_deduction) > 0
-                          ? "month is in minus — those hours are cut, already off the earned figure above"
+                          ? "month is in minus — those hours are cut from your pay"
                           : "plus or even — nothing cut (plus hours add no pay)"}; see Your Hours below
                       </span>
                     </dt>
