@@ -34,19 +34,37 @@ export default function Login() {
     else router.push("/");
   }
 
+  /* FORGOT PASSWORD — N3.
+     Supabase answers "OK" to a reset for an email that has no account, and
+     sends nothing. So a staff member who typed the wrong address — or their
+     phone number, which is how most of them sign in — was told "sent" and
+     waited for an email that was never coming. The address (or phone) is now
+     resolved to the account first, exactly as sign-in does, and the screen
+     says which inbox the link went to. */
+  const [resetTo, setResetTo] = useState("");
   async function sendReset() {
     setResetErr("");
     if (!supabase) return;
-    if (!resetEmail.trim() || !resetEmail.includes("@")) { setResetErr("Enter the email address on your account."); return; }
+    const id = resetEmail.trim();
+    if (!id) { setResetErr("Enter the email or phone number on your account."); return; }
     setResetBusy(true);
-    const { error } = await supabase.auth.resetPasswordForEmail(resetEmail.trim(), { redirectTo: `${window.location.origin}/reset-password` });
+    const { data: email, error: rpcErr } = await supabase.rpc("resolve_login_email", { p_identifier: id });
+    if (rpcErr || !email) { setResetBusy(false); setResetErr("No account found for that email or phone number."); return; }
+    const { error } = await supabase.auth.resetPasswordForEmail(String(email), { redirectTo: `${window.location.origin}/reset-password` });
     setResetBusy(false);
-    if (error) { setResetErr(error.message); return; }
+    if (error) {
+      setResetErr(/rate|seconds|too many/i.test(error.message)
+        ? "A link was sent very recently. Wait a minute, check your inbox and spam folder, then try again."
+        : error.message);
+      return;
+    }
+    const [u, d] = String(email).split("@");
+    setResetTo(`${u.slice(0, 2)}${"•".repeat(Math.max(1, u.length - 2))}@${d}`);
     setResetSent(true);
   }
 
   function switchMode(m: Mode) { setMode(m); setErr(""); setIdentifier(""); }
-  function openForgot() { setForgot(true); setResetSent(false); setResetErr(""); setResetEmail(mode === "email" ? identifier.trim() : ""); }
+  function openForgot() { setForgot(true); setResetSent(false); setResetErr(""); setResetEmail(identifier.trim()); }
   function closeForgot() { setForgot(false); setResetSent(false); setResetErr(""); }
 
   const field = "mt-1.5 flex items-center gap-2 rounded-xl2 border border-line bg-canvas px-3.5 py-2.5 dark:border-white/10 dark:bg-white/[0.05]";
@@ -76,13 +94,13 @@ export default function Login() {
                 resetSent ? (
                   <div className="mt-4 flex gap-2.5 rounded-xl2 bg-panel px-4 py-4 text-[13px] leading-relaxed text-ink/80 dark:bg-white/[0.05] dark:text-[#d8d2c8]">
                     <MailCheck size={18} className="mt-0.5 shrink-0 text-success" />
-                    <span>We&apos;ve sent a reset link to <b>{resetEmail}</b>. Open the email and click the link to set a new password. If you don&apos;t see it, check your spam folder.</span>
+                    <span>We&apos;ve sent a reset link to <b>{resetTo || resetEmail}</b>. Open the email and click the link to set a new password. If you don&apos;t see it, check your spam folder.</span>
                   </div>
                 ) : (
                   <>
-                    <p className="mt-1 text-[13px] text-muted dark:text-[#a89f93]">Enter the email on your account and we&apos;ll send a link to set a new password.</p>
-                    <label className="mt-5 block text-[12px] font-medium text-muted dark:text-[#a89f93]">Email</label>
-                    <div className={field}><Mail size={16} className="text-hint dark:text-[#8a8175]" /><input type="email" value={resetEmail} onChange={(e) => setResetEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && sendReset()} placeholder="you@company.com" className={inputCls} /></div>
+                    <p className="mt-1 text-[13px] text-muted dark:text-[#a89f93]">Enter the email or phone number you sign in with, and we&apos;ll email you a link to set a new password.</p>
+                    <label className="mt-5 block text-[12px] font-medium text-muted dark:text-[#a89f93]">Email or phone</label>
+                    <div className={field}><Mail size={16} className="text-hint dark:text-[#8a8175]" /><input type="text" inputMode="email" autoComplete="username" value={resetEmail} onChange={(e) => setResetEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && sendReset()} placeholder="you@company.com or 03xx…" className={inputCls} /></div>
                     {resetErr && <p className="mt-3 text-[12.5px] font-medium text-danger">{resetErr}</p>}
                     <button onClick={sendReset} disabled={resetBusy} className="mt-5 w-full rounded-xl2 bg-ink py-3 text-[14px] font-semibold text-white transition hover:opacity-90 disabled:opacity-50 dark:bg-white dark:text-[#141414]">{resetBusy ? "Sending…" : "Send reset link"}</button>
                   </>

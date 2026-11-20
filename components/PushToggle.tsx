@@ -46,14 +46,15 @@ export default function PushToggle({ dark }: { dark?: boolean }) {
 
   return (
     <div className="relative">
-      <button onClick={toggle} disabled={disabled}
+      <button onClick={toggle} disabled={disabled} aria-label={label}
         title={state === "blocked" ? "Turn notifications back on for this site in your browser settings"
              : state === "not-configured" ? "Phone alerts are not switched on by the office yet"
              : state === "on" ? "Tap to stop alerts on this phone" : "Tap to get the bell on this phone"}
-        className={`flex h-9 items-center gap-1.5 rounded-full border px-3 text-[12px] font-semibold transition disabled:opacity-60 ${
+        className={`flex h-9 min-w-9 items-center justify-center gap-1.5 rounded-full border px-2.5 text-[12px] sm:px-3 font-semibold transition disabled:opacity-60 ${
           state === "on" ? onCls : base}`}>
         {busy ? <Loader2 size={14} className="animate-spin" /> : <Icon size={14} />}
-        <span className="whitespace-nowrap">{label}</span>
+        {/* Icon only on a phone: the words pushed the person's name off a 360px screen. */}
+        <span className="hidden whitespace-nowrap sm:inline">{label}</span>
       </button>
       {err && (
         <p className="absolute right-0 top-full z-10 mt-1 w-56 rounded-xl2 border border-line bg-surface p-2 text-[11.5px] text-danger shadow-card dark:border-white/10 dark:bg-[#201c17]">

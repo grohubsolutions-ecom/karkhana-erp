@@ -48,7 +48,12 @@ export default function RootLayout({
         <script
           dangerouslySetInnerHTML={{
             __html:
-              "try{if(localStorage.getItem('kk-theme')==='dark')document.documentElement.classList.add('dark');}catch(e){}",
+              "try{if(localStorage.getItem('kk-theme')==='dark')document.documentElement.classList.add('dark');}catch(e){}" +
+              /* A password-reset link that Supabase sends to the wrong page (its
+                 Site URL instead of /reset-password, when that address is not on
+                 the allowed list) would otherwise just sign the person in without
+                 ever asking for a new password. Catch it before anything runs. */
+              "try{var h=location.hash;if(/type=recovery|error_code=otp_expired/.test(h)&&location.pathname!=='/reset-password')location.replace('/reset-password'+h);}catch(e){}",
           }}
         />
       </head>

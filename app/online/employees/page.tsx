@@ -187,8 +187,16 @@ export default function HubEmployeesPage() {
     if (!isSupabaseConfigured || !supabase) { setLoading(false); return; }
     setLoading(true); setErr("");
 
-    const { data: d, error: de } = await supabase
-      .from("departments").select("id").eq("code", BUSINESS_CODE).maybeSingle();
+    /* One round trip, not two: the department row and its staff are asked for
+       together (the staff filtered by the department's code through the join),
+       instead of waiting for the department before asking for the people. */
+    const [{ data: d, error: de }, { data, error }] = await Promise.all([
+      supabase.from("departments").select("id").eq("code", BUSINESS_CODE).maybeSingle(),
+      supabase.from("employees")
+        .select("id,name,phone,department_id,is_active,pay_type,pay_amount,join_date,cnic,user_id,designations(name),departments!inner(code)")
+        .eq("departments.code", BUSINESS_CODE)
+        .order("name").limit(1000),
+    ]);
     if (de) { setErr(de.message); setLoading(false); return; }
     if (!d) {
       // Better to say what is missing than to show an empty list that looks fine.
@@ -197,13 +205,9 @@ export default function HubEmployeesPage() {
     }
     setDeptId(d.id as string);
 
-    const { data, error } = await supabase.from("employees")
-      .select("id,name,phone,department_id,is_active,pay_type,pay_amount,join_date,cnic,user_id,designations(name)")
-      .eq("department_id", d.id)
-      .order("name").limit(1000);
     if (error) setErr(error.message);
     // An embedded relation comes back as an array even when it is one row.
-    setRows(((data ?? []) as Record<string, unknown>[]).map((r) => ({
+    setRows(((data ?? []) as Record<string, unknown>[]).map(({ departments: _dept, ...r }) => ({
       ...r, designations: Array.isArray(r.designations) ? r.designations[0] ?? null : r.designations,
     })) as unknown as Emp[]);
     setLoading(false);

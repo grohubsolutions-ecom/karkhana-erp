@@ -117,7 +117,7 @@ export default function HoursLedger({ rows, loading = false, compact = false }: 
           })()}
         </ul>
         <div className="hidden overflow-x-auto border-t border-line dark:border-white/[0.06] sm:block">
-          <table className={`w-full text-[12.5px] ${compact ? "" : "min-w-[520px]"}`}>
+          <table className={`w-full text-[12.5px] ${compact ? "" : "min-w-[440px]"}`}>
             <thead className="text-left text-[11px] uppercase tracking-wide text-hint dark:text-[#8a8175]">
               <tr>
                 <th className="px-4 py-2 font-semibold sm:px-5">Day</th>

@@ -13,9 +13,18 @@ export default function ResetPassword() {
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(false);
+  const [linkErr, setLinkErr] = useState("");
 
   useEffect(() => {
     if (!isSupabaseConfigured || !supabase) { setChecking(false); return; }
+    /* A used or expired link comes back with the reason in the address
+       (#error_code=otp_expired). Say that, instead of a generic failure. */
+    const h = new URLSearchParams(window.location.hash.slice(1) || window.location.search.slice(1));
+    if (h.get("error") || h.get("error_code")) {
+      setLinkErr(h.get("error_code") === "otp_expired"
+        ? "This reset link has expired or was already used. Each link works once, for a short time. Ask for a new one below."
+        : (h.get("error_description") || "This reset link is not valid.").replace(/\+/g, " "));
+    }
     const { data: sub } = supabase.auth.onAuthStateChange((event, session) => {
       if (event === "PASSWORD_RECOVERY" || session) { setReady(true); setChecking(false); }
     });
@@ -67,8 +76,8 @@ export default function ResetPassword() {
           ) : !ready ? (
             <>
               <h1 className="text-xl font-extrabold">Link expired</h1>
-              <p className="mt-1 text-[13px] text-muted">This reset link is invalid or has expired. Please go back and request a new one.</p>
-              <button onClick={() => router.push("/login")} className="mt-5 w-full rounded-xl2 bg-ink py-3 text-[14px] font-semibold text-white">Back to sign in</button>
+              <p className="mt-1 text-[13px] text-muted">{linkErr || "This reset link is invalid or has expired. Please go back and request a new one."}</p>
+              <button onClick={() => router.push("/login")} className="mt-5 w-full rounded-xl2 bg-ink py-3 text-[14px] font-semibold text-white">Back to sign in — request a new link</button>
             </>
           ) : (
             <>
