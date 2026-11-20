@@ -28,7 +28,7 @@ export default {
         soft: "0 2px 8px rgba(20,16,12,0.04)",
       },
       fontFamily: {
-        sans: ['"Plus Jakarta Sans"', "Inter", "system-ui", "sans-serif"],
+        sans: ["var(--font-jakarta)", '"Plus Jakarta Sans"', "Inter", "system-ui", "sans-serif"],
       },
     },
   },

@@ -1,7 +1,21 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
+import "./theme.css";
+import localFont from "next/font/local";
 import AppFrame from "@/components/AppFrame";
 import { ConfirmProvider } from "@/components/ConfirmDialog";
+
+/* Self-hosted: one 30 kB variable file (all weights) shipped with the app and
+   preloaded from our own domain. It replaces the render-blocking stylesheet
+   from fonts.googleapis.com, which cost two extra connections before any
+   text could be drawn. A size-matched fallback stops the text jumping. */
+const jakarta = localFont({
+  src: "./fonts/plus-jakarta-sans-latin-wght-normal.woff2",
+  weight: "200 800",
+  display: "swap",
+  variable: "--font-jakarta",
+  adjustFontFallback: "Arial",
+});
 
 export const metadata: Metadata = {
   title: "Karkhana ERP — Head Office",
@@ -13,6 +27,10 @@ export const viewport: Viewport = {
   initialScale: 1,
   maximumScale: 5,
   viewportFit: "cover",
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#F6F4EF" },
+    { media: "(prefers-color-scheme: dark)", color: "#17140f" },
+  ],
 };
 
 export default function RootLayout({
@@ -21,19 +39,17 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en">
+    <html lang="en" className={jakarta.variable} suppressHydrationWarning>
       <head>
+        {/* Open the connection to the database while the page is still
+            loading, so the first query doesn't also pay for DNS + TLS. */}
+        {process.env.NEXT_PUBLIC_SUPABASE_URL && <link rel="preconnect" href={process.env.NEXT_PUBLIC_SUPABASE_URL} crossOrigin="" />}
+        {process.env.NEXT_PUBLIC_SUPABASE_URL && <link rel="dns-prefetch" href={process.env.NEXT_PUBLIC_SUPABASE_URL} />}
         <script
           dangerouslySetInnerHTML={{
             __html:
               "try{if(localStorage.getItem('kk-theme')==='dark')document.documentElement.classList.add('dark');}catch(e){}",
           }}
-        />
-        <link rel="preconnect" href="https://fonts.googleapis.com" />
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="" />
-        <link
-          href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap"
-          rel="stylesheet"
         />
       </head>
       <body>

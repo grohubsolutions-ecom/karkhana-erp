@@ -394,9 +394,9 @@ export default function MyPortal() {
           </section>
         )}
 
-        <div className={`grid gap-4 lg:grid-cols-[1fr_1.05fr] lg:items-start ${shown === "pay" ? "" : "hidden"}`}>
+        <div className={`grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.05fr)] lg:items-start ${shown === "pay" ? "" : "hidden"}`}>
 
-          <div className="space-y-4">
+          <div className="min-w-0 space-y-4">
 
             <section className="overflow-hidden rounded-card border border-line bg-surface shadow-card dark:border-white/10 dark:bg-[#201c17]">
               <h2 className="border-b border-line px-4 py-3 text-[13px] font-bold text-ink dark:border-white/10 dark:text-[#f4f1ea] sm:px-5">

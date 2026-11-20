@@ -10,6 +10,7 @@ import KarkhanaBell from "./KarkhanaBell";
 import SetPassword from "./SetPassword";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { PermissionsProvider, usePermissions } from "@/lib/usePermissions";
+import { type Boot, readBoot, writeBoot, fetchBoot } from "@/lib/boot";
 import { requiredFor } from "@/lib/access";
 import PhoneTables from "./PhoneTables";
 import "../app/kk-mobile.css";
@@ -39,6 +40,18 @@ function KarkhanaPhoneLayer() {
   return on ? <PhoneTables /> : null;
 }
 
+/* The moment before the first screen is ready: the brand mark, breathing,
+   instead of an empty page that looks like nothing is happening. */
+function Splash() {
+  return (
+    <div className="kk-splash bg-canvas dark:bg-[#17140f]">
+      <span className="flex h-14 w-14 items-center justify-center rounded-[18px] bg-ink text-white shadow-card dark:bg-white dark:text-[#141414]">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2 3 7v10l9 5 9-5V7z" /><path d="M3 7l9 5 9-5" /><path d="M12 12v10" /></svg>
+      </span>
+    </div>
+  );
+}
+
 function AccessRestricted() {
   return (
     <div className="flex min-h-[70vh] flex-col items-center justify-center px-6 text-center">
@@ -64,7 +77,12 @@ function FullScreenGate({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const { ready, can } = usePermissions();
   if (!ready) return null;                       // nothing until we know
-  return can(requiredFor(pathname)) ? <>{children}</> : <AccessRestricted />;
+  if (!can(requiredFor(pathname))) return <AccessRestricted />;
+  /* The Hub and Shops Sales animate inside their own layouts. */
+  if (pathname.startsWith("/online") || pathname.startsWith("/retail")) return <>{children}</>;
+  const flavour = pathname === "/" ? "dept-home" : pathname.startsWith("/administration") ? "dept-admin"
+    : pathname === "/wage-desk" ? "dept-wage" : "dept-me";
+  return <div key={pathname} className={`dept-in ${flavour}`}>{children}</div>;
 }
 
 function FrameContent({ children }: { children: React.ReactNode }) {
@@ -84,7 +102,9 @@ function FrameContent({ children }: { children: React.ReactNode }) {
         : <Sidebar open={navOpen} onClose={() => setNavOpen(false)} />}
       <div className="flex min-w-0 flex-1 flex-col">
         <MobileBar title={isCarrefour ? "Carrefour" : "Karkhana"} onOpen={() => setNavOpen(true)} right={<KarkhanaBell />} />
-        <main className="min-w-0 flex-1 lg:overflow-y-auto lg:overflow-x-hidden">
+        {/* keyed by path: each new page plays the short department entry
+            animation, and lands scrolled to the top. */}
+        <main key={pathname} className={`dept-in ${isCarrefour ? "dept-carrefour" : "dept-karkhana"} min-w-0 flex-1 lg:overflow-y-auto lg:overflow-x-hidden`}>
           {!ready ? null : allowed ? children : <AccessRestricted />}
         </main>
       </div>
@@ -124,19 +144,34 @@ export default function AppFrame({ children }: { children: React.ReactNode }) {
     pathname === "/wage-desk" ||
     pathname === "/online" || pathname.startsWith("/online/") ||
     pathname === "/retail" || pathname.startsWith("/retail/");
-  const [authReady, setAuthReady] = useState(false);
-  const [mustChange, setMustChange] = useState<boolean | null>(null);
+  /* Session + password flag + permissions, in ONE parallel trip, drawn from
+     the kept copy at once when there is one (see lib/boot.ts). */
+  const [boot, setBoot] = useState<Boot | null>(null);
+  const authReady = isLogin || boot !== null;
+  const mustChange = boot ? boot.mustChange : null;
 
   useEffect(() => {
-    if (isLogin) { setAuthReady(true); return; }
-    if (!isSupabaseConfigured || !supabase) { setAuthReady(true); setMustChange(false); return; }
+    if (isLogin) return;
+    if (!isSupabaseConfigured || !supabase) { setBoot({ uid: "preview", mustChange: false, perms: [], all: true }); return; }
+    let active = true;
     supabase.auth.getSession().then(async ({ data }) => {
+      if (!active) return;
       if (!data.session) { router.replace("/login"); return; }
-      const { data: prof } = await supabase!
-        .from("app_users").select("must_change_password").eq("id", data.session.user.id).maybeSingle();
-      setMustChange(!!prof?.must_change_password);
-      setAuthReady(true);
+      const uid = data.session.user.id;
+      const kept = readBoot(uid);
+      setBoot((b) => (b && b.uid === uid ? b : kept));
+      try {
+        const fresh = await fetchBoot(uid);
+        if (!active) return;
+        writeBoot(fresh);
+        setBoot((b) => (b && JSON.stringify(b) === JSON.stringify(fresh) ? b : fresh));
+      } catch {
+        /* offline / flaky: keep the copy; with none, fall back to the old
+           behaviour of "no password change, no permissions". */
+        if (active && !kept) setBoot({ uid, mustChange: false, perms: [], all: false });
+      }
     });
+    return () => { active = false; };
   }, [isLogin, router]);
 
   /* Cold-open redirect: once per fresh page load, on a phone, if the user
@@ -153,9 +188,9 @@ export default function AppFrame({ children }: { children: React.ReactNode }) {
   }, [authReady, isLogin, pathname, router]);
 
   if (isLogin) return <><KarkhanaPhoneLayer />{children}</>;
-  if (!authReady) return null;
-  if (mustChange === null) return null;
-  if (mustChange) return <SetPassword onDone={() => setMustChange(false)} />;
+  if (!authReady) return <Splash />;
+  if (mustChange === null) return <Splash />;
+  if (mustChange) return <SetPassword onDone={() => setBoot((b) => { if (!b) return b; const n = { ...b, mustChange: false }; writeBoot(n); return n; })} />;
 
   /* Chooser + Online/Retail: authenticated, but full-screen — no factory
      sidebar, no route gate. They still need PERMISSIONS, though.
@@ -169,12 +204,12 @@ export default function AppFrame({ children }: { children: React.ReactNode }) {
 
      The provider now wraps both branches. Only the chrome differs. */
   if (isFullScreen) {
-    return <PermissionsProvider><KarkhanaPhoneLayer /><FullScreenGate>{children}</FullScreenGate></PermissionsProvider>;
+    return <PermissionsProvider boot={boot}><KarkhanaPhoneLayer /><FullScreenGate>{children}</FullScreenGate></PermissionsProvider>;
   }
 
   // Only now (fully authenticated) do we load permissions — one shared copy.
   return (
-    <PermissionsProvider>
+    <PermissionsProvider boot={boot}>
       <KarkhanaPhoneLayer />
       <FrameContent>{children}</FrameContent>
     </PermissionsProvider>

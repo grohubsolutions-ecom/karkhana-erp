@@ -18,7 +18,7 @@ export default function MobileBar({
   title, onOpen, right,
 }: { title: string; onOpen: () => void; right?: React.ReactNode }) {
   return (
-    <div className="sticky top-0 z-30 flex items-center gap-2 border-b border-line bg-surface px-3 py-2 pt-[max(8px,env(safe-area-inset-top))] lg:hidden dark:border-white/[0.06] dark:bg-[#201c17]">
+    <div className="kk-topbar sticky top-0 z-30 flex items-center gap-2 border-b border-line bg-surface px-3 py-2 pt-[max(8px,env(safe-area-inset-top))] lg:hidden dark:border-white/[0.06] dark:bg-[#201c17]">
       <MobileBack />
       <button onClick={onOpen} aria-label="Open menu" className="flex h-10 w-10 items-center justify-center rounded-xl2 text-ink transition hover:bg-panel dark:text-white dark:hover:bg-white/[0.06]">
         <Menu size={22} />

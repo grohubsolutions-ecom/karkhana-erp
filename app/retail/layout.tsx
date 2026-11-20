@@ -73,7 +73,7 @@ export default function RetailLayout({ children }: { children: React.ReactNode }
         {/* On a phone this is a plain block in the document flow — no height, no
             scroll container. From 768px it is the scroll panel it always was.
             `md:pl-10 lg:pl-0` keeps the arrow tab from sitting on the content. */}
-        <main className="min-w-0 md:flex-1 md:overflow-y-auto md:overflow-x-hidden md:pl-10 lg:pl-0">
+        <main key={pathname} className="dept-in dept-retail min-w-0 md:flex-1 md:overflow-y-auto md:overflow-x-hidden md:pl-10 lg:pl-0">
           {children}
         </main>
       </div>

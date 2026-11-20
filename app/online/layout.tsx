@@ -53,7 +53,7 @@ export default function OnlineLayout({ children }: { children: React.ReactNode }
         <HubTopBar />
         {/* md:pl-6 keeps the page clear of the tablet's menu tab; a computer has no tab. */}
         <main className="hub-main min-w-0 flex-1 pb-[calc(76px+env(safe-area-inset-bottom))] md:overflow-y-auto md:overflow-x-hidden md:pb-0 md:pl-6 lg:pl-0">
-          <div className="hub-clip">{children}</div>
+          <div key={path} className="hub-clip dept-in dept-hub">{children}</div>
         </main>
       </div>
       <HubTabBar />
