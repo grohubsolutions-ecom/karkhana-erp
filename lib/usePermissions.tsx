@@ -1,5 +1,7 @@
 "use client";
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+/* Kept identical to usePermissions.tsx: whichever one the build resolves,
+   the provider accepts `boot`. */
+import { createContext, createElement, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { hasAny } from "@/lib/access";
 
@@ -47,7 +49,7 @@ export function PermissionsProvider({ children, boot }: {
     return { ready: state.ready, all: state.all, can: (req) => state.all || hasAny(state.perms, req) };
   }, [boot, state]);
 
-  return <PermissionsCtx.Provider value={value}>{children}</PermissionsCtx.Provider>;
+  return createElement(PermissionsCtx.Provider, { value }, children);
 }
 
 export function usePermissions() {
