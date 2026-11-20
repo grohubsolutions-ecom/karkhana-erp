@@ -54,9 +54,18 @@ export default function UsersTab({ canManage }: { canManage: boolean }) {
   async function changeStatus(userId: string, status: string) {
     if (!supabase) return;
     setBusy(userId); setError("");
-    const { error } = await supabase.from("app_users").update({ status }).eq("id", userId);
+    /* N4: through the account function, which also blocks / unblocks the
+       login itself. Writing only app_users.status was a label nothing read —
+       an "Inactive" person could still sign in. If the function in use is
+       the older one (no set_status yet), fall back to the label as before. */
+    const { data, error: fnErr } = await supabase.functions.invoke("create-user", { body: { action: "set_status", user_id: userId, status } });
+    const fnMsg = fnErr ? await invokeError(fnErr) : (data as { error?: string })?.error;
+    if (fnMsg && !/Enter an email or a phone number/i.test(fnMsg)) { setBusy(null); setError(fnMsg); return; }
+    if (fnMsg) {
+      const { error } = await supabase.from("app_users").update({ status }).eq("id", userId);
+      if (error) { setBusy(null); setError(error.message.toLowerCase().includes("row-level") ? "You don't have permission to do this." : error.message); return; }
+    }
     setBusy(null);
-    if (error) { setError(error.message.toLowerCase().includes("row-level") ? "You don't have permission to do this." : error.message); return; }
     load();
   }
 
@@ -74,8 +83,16 @@ export default function UsersTab({ canManage }: { canManage: boolean }) {
     setBusy(userId); setError("");
     const { data, error } = await supabase.functions.invoke("create-user", { body: { action: "delete", user_id: userId } });
     setBusy(null);
-    if (error) { setError(await invokeError(error)); return; }
-    if ((data as { error?: string })?.error) { setError((data as { error: string }).error); return; }
+    const msg = error ? await invokeError(error) : (data as { error?: string })?.error;
+    if (msg) {
+      setError(/database error deleting/i.test(msg)
+        ? `${name} has work recorded in the system (tasks, stock entries…), so the login can't be deleted without losing whose work it was. Set their Status to Inactive instead.`
+        : msg);
+      return;
+    }
+    if ((data as { disabled?: boolean })?.disabled) {
+      window.alert(`${name} has work recorded in the system, so their login was switched off instead of deleted: they can no longer sign in, and their history keeps their name. Set Status back to Active to restore them.`);
+    }
     load();
   }
 
