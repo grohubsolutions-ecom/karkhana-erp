@@ -282,7 +282,7 @@ export default function StatementSheet({ kind, branchIds, branches }: {
 
       {/* ── the sheet ────────────────────────────────────────────────── */}
       <div id="rt-statement" ref={sheetRef}
-        className="overflow-hidden rounded-card border border-line bg-white shadow-sm dark:border-white/[0.08]">
+        className="kk-light overflow-hidden rounded-card border border-line bg-white shadow-sm dark:border-white/[0.08]">
         <div className="bg-gradient-to-br from-[#1d4ed8] to-[#1e3a8a] px-6 py-6 text-white">
           <div className="text-[12px] font-bold uppercase tracking-[0.16em] text-white/80">{heading}</div>
           <div className="mt-1.5 text-[26px] font-extrabold leading-tight tracking-tight">{when}</div>
