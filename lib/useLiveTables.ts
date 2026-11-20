@@ -37,6 +37,24 @@ import { supabase } from "@/lib/supabase";
  *
  * Realtime respects RLS, so a subscriber only ever hears about rows it could
  * have selected itself. */
+/* N3 (20 Nov 2026): TABLES TOO BUSY FOR THE LIVE FEED.
+ *
+ * online_orders and online_logistics are rewritten all day by the Shopify and
+ * courier syncs — about ten million writes so far, most of them rows that did
+ * not change. Every one of those went through Supabase Realtime, which decodes
+ * the change and re-checks it against every open tab's permissions. That was
+ * 43% of ALL database time (more than every staff page load and sync job put
+ * together), and when a sync burst landed, staff page loads queued behind it.
+ *
+ * For these two tables the page now simply refreshes itself every 45 seconds
+ * while it is on screen (same 20 s floor, same "hidden tabs don't fetch" rule).
+ * The figures are just as current as a person can notice, and the database
+ * no longer pays per write. They are taken out of the realtime publication by
+ * migration N3b; until then the poll and the feed coexist harmlessly (the
+ * floor stops them doubling up). */
+const POLLED = new Set(["online_orders", "online_logistics"]);
+const POLL_MS = 45000;
+
 export function useLiveTables(
   tables: string[],
   onChange: () => void,
@@ -58,7 +76,9 @@ export function useLiveTables(
   useEffect(() => {
     if (!supabase || !enabled || !tables.length) return;
 
-    const channel = supabase.channel(`live:${key}`);
+    const pushed = tables.filter((t) => !POLLED.has(t));
+    const polled = tables.some((t) => POLLED.has(t));
+    const channel = pushed.length ? supabase.channel(`live:${key}`) : null;
 
     /* Run now, or remember to run later. Never drop the change. */
     const run = () => {
@@ -75,8 +95,8 @@ export function useLiveTables(
       cb.current();
     };
 
-    for (const table of tables) {
-      channel.on(
+    for (const table of pushed) {
+      channel!.on(
         "postgres_changes",
         { event: "*", schema: "public", table },
         () => {
@@ -87,16 +107,33 @@ export function useLiveTables(
       );
     }
 
+    /* The quiet tables: a timer instead of the feed. It does nothing while the
+       tab is hidden, and catches up once when it is looked at again. */
+    let poll: ReturnType<typeof setInterval> | null = null;
+    if (polled) {
+      lastRun.current = Date.now();             // the page has just loaded its data
+      poll = setInterval(() => {
+        if (document.visibilityState !== "visible") { pending.current = true; return; }
+        setLastChange(new Date());
+        run();
+      }, POLL_MS);
+      if (!channel) setLive(true);
+    }
+
     // Coming back to the tab applies whatever was missed, once.
-    const onVisible = () => { if (document.visibilityState === "visible" && pending.current) run(); };
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      if (pending.current || (polled && Date.now() - lastRun.current > POLL_MS)) run();
+    };
     document.addEventListener("visibilitychange", onVisible);
 
-    channel.subscribe((status) => setLive(status === "SUBSCRIBED"));
+    channel?.subscribe((status) => setLive(status === "SUBSCRIBED"));
 
     return () => {
       if (timer.current) clearTimeout(timer.current);
+      if (poll) clearInterval(poll);
       document.removeEventListener("visibilitychange", onVisible);
-      supabase!.removeChannel(channel);
+      if (channel) supabase!.removeChannel(channel);
       setLive(false);
     };
     // `key` stands in for `tables` so a new array identity each render does not
