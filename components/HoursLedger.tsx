@@ -65,7 +65,7 @@ export default function HoursLedger({ rows, loading = false, compact = false }: 
           </div>
         </div>
         {!loading && t.days > 0 && (
-          <div className="text-[12px] tabular-nums text-muted dark:text-[#a89f93] sm:text-right">
+          <div className="text-right text-[12px] tabular-nums text-muted dark:text-[#a89f93]">
             <div><span className="font-semibold text-emerald-700">+{hm(t.plus)}</span> extra · <span className="font-semibold text-red-700">− {hm(t.minus)}</span> short</div>
             <div>worked {hm(t.worked)} of {hm(t.required)} · {t.days} {t.days === 1 ? "day" : "days"} counted</div>
           </div>
@@ -79,45 +79,8 @@ export default function HoursLedger({ rows, loading = false, compact = false }: 
           No days marked yet.
         </p>
       ) : (
-        <>
-        {/* PHONE: one compact row per day, nothing wider than the screen. The
-            six-column table needed 520px and was cut off on an iPhone. */}
-        <ul className="divide-y divide-line border-t border-line dark:divide-white/[0.05] dark:border-white/[0.06] sm:hidden">
-          {(() => {
-            let run = 0;
-            return rows.map((r) => {
-              if (r.counted) run += Number(r.diff_min || 0);
-              const d = new Date(r.day_date + "T00:00:00");
-              const note = r.note === "no time out" && r.day_date === todayIso ? "still at work" : r.note;
-              return (
-                <li key={r.day} className={`flex items-center gap-3 px-4 py-2.5 ${r.counted ? "text-ink dark:text-[#e7e2d8]" : "text-muted dark:text-[#8a8175]"}`}>
-                  <div className="w-[52px] flex-none leading-tight">
-                    <div className="text-[13px] font-bold tabular-nums">{d.getDate()} {SHORT[d.getMonth() + 1]}</div>
-                    <div className="text-[11px] text-hint dark:text-[#8a8175]">{DOW[d.getDay()]}</div>
-                  </div>
-                  <div className="min-w-0 flex-1 leading-tight">
-                    <div className="truncate text-[13px] font-semibold tabular-nums">
-                      {r.time_in || r.time_out ? `${r.time_in ?? "—"} – ${r.time_out ?? "—"}` : "—"}
-                    </div>
-                    <div className="truncate text-[11px] text-muted dark:text-[#a89f93]">
-                      {r.worked_min != null ? hm(r.worked_min) : "—"}
-                      {r.required_min ? ` of ${hm(r.required_min)}` : ""}
-                      {note ? ` · ${note}` : ""}
-                    </div>
-                  </div>
-                  <div className="flex-none text-right leading-tight tabular-nums">
-                    {r.counted
-                      ? <div className={`text-[13px] font-bold ${tone(r.diff_min)}`}>{signed(r.diff_min)}</div>
-                      : <div className="text-[11px] italic">not counted</div>}
-                    {r.counted && <div className={`text-[10.5px] font-semibold ${tone(run)}`}>bal {signed(run)}</div>}
-                  </div>
-                </li>
-              );
-            });
-          })()}
-        </ul>
-        <div className="hidden overflow-x-auto border-t border-line dark:border-white/[0.06] sm:block">
-          <table className={`w-full text-[12.5px] ${compact ? "" : "min-w-[440px]"}`}>
+        <div className="overflow-x-auto border-t border-line dark:border-white/[0.06]">
+          <table className={`w-full text-[12.5px] ${compact ? "" : "min-w-[520px]"}`}>
             <thead className="text-left text-[11px] uppercase tracking-wide text-hint dark:text-[#8a8175]">
               <tr>
                 <th className="px-4 py-2 font-semibold sm:px-5">Day</th>
@@ -164,11 +127,10 @@ export default function HoursLedger({ rows, loading = false, compact = false }: 
             </tbody>
           </table>
         </div>
-        </>
       )}
       <p className="border-t border-line px-4 py-2.5 text-[11px] leading-snug text-hint dark:border-white/[0.06] dark:text-[#8a8175] sm:px-5">
         Each present day: hours worked minus the shift&rsquo;s hours. Extra time on one day covers short time on another.
-        Up to 10 minutes short counts as 0. Overtime shows as plus but adds no pay, and the balance does not change the salary.
+        Up to 10 minutes short counts as 0. If the month ends in minus, the minus hours are cut from the salary; plus hours add no pay.
         A day without a time in and time out cannot be measured and is not counted.
       </p>
     </div>

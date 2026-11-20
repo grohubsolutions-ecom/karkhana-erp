@@ -55,6 +55,9 @@ export type SummaryRow = {
      hours, day by day, plus and minus netted. Shown only; it never changes
      the salary. Optional so the screen still loads before H319 is run. */
   time_balance?: number; worked_minutes?: number; required_minutes?: number; balance_days?: number;
+  /* H321: if the month's balance is MINUS, this much (Rs) is already off
+     Earned and Payable. Plus hours never add pay. */
+  hours_deduction?: number;
 };
 type Row = SummaryRow;
 
@@ -290,7 +293,7 @@ export default function MonthlySummary({ department = "HUB" }: { department?: st
                 {Number(r.half) > 0 && <span className="text-amber-700">{r.half} half</span>}
                 {Number(r.absent) > 0 && <span className="text-red-700">{r.absent} absent (− {rs(r.absent_deduction)})</span>}
                 {Number(r.balance_days) > 0 && (
-                  <span className={`font-semibold ${balTone(r.time_balance)}`}>{bal(r.time_balance)} hours</span>
+                  <span className={`font-semibold ${balTone(r.time_balance)}`}>{bal(r.time_balance)} hours{Number(r.hours_deduction) > 0 ? ` (− ${rs(r.hours_deduction)})` : ""}</span>
                 )}
                 <span className="text-muted dark:text-[#a89f93]">{r.paid_off} off paid{Number(r.extra_days) > 0 ? ` +${r.extra_days}` : ""}</span>
                 {Number(r.given_days) > 0 && <span className="font-semibold text-emerald-700">+{dayCount(r.given_days)} extra day</span>}
@@ -380,6 +383,7 @@ export default function MonthlySummary({ department = "HUB" }: { department?: st
                   {Number(r.balance_days) > 0 ? (
                     <>
                       <div className={`font-semibold ${balTone(r.time_balance)}`}>{bal(r.time_balance)}</div>
+                      {Number(r.hours_deduction) > 0 && <div className="text-[11.5px] text-red-700">− {rs(r.hours_deduction)}</div>}
                       <div className="text-[11px] text-hint dark:text-[#8a8175]">{r.balance_days} {Number(r.balance_days) === 1 ? "day" : "days"}</div>
                     </>
                   ) : <span className="text-hint dark:text-[#6f675d]">—</span>}
@@ -476,7 +480,7 @@ export default function MonthlySummary({ department = "HUB" }: { department?: st
       <p className="mt-3 text-[12px] leading-relaxed text-hint dark:text-[#8a8175]">
         Payable = counted days ÷ days in the month × salary − advance cut. A full month worked pays the full salary, in February as in August.
         Sundays and public holidays are paid for everyone; working a day off adds one extra day, and an extra day given is paid the same way.
-        &ldquo;Hours&rdquo; is the month&rsquo;s balance: on each present day with a time in and out, hours worked minus the shift&rsquo;s hours, plus and minus added together — extra time one day covers short time another. A day short by no more than the grace (10 min) counts as 0. Overtime shows as plus but adds no pay, and the balance never changes the salary. Days without a time out are not counted.
+        &ldquo;Hours&rdquo; is the month&rsquo;s balance: on each present day with a time in and out, hours worked minus the shift&rsquo;s hours, plus and minus added together — extra time one day covers short time another. A day short by no more than the grace (10 min) counts as 0. If the month ends in minus, the minus hours are cut from the salary at the day rate ÷ shift hours; plus hours add no pay. Days without a time out are not counted.
         Approved leave is paid in full; an absent day is not counted, and &ldquo;Lost&rdquo; is what it would have paid.
         Marking someone paid asks how much of their advance to cut; what is not cut moves to next month as &ldquo;Advance carried forward&rdquo;.
         {isCurrentMonth && " This month counts days up to today, so the figure grows as the month goes on."}

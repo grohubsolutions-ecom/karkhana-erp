@@ -367,8 +367,11 @@ export default function EmployeeMonthDetail({
             )}
             {Number(row.balance_days) > 0 && (
               <div className={`flex justify-between ${Number(row.time_balance) < 0 ? "text-red-700" : Number(row.time_balance) > 0 ? "text-emerald-700" : ""}`}>
-                <span>Hours balance — worked {hm(row.worked_minutes)} of {hm(row.required_minutes)} over {row.balance_days} days (not paid or cut)</span>
-                <span className="tabular-nums">{Number(row.time_balance) > 0 ? "+" : Number(row.time_balance) < 0 ? "− " : ""}{hm(row.time_balance)}</span>
+                <span>
+                  Hours balance {Number(row.time_balance) > 0 ? "+" : Number(row.time_balance) < 0 ? "− " : ""}{hm(row.time_balance)} — worked {hm(row.worked_minutes)} of {hm(row.required_minutes)} over {row.balance_days} days
+                  {Number(row.hours_deduction) > 0 ? " · minus hours cut, already off Earned" : " · plus or even, nothing cut"}
+                </span>
+                <span className="tabular-nums">{Number(row.hours_deduction) > 0 ? `− ${rs(row.hours_deduction)}` : "Rs 0"}</span>
               </div>
             )}
             <div className="flex justify-between">

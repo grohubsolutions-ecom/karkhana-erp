@@ -50,6 +50,8 @@ type Pay = {
   /* H284: extra days given, what was cut from the advance when paid, and what
      moved to next month. */
   given_days?: number; given_pay?: number; advance_cut?: number; carried?: number;
+  /* H321: hours balance and what minus hours cost (already off gross). */
+  time_balance?: number; balance_days?: number; hours_deduction?: number;
 };
 type Day = { day: number; status: string };
 type Adv = { date: string; amount: number; note: string | null };
@@ -232,52 +234,49 @@ export default function MyPortal() {
           the amount share one dark field at the top — the single bold thing on
           the page. Everything below stays light and ruled, which is what makes
           this read as a document rather than a wall of cards. */}
-      <header className="me-hero text-white">
-        <div className="me-hero-aura" aria-hidden><i /><i /><i /></div>
-        <div className="relative mx-auto max-w-5xl px-4 pb-7 pt-[calc(20px+env(safe-area-inset-top))] sm:px-6 sm:pb-9 sm:pt-7">
+      <header className="bg-ink text-white dark:bg-[#221d17]">
+        <div className="mx-auto max-w-5xl px-4 pb-7 pt-[calc(20px+env(safe-area-inset-top))] sm:px-6 sm:pb-9 sm:pt-7">
 
-          {/* Phone-first: the department and the buttons share the top line,
-              and the name gets the WHOLE width underneath. Side by side, four
-              buttons left the name about 40px on a 360px Android — it vanished
-              and the job title wrapped one word per line. */}
-          <div className="flex items-center justify-between gap-3">
-            <div className="min-w-0 truncate text-[12.5px] font-bold tracking-wide text-white/60">
-              {tc(me.department) || "Employee"}
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <div className="text-[12.5px] font-bold tracking-wide text-white/60">
+                {tc(me.department) || "Employee"}
+              </div>
+              <h1 className="mt-1.5 truncate text-[26px] font-extrabold leading-none tracking-tight sm:text-[32px]">
+                {tc(me.name)}
+              </h1>
+              <p className="mt-1.5 text-[13px] text-white/60">
+                {me.designation ?? "—"} · {money(me.salary)} a month
+              </p>
             </div>
             {/* The bell sits on the dark band, where the person is already
                 looking when the page opens. Work assigned to them is the one
                 thing here that is time-sensitive; their wages are not. */}
-            <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
+            <div className="flex shrink-0 items-center gap-2">
               {/* H299: hide the money. The portal opens hidden; this eye is the
                   only way to reveal it, and the next session hides it again. */}
               <button onClick={toggleMoney} aria-pressed={showMoney}
                       aria-label={showMoney ? "Hide the money" : "Show the money"}
                       title={showMoney ? "Hide the money — the figures are private" : "Show the money"}
-                      className="me-glass-btn flex h-10 w-10 sm:h-11 sm:w-11 items-center justify-center rounded-full border border-white/20 text-white/80 transition hover:bg-white/10 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white">
+                      className="flex h-11 w-11 items-center justify-center rounded-full border border-white/20 text-white/70 transition hover:bg-white/10 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white">
                 {showMoney ? <Eye size={17} /> : <EyeOff size={17} />}
               </button>
               {/* H290: ring this phone when a bell notification arrives. */}
               <PushToggle dark />
               <HubBell dark size="lg" />
               <button onClick={signOut} aria-label="Sign out"
-                      className="me-glass-btn flex h-10 w-10 sm:h-11 sm:w-11 items-center justify-center rounded-full border border-white/20 text-white/80 transition hover:bg-white/10 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white">
+                      className="flex h-11 w-11 items-center justify-center rounded-full border border-white/20 text-white/70 transition hover:bg-white/10 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white">
                 <LogOut size={17} />
               </button>
             </div>
           </div>
-          <h1 className="mt-3 break-words text-[26px] font-extrabold leading-tight tracking-tight sm:text-[32px]">
-            {tc(me.name)}
-          </h1>
-          <p className="mt-1 text-[13px] text-white/60">
-            {me.designation ?? "—"} · <span className="whitespace-nowrap">{money(me.salary)} a month</span>
-          </p>
 
-          <div className="me-glass-panel mt-6 flex flex-wrap items-end justify-between gap-x-6 gap-y-4 rounded-[24px] p-4 sm:p-5">
-            <div className="min-w-0">
+          <div className="mt-6 flex flex-wrap items-end justify-between gap-x-6 gap-y-4">
+            <div>
               <div className="text-[12.5px] font-semibold text-white/60">
                 {isCurrent ? `Earned Up To ${today.getDate()} ${MONTHS[month]}` : `Payable For ${MONTHS[month]}`}
               </div>
-              <div className="mt-1 break-all text-[36px] font-extrabold leading-none tabular-nums tracking-tight min-[400px]:text-[42px] sm:text-[54px]">
+              <div className="mt-1 text-[42px] font-extrabold leading-none tabular-nums tracking-tight sm:text-[54px]">
                 {money(isCurrent ? gross : (pay?.payable ?? 0))}
               </div>
               {/* Earned and payable are a pair: the big figure matches the label
@@ -293,24 +292,24 @@ export default function MyPortal() {
               )}
             </div>
 
-            <div className="grid w-full grid-cols-2 items-center gap-2 sm:flex sm:w-auto">
+            <div className="flex items-center gap-2">
               {pay?.is_paid ? (
-                <span className="col-span-2 inline-flex items-center gap-1.5 justify-self-start whitespace-nowrap rounded-full bg-emerald-400/20 px-3 py-1.5 text-[12px] font-bold text-emerald-200">
+                <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-400/20 px-3 py-1.5 text-[12px] font-bold text-emerald-200">
                   <Wallet size={12} /> Paid
                 </span>
               ) : (
-                <span className="col-span-2 justify-self-start whitespace-nowrap rounded-full border border-white/25 px-3 py-1.5 text-[12px] font-semibold text-white/70">
+                <span className="rounded-full border border-white/25 px-3 py-1.5 text-[12px] font-semibold text-white/70">
                   Not paid yet
                 </span>
               )}
               <label className="sr-only" htmlFor="m">Month</label>
               <select id="m" value={month} onChange={(e) => setMonth(Number(e.target.value))}
-                      className="me-glass-btn h-10 w-full min-w-0 rounded-full sm:w-auto border border-white/20 bg-white/10 px-3 py-1.5 text-[12.5px] font-semibold text-white outline-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white">
+                      className="h-10 rounded-full border border-white/20 bg-white/10 px-3 py-1.5 text-[12.5px] font-semibold text-white outline-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white">
                 {MONTHS.slice(1).map((m, i) => <option key={m} value={i + 1} className="text-ink">{m}</option>)}
               </select>
               <label className="sr-only" htmlFor="y">Year</label>
               <select id="y" value={year} onChange={(e) => setYear(Number(e.target.value))}
-                      className="me-glass-btn h-10 w-full min-w-0 rounded-full sm:w-auto border border-white/20 bg-white/10 px-3 py-1.5 text-[12.5px] font-semibold text-white outline-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white">
+                      className="h-10 rounded-full border border-white/20 bg-white/10 px-3 py-1.5 text-[12.5px] font-semibold text-white outline-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white">
                 {/* Built from TODAY's year, not the chosen one. Choosing last year
                     used to drop this year from the list, with no way back but a reload. */}
                 {[today.getFullYear() - 1, today.getFullYear()].map((y) => <option key={y} value={y} className="text-ink">{y}</option>)}
@@ -333,17 +332,17 @@ export default function MyPortal() {
           first and the portal opens on it.
           The same tabs on a phone and on a desktop — there is no third layout
           to keep in step. */}
-      <div className="me-body relative mx-auto -mt-5 max-w-5xl px-4 sm:px-6">
+      <div className="mx-auto -mt-4 max-w-5xl px-4 sm:px-6">
         {/* Two to a row on a phone. With four tabs a single row ran 170px past
             the edge of a 390px screen and the last two could not be reached;
             a lone last tab takes the whole width rather than sitting half-empty. */}
         <div role="tablist" aria-label="Your portal"
-          className="me-tabs sticky top-[calc(8px+env(safe-area-inset-top))] z-30 mb-4 grid w-full grid-cols-2 gap-1 rounded-[24px] p-1 [&>button:last-child:nth-child(odd)]:col-span-2 sm:flex sm:w-max sm:rounded-full">
+          className="mb-4 grid w-full grid-cols-2 gap-1 rounded-[24px] bg-panel p-1 [&>button:last-child:nth-child(odd)]:col-span-2 dark:bg-white/[0.06] sm:flex sm:w-max sm:rounded-full">
           {([...(canRescue ? [["attempt", "Delivery Under Review"] as const] : []),
              ["work", "My Work"] as const, ["pay", "Attendance & Pay"] as const,
              ...(canReturns ? [["returns", "Pending Returns"] as const] : [])]).map(([key, label]) => (
             <button key={key} role="tab" aria-selected={shown === key} onClick={() => setTab(key)}
-              className={`h-11 min-w-0 flex-1 truncate rounded-full px-2 text-[13.5px] max-[359px]:text-[12px] font-semibold transition sm:h-auto sm:flex-none sm:whitespace-nowrap sm:px-5 sm:py-2 sm:text-[13px] ${
+              className={`h-11 min-w-0 flex-1 truncate rounded-full px-3 text-[13.5px] font-semibold transition sm:h-auto sm:flex-none sm:whitespace-nowrap sm:px-5 sm:py-2 sm:text-[13px] ${
                 shown === key ? "bg-ink text-white shadow-soft dark:bg-white dark:text-[#141414]"
                               : "text-muted hover:text-ink dark:text-[#a89f93] dark:hover:text-white"}`}>
               {/* The one long name gets a short form on a phone, where two tabs
@@ -397,9 +396,9 @@ export default function MyPortal() {
           </section>
         )}
 
-        <div className={`grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.05fr)] lg:items-start ${shown === "pay" ? "" : "hidden"}`}>
+        <div className={`grid gap-4 lg:grid-cols-[1fr_1.05fr] lg:items-start ${shown === "pay" ? "" : "hidden"}`}>
 
-          <div className="min-w-0 space-y-4">
+          <div className="space-y-4">
 
             <section className="overflow-hidden rounded-card border border-line bg-surface shadow-card dark:border-white/10 dark:bg-[#201c17]">
               <h2 className="border-b border-line px-4 py-3 text-[13px] font-bold text-ink dark:border-white/10 dark:text-[#f4f1ea] sm:px-5">
@@ -442,9 +441,16 @@ export default function MyPortal() {
                   <div className="flex items-baseline justify-between gap-4 border-b border-line px-4 py-2.5 dark:border-white/[0.06] sm:px-5">
                     <dt className="text-muted dark:text-[#a89f93]">
                       Hours balance
-                      <span className="mt-0.5 block text-[11.5px] text-hint dark:text-[#8a8175]">shown only — does not change your pay; see Your Hours below</span>
+                      <span className={`ml-1.5 font-semibold ${hTone(ht.balance)}`}>{signed(ht.balance)}</span>
+                      <span className="mt-0.5 block text-[11.5px] text-hint dark:text-[#8a8175]">
+                        {Number(pay?.hours_deduction) > 0
+                          ? "month is in minus — those hours are cut, already off the earned figure above"
+                          : "plus or even — nothing cut (plus hours add no pay)"}; see Your Hours below
+                      </span>
                     </dt>
-                    <dd className={`shrink-0 font-semibold tabular-nums ${hTone(ht.balance)}`}>{signed(ht.balance)}</dd>
+                    <dd className={`shrink-0 font-semibold tabular-nums ${Number(pay?.hours_deduction) > 0 ? "text-red-700" : "text-muted dark:text-[#a89f93]"}`}>
+                      {Number(pay?.hours_deduction) > 0 ? `− ${money(pay?.hours_deduction)}` : money(0)}
+                    </dd>
                   </div>
                 )}
                 {advCut > 0 && (
@@ -613,7 +619,7 @@ export default function MyPortal() {
         <p className={`mt-5 px-1 text-[11.5px] leading-relaxed text-hint dark:text-[#8a8175] ${shown === "pay" ? "" : "hidden"}`}>
           Sundays and public holidays are paid. Working one adds a day, and an extra day
           given to you is paid the same way. An absent day is not counted, and it is the
-          only thing that reduces what you earn — your hours balance is shown, never cut. Advance not cut in a month moves to the
+          main thing that reduces what you earn. If your hours for the month end in minus, those minus hours are cut too; plus hours add no pay. Advance not cut in a month moves to the
           next month as &ldquo;Advance carried forward&rdquo;.
           {isCurrent && " This month is still running, so the figure grows each day you are marked present."}
           {" "}Something look wrong? Speak to whoever marks attendance for your department.
