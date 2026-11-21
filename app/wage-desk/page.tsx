@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ChevronLeft, ChevronRight, LayoutGrid, LogOut, RefreshCw, Search, Wallet } from "lucide-react";
+import { ChevronLeft, ChevronRight, Clock, LayoutGrid, LogOut, RefreshCw, Search, Trash2, Wallet } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import ThemeToggle from "@/components/ThemeToggle";
 import { usePermissions } from "@/lib/usePermissions";
@@ -33,7 +33,19 @@ type Row = {
   last_punch: string | null;
   back_inside: boolean;
   balance: number | null;
+  late_min: number;
+  early_min: number;
+  relax_late_min: number;
+  relax_early_min: number;
+  ot_choice: "pay" | "bank" | null;
+  ot_value: number;
+  short_min: number;
+  bank_used: number;
+  bank_balance: number;
 };
+
+type RelaxRule = { id: number; scope: "department" | "employee"; target_id: string; name: string; late: number; early: number; note: string | null };
+type RelaxData = { rules: RelaxRule[]; departments: { id: string; name: string }[]; employees: { id: string; name: string; code: string }[] };
 
 type State = "pay" | "balance" | "inside" | "back" | "paid" | "absent";
 type Filter = "all" | "to_pay" | "inside" | "paid" | "absent";
@@ -62,9 +74,10 @@ function fmt12(hhmm: string): string {
   return `${((h + 11) % 12) + 1}:${String(m).padStart(2, "0")} ${h < 12 ? "am" : "pm"}`;
 }
 function fmtHours(min: number): string {
-  if (!min || min <= 0) return "0h";
+  if (!min || min <= 0) return "0m";
   const h = Math.floor(min / 60);
   const m = min % 60;
+  if (!h) return `${m}m`;
   return m ? `${h}h ${m}m` : `${h}h`;
 }
 function rs(n: number | null | undefined): string {
@@ -90,6 +103,8 @@ export default function WageDeskPage() {
   const router = useRouter();
   const { all, can } = usePermissions();
   const hasMore = all || can(OTHER_AREAS);
+  const isAdmin = all || can(["karkhana.admin", "employees.manage"]);
+  const [relaxOpen, setRelaxOpen] = useState(false);
 
   const [date, setDate] = useState<string>(todayPK());
   const [rows, setRows] = useState<Row[]>([]);
@@ -173,6 +188,22 @@ export default function WageDeskPage() {
     router.push("/login");
   }
 
+  async function chooseOt(r: Row, choice: "pay" | "bank" | null) {
+    if (!supabase) return;
+    const { error } = await supabase.rpc("kk_wage_ot_choose", { p_employee_id: r.employee_id, p_date: date, p_choice: choice });
+    if (error) { setToast(error.message); return; }
+    setToast(choice === "pay" ? `${fmtHours(r.overtime_minutes)} paid as overtime` : choice === "bank" ? `${fmtHours(r.overtime_minutes)} added to time bank` : "Choice removed");
+    load(true);
+  }
+
+  async function useBank(r: Row, minutes: number) {
+    if (!supabase) return;
+    const { error } = await supabase.rpc("kk_wage_bank_use", { p_employee_id: r.employee_id, p_date: date, p_minutes: minutes });
+    if (error) { setToast(error.message); return; }
+    setToast(minutes ? `${fmtHours(minutes)} covered from time bank` : "Time bank use removed");
+    load(true);
+  }
+
   const chips: { key: Filter; label: string }[] = [
     { key: "all", label: "All" },
     { key: "to_pay", label: "To pay" },
@@ -195,6 +226,11 @@ export default function WageDeskPage() {
             </div>
           </div>
           <div className="flex flex-none items-center gap-2">
+            {isAdmin && (
+              <button onClick={() => setRelaxOpen(true)} className="flex h-9 items-center gap-1.5 rounded-full border border-line bg-surface px-3 text-[12.5px] font-semibold dark:border-white/10 dark:bg-white/[0.06]" aria-label="Relaxation">
+                <Clock size={14} /><span className="hidden sm:inline">Relaxation</span>
+              </button>
+            )}
             {hasMore && (
               <Link href="/" className="flex h-9 items-center gap-1.5 rounded-full border border-line bg-surface px-3 text-[12.5px] font-semibold dark:border-white/10 dark:bg-white/[0.06]" aria-label="All departments">
                 <LayoutGrid size={14} /><span className="hidden sm:inline">Departments</span>
@@ -275,7 +311,8 @@ export default function WageDeskPage() {
 
         <ul className="space-y-3">
           {shown.map((r) => (
-            <WorkerCard key={r.employee_id} r={r} onPay={() => setPayFor(r)} onUndo={() => undo(r)} />
+            <WorkerCard key={r.employee_id} r={r} onPay={() => setPayFor(r)} onUndo={() => undo(r)}
+              onOt={(c) => chooseOt(r, c)} onBank={(m) => useBank(r, m)} />
           ))}
         </ul>
       </main>
@@ -286,6 +323,13 @@ export default function WageDeskPage() {
           date={date}
           onClose={() => setPayFor(null)}
           onSaved={(msg) => { setPayFor(null); setToast(msg); load(true); }}
+        />
+      )}
+
+      {relaxOpen && (
+        <RelaxSheet
+          onClose={() => setRelaxOpen(false)}
+          onChanged={(msg) => { setToast(msg); load(true); }}
         />
       )}
 
@@ -325,11 +369,68 @@ const BADGE: Record<State, { text: string; cls: string }> = {
   absent: { text: "Not in", cls: "bg-panel text-muted dark:bg-white/[0.06] dark:text-[#a89f93]" },
 };
 
-function WorkerCard({ r, onPay, onUndo }: { r: Row; onPay: () => void; onUndo: () => void }) {
+function TimeBlock({ r, onOt, onBank }: { r: Row; onOt: (c: "pay" | "bank" | null) => void; onBank: (m: number) => void }) {
+  const extra = r.overtime_minutes;
+  const short = r.short_min;
+  if (extra <= 0 && short <= 0 && r.bank_balance <= 0 && r.bank_used <= 0) return null;
+  const coverable = Math.min(short, r.bank_balance + r.bank_used);
+  return (
+    <div className="mt-3 space-y-2 rounded-xl2 border border-line p-3 dark:border-white/[0.08]">
+      {extra > 0 && (
+        r.ot_choice ? (
+          <div className="flex items-center justify-between gap-2">
+            <div className="min-w-0 text-[13px] font-semibold">
+              Extra {fmtHours(extra)} ·{" "}
+              {r.ot_choice === "pay"
+                ? <span className="text-[#3f8a4b] dark:text-success">paid as overtime +{rs(r.ot_value)}</span>
+                : <span className="text-[#3d5f93] dark:text-periwinkle">added to time bank</span>}
+            </div>
+            {r.can_pay && <button onClick={() => onOt(null)} className="h-9 flex-none rounded-xl border border-line px-3 text-[12.5px] font-semibold dark:border-white/10">Change</button>}
+          </div>
+        ) : (
+          <div>
+            <div className="mb-2 text-[13px] font-bold">Extra time {fmtHours(extra)} — worker&apos;s choice</div>
+            {r.can_pay ? (
+              <div className="grid grid-cols-2 gap-2">
+                <button onClick={() => onOt("pay")} className="h-11 rounded-xl2 bg-success-soft px-2 text-[13px] font-bold text-[#3f8a4b] dark:bg-success/15 dark:text-success">
+                  Pay OT +{rs(r.ot_value)}
+                </button>
+                <button onClick={() => onOt("bank")} className="h-11 rounded-xl2 bg-periwinkle-soft px-2 text-[13px] font-bold text-[#3d5f93] dark:bg-periwinkle/15 dark:text-periwinkle">
+                  Adjust · bank {fmtHours(extra)}
+                </button>
+              </div>
+            ) : <div className="text-[12px] text-muted">Not decided</div>}
+          </div>
+        )
+      )}
+
+      {short > 0 && (
+        r.bank_used > 0 ? (
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-[13px] font-semibold text-[#3d5f93] dark:text-periwinkle">Short {fmtHours(short)} · {fmtHours(r.bank_used)} covered from time bank</div>
+            {r.can_pay && <button onClick={() => onBank(0)} className="h-9 flex-none rounded-xl border border-line px-3 text-[12.5px] font-semibold dark:border-white/10">Undo</button>}
+          </div>
+        ) : coverable > 0 && r.can_pay ? (
+          <button onClick={() => onBank(coverable)} className="h-11 w-full rounded-xl2 bg-periwinkle-soft text-[13px] font-bold text-[#3d5f93] dark:bg-periwinkle/15 dark:text-periwinkle">
+            Short {fmtHours(short)} — cover {fmtHours(coverable)} from time bank
+          </button>
+        ) : (
+          <div className="text-[13px] font-semibold text-[#b5733a] dark:text-amber">Short {fmtHours(short)} · cut from today&apos;s wage</div>
+        )
+      )}
+
+      <div className="text-[12px] font-medium text-muted dark:text-[#a89f93]">Time bank: <b className="text-ink dark:text-[#f4f1ea]">{fmtHours(r.bank_balance)}</b></div>
+    </div>
+  );
+}
+
+function WorkerCard({ r, onPay, onUndo, onOt, onBank }: { r: Row; onPay: () => void; onUndo: () => void; onOt: (c: "pay" | "bank" | null) => void; onBank: (m: number) => void }) {
   const s = stateOf(r);
   const meta = [r.code, r.designation, r.section].filter(Boolean).join(" · ");
   const highlight = s === "pay" || s === "balance";
-  const badgeText = s === "absent" && r.status === "off" ? "Off day" : BADGE[s].text;
+  const badgeText = s === "absent" && r.status === "off" ? "Off day"
+    : s === "inside" && r.back_inside ? "Came back · inside"
+    : BADGE[s].text;
 
   return (
     <li className={`rounded-card border bg-surface p-4 shadow-soft dark:bg-[#201c17] dark:shadow-none ${highlight ? "border-amber-strong ring-1 ring-amber dark:border-amber/50 dark:ring-amber/30" : "border-line dark:border-white/[0.06]"}`}>
@@ -363,11 +464,20 @@ function WorkerCard({ r, onPay, onUndo }: { r: Row; onPay: () => void; onUndo: (
         <Cell label="Time" value={r.first_in ? fmtHours(r.worked_minutes) : "—"} sub={r.shift_minutes ? `of ${fmtHours(r.shift_minutes)}` : undefined} />
       </div>
 
+      <TimeBlock r={r} onOt={onOt} onBank={onBank} />
+
       <div className="mt-3 flex flex-wrap items-end justify-between gap-3 border-t border-line pt-3 dark:border-white/[0.06]">
         <div className="min-w-0">
           <div className="text-[12px] font-medium text-muted dark:text-[#a89f93]">
-            Daily rate {rs(r.daily_wage)}{r.overtime_minutes > 0 ? ` · OT ${fmtHours(r.overtime_minutes)}` : ""}
+            Daily rate {rs(r.daily_wage)}
           </div>
+          {(r.late_min > 0 || r.early_min > 0) && (
+            <div className="text-[12px] font-semibold text-[#b5733a] dark:text-amber">
+              {r.late_min > 0 && <>Late {fmtHours(r.late_min)}{r.relax_late_min > 0 && <span className="font-medium text-[#3f8a4b] dark:text-success"> ({fmtHours(Math.min(r.late_min, r.relax_late_min))} relaxed)</span>}</>}
+              {r.late_min > 0 && r.early_min > 0 && " · "}
+              {r.early_min > 0 && <>Left early {fmtHours(r.early_min)}{r.relax_early_min > 0 && <span className="font-medium text-[#3f8a4b] dark:text-success"> ({fmtHours(Math.min(r.early_min, r.relax_early_min))} relaxed)</span>}</>}
+            </div>
+          )}
           <div className="text-[21px] font-extrabold tabular-nums">
             {rs(r.amount_due)}
             {r.is_running && <span className="ml-2 align-middle text-[11.5px] font-bold text-[#3d5f93] dark:text-periwinkle">so far</span>}
@@ -459,6 +569,12 @@ function PaySheet({ row, date, onClose, onSaved }: { row: Row; date: string; onC
           {row.name} · {row.punches.length ? row.punches.map(fmt12).join(" → ") : "no punches"}
         </div>
 
+        {row.overtime_minutes > 0 && !row.ot_choice && (
+          <div className="mb-3 rounded-xl2 bg-amber-soft p-3 text-[13px] font-medium text-[#8a5a24] dark:bg-amber/15 dark:text-amber">
+            {fmtHours(row.overtime_minutes)} extra time is not decided yet, so it is not in this amount. Close this and press Pay OT or Adjust first.
+          </div>
+        )}
+
         {row.is_running && (
           <div className="mb-3 rounded-xl2 bg-periwinkle-soft p-3 text-[13px] font-medium text-[#3d5f93] dark:bg-periwinkle/15 dark:text-periwinkle">
             Still inside — this is the amount earned so far. Ask him to punch out first if he is leaving.
@@ -498,6 +614,131 @@ function PaySheet({ row, date, onClose, onSaved }: { row: Row; date: string; onC
           <button onClick={onClose} className="h-12 flex-1 rounded-xl2 border border-line font-semibold dark:border-white/10">Cancel</button>
           <button onClick={save} disabled={saving} className="h-12 flex-1 rounded-xl2 bg-ink font-bold text-white disabled:opacity-50 dark:bg-success dark:text-[#141414]">
             {saving ? "Saving…" : editing ? "Save" : "Confirm paid"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RelaxSheet({ onClose, onChanged }: { onClose: () => void; onChanged: (msg: string) => void }) {
+  const [data, setData] = useState<RelaxData | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [scope, setScope] = useState<"department" | "employee">("department");
+  const [target, setTarget] = useState("");
+  const [late, setLate] = useState("10");
+  const [early, setEarly] = useState("10");
+  const [note, setNote] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const load = useCallback(async () => {
+    if (!supabase) return;
+    const { data, error } = await supabase.rpc("kk_relax_admin");
+    if (error) { setErr(error.message); return; }
+    setData(data as RelaxData);
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const options = scope === "department"
+    ? (data?.departments ?? []).map((d) => ({ id: d.id, label: d.name }))
+    : (data?.employees ?? []).map((e) => ({ id: e.id, label: `${e.name} · ${e.code}` }));
+
+  function pick(rule: RelaxRule) {
+    setScope(rule.scope);
+    setTarget(rule.target_id);
+    setLate(String(rule.late));
+    setEarly(String(rule.early));
+    setNote(rule.note || "");
+  }
+
+  async function save() {
+    if (!supabase) return;
+    const l = Number(late), e = Number(early);
+    if (!target) { setErr(scope === "department" ? "Pick a department." : "Pick an employee."); return; }
+    if (!Number.isInteger(l) || !Number.isInteger(e) || l < 0 || e < 0 || l > 240 || e > 240) { setErr("Minutes must be whole numbers from 0 to 240."); return; }
+    setSaving(true); setErr(null);
+    const { error } = await supabase.rpc("kk_relax_set", {
+      p_department_id: scope === "department" ? target : null,
+      p_employee_id: scope === "employee" ? target : null,
+      p_late: l, p_early: e, p_note: note.trim() || null,
+    });
+    setSaving(false);
+    if (error) { setErr(error.message); return; }
+    setTarget(""); setNote("");
+    await load();
+    onChanged("Relaxation saved");
+  }
+
+  async function remove(rule: RelaxRule) {
+    if (!supabase) return;
+    if (!confirm(`Remove relaxation for ${rule.name}?`)) return;
+    const { error } = await supabase.rpc("kk_relax_delete", { p_id: rule.id });
+    if (error) { setErr(error.message); return; }
+    await load();
+    onChanged("Relaxation removed");
+  }
+
+  const field = "h-11 w-full rounded-xl2 border border-line bg-surface px-3 text-[16px] dark:border-white/10 dark:bg-white/[0.06] dark:[color-scheme:dark]";
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-end justify-center bg-black/40 sm:items-center" onClick={onClose}>
+      <div className="max-h-[92dvh] w-full max-w-md overflow-y-auto rounded-t-[26px] bg-surface p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] text-ink sm:rounded-card dark:bg-[#201c17] dark:text-[#f4f1ea]" onClick={(e) => e.stopPropagation()}>
+        <div className="text-[18px] font-extrabold tracking-tight">Relaxation</div>
+        <p className="mb-4 text-[13px] font-medium text-muted dark:text-[#a89f93]">
+          Minutes of lateness and early leaving that are not cut from the daily wage. An employee rule overrides his department&apos;s rule.
+        </p>
+
+        <div className="mb-4 space-y-2">
+          {data && data.rules.length === 0 && (
+            <div className="rounded-xl2 border border-dashed border-line p-3 text-center text-[13px] text-muted dark:border-white/10">No relaxation set — every late minute is cut.</div>
+          )}
+          {data?.rules.map((r) => (
+            <div key={r.id} className="flex items-center gap-3 rounded-xl2 bg-panel p-3 dark:bg-white/[0.04]">
+              <button onClick={() => pick(r)} className="min-w-0 flex-1 text-left">
+                <div className="truncate text-[14px] font-bold">{r.name}</div>
+                <div className="text-[12px] font-medium text-muted dark:text-[#a89f93]">
+                  {r.scope === "department" ? "Department" : "Employee"} · late {r.late}m · early {r.early}m{r.note ? ` · ${r.note}` : ""}
+                </div>
+              </button>
+              <button onClick={() => remove(r)} className="flex h-9 w-9 flex-none items-center justify-center rounded-full text-[#a8463a] dark:text-danger" aria-label={`Remove ${r.name}`}>
+                <Trash2 size={16} />
+              </button>
+            </div>
+          ))}
+        </div>
+
+        <div className="mb-3 grid grid-cols-2 gap-2 rounded-xl2 bg-panel p-1 dark:bg-white/[0.04]">
+          {(["department", "employee"] as const).map((sc) => (
+            <button key={sc} onClick={() => { setScope(sc); setTarget(""); }}
+              className={`h-9 rounded-[14px] text-[13px] font-bold ${scope === sc ? "bg-surface shadow-soft dark:bg-white/[0.1]" : "text-muted dark:text-[#a89f93]"}`}>
+              {sc === "department" ? "Department" : "Employee"}
+            </button>
+          ))}
+        </div>
+
+        <select value={target} onChange={(e) => setTarget(e.target.value)} className={`${field} mb-3`}>
+          <option value="">{scope === "department" ? "Choose department…" : "Choose employee…"}</option>
+          {options.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+        </select>
+
+        <div className="mb-3 grid grid-cols-2 gap-3">
+          <label className="block">
+            <span className="mb-1 block text-[12px] font-bold">Late (minutes)</span>
+            <input type="number" inputMode="numeric" min={0} max={240} value={late} onChange={(e) => setLate(e.target.value)} className={field} />
+          </label>
+          <label className="block">
+            <span className="mb-1 block text-[12px] font-bold">Early leave (minutes)</span>
+            <input type="number" inputMode="numeric" min={0} max={240} value={early} onChange={(e) => setEarly(e.target.value)} className={field} />
+          </label>
+        </div>
+        <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Note (optional) — e.g. comes from far" className={`${field} mb-3`} />
+
+        {err && <div className="mb-3 rounded-xl2 bg-danger-soft p-2.5 text-[13px] font-medium text-[#a8463a] dark:bg-danger/10 dark:text-danger">{err}</div>}
+
+        <div className="flex gap-3">
+          <button onClick={onClose} className="h-12 flex-1 rounded-xl2 border border-line font-semibold dark:border-white/10">Close</button>
+          <button onClick={save} disabled={saving || !data} className="h-12 flex-1 rounded-xl2 bg-ink font-bold text-white disabled:opacity-50 dark:bg-success dark:text-[#141414]">
+            {saving ? "Saving…" : "Save"}
           </button>
         </div>
       </div>
