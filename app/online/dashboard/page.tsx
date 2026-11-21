@@ -196,6 +196,8 @@ export default function HubDashboard() {
   const [cancels, setCancels] = useState<DashCancels | null>(null);
   const [salesNow, setSalesNow] = useState<SalesBreakdown | null>(null);
   const [salesPrev, setSalesPrev] = useState<SalesBreakdown | null>(null);
+  /* "All stores": one breakdown per store, shown side by side next to the total. */
+  const [salesByStore, setSalesByStore] = useState<Record<string, SalesBreakdown | null>>({});
 
   /* EVERY FIGURE ON THIS PAGE IS COUNTED IN THE DATABASE.
      This page used to fetch 1,000 orders and 1,000 parcels and add them up
@@ -226,7 +228,8 @@ export default function HubDashboard() {
       const t = o.error ? null : (o.data as ShopifySalesRow[] | null)?.find((x) => x.is_total);
       return t ? fromH308(t) : null;
     };
-    const [sum, br, rt, cnt, cx, sNow, sPrev] = await Promise.all([
+    const storeCodes = STORES.filter((s) => s.code !== "ALL").map((s) => s.code);
+    const [sum, br, rt, cnt, cx, sNow, sPrev, sStores] = await Promise.all([
       supabase.rpc("hub_dashboard_summary", args),
       supabase.rpc("hub_dashboard_breakdown", args),
       supabase.rpc("hub_return_rates", { p_months: 3 }),
@@ -234,6 +237,9 @@ export default function HubDashboard() {
       supabase.rpc("hub_dashboard_cancellations", args),
       salesFor(args),
       prev ? salesFor({ ...args, p_from: prev[0], p_to: prev[1] }) : Promise.resolve(null),
+      store === "ALL"
+        ? Promise.all(storeCodes.map((c) => salesFor({ ...args, p_store: c })))
+        : Promise.resolve([] as (SalesBreakdown | null)[]),
     ]);
     if (my !== reqId.current) return;          // superseded by a newer request
     const firstErr = sum.error ?? br.error ?? cnt.error;
@@ -247,6 +253,7 @@ export default function HubDashboard() {
        Shopify rows at the top of the Sales by store table simply don't render. */
     setSalesNow(sNow);
     setSalesPrev(sPrev);
+    setSalesByStore(store === "ALL" ? Object.fromEntries(storeCodes.map((c, i) => [c, sStores[i] ?? null])) : {});
     setBreakdown((br.data as Breakdown) ?? null);
     setRates((rt.data as RateRow[]) ?? []);
     setLoading(false);
@@ -527,13 +534,60 @@ export default function HubDashboard() {
       </div>
 
       {/* TOTAL SALES BREAKDOWN — Shopify's own finance card, line for line.
-          Respects the store picker above; the arrow compares with the same
+          "All stores" shows each store in its own column plus the total; one
+          store picked shows just that store. The arrow compares with the same
           number of days just before the chosen dates. */}
       <div className="mt-3 rounded-card border border-line bg-surface p-3 sm:mt-5 sm:p-5 dark:border-white/[0.06] dark:bg-[#201c17]">
         <h3 className="text-[13.5px] font-bold text-ink sm:text-[14px] dark:text-[#f4f1ea]">Total sales breakdown</h3>
         <p className="mt-0.5 text-[12px] text-muted dark:text-[#a89f93]">
           Breakdown of amount spent (subtotal, taxes, shipping, sales reversals, discounts, fees, etc.)
         </p>
+        {store === "ALL" ? (
+          /* All stores: one column per store, then the combined total with its
+             change against the previous period. */
+          <div className="-mx-1 mt-3 overflow-x-auto px-1">
+            <table className="w-full min-w-[620px] border-separate border-spacing-0 text-[13.5px] tabular-nums">
+              <thead>
+                <tr className="text-[11.5px] font-semibold text-muted dark:text-[#a89f93]">
+                  <th className="px-2.5 py-2 text-left font-semibold">&nbsp;</th>
+                  {STORES.filter((s) => s.code !== "ALL").map((s) => (
+                    <th key={s.code} className="px-2.5 py-2 text-right font-semibold">
+                      <span className="inline-flex items-center gap-1.5">
+                        <span className="h-2 w-2 rounded-full" style={{ background: s.color }} />{s.label}
+                      </span>
+                    </th>
+                  ))}
+                  <th className="px-2.5 py-2 text-right font-semibold">All stores</th>
+                  <th className="w-16" />
+                </tr>
+              </thead>
+              <tbody>
+                {BREAKDOWN_ROWS.map((row, i) => {
+                  const fmt = (x: number) => (loading ? "—" : (row.neg && x > 0 ? "−" : "") + rs(x));
+                  const v = Number(salesNow?.[row.key] ?? 0);
+                  const p = salesPrev ? Number(salesPrev[row.key] ?? 0) : null;
+                  const bg = i % 2 ? "bg-panel/70 dark:bg-white/[0.04]" : "";
+                  const strong = row.key === "net_sales" || row.key === "total_sales";
+                  return (
+                    <tr key={row.key}>
+                      <td className={`rounded-l-lg px-2.5 py-2.5 text-blue-700 dark:text-[#9db8f0] ${bg}`}>{row.label}</td>
+                      {STORES.filter((s) => s.code !== "ALL").map((s) => {
+                        const sv = Number(salesByStore[s.code]?.[row.key] ?? 0);
+                        return (
+                          <td key={s.code} className={`whitespace-nowrap px-2.5 py-2.5 text-right text-ink dark:text-[#f4f1ea] ${strong ? "font-semibold" : ""} ${bg}`}>
+                            {fmt(sv)}
+                          </td>
+                        );
+                      })}
+                      <td className={`whitespace-nowrap px-2.5 py-2.5 text-right font-bold text-ink dark:text-[#f4f1ea] ${bg}`}>{fmt(v)}</td>
+                      <td className={`rounded-r-lg py-2.5 pr-2.5 text-right ${bg}`}><Change now={v} prev={loading ? null : p} /></td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        ) : (
         <div className="mt-3">
           {BREAKDOWN_ROWS.map((row, i) => {
             const v = Number(salesNow?.[row.key] ?? 0);
@@ -552,6 +606,7 @@ export default function HubDashboard() {
             );
           })}
         </div>
+        )}
       </div>
 
       <div className="mt-4 grid gap-4 lg:grid-cols-2">
