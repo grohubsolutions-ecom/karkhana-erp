@@ -99,6 +99,8 @@ type Cell = { pp: number; bonus: number };
 type DayRow = { ds: string; vals: number[]; total: number };
 /** One receipt in the drill-down — the audit trail for a payout dispute. */
 type Rec = { no: string; short: number; pp: number; total: number; codes: string[]; comm: number };
+/** One barcode in the drill-down — commission earned by one article on one day. */
+type BarcodeRec = { item_code: string; item_name: string; qty: number; rate: number; comm: number };
 
 /* ── small local helpers ─────────────────────────────────────────────────── */
 
@@ -192,6 +194,8 @@ export default function CommissionsPage() {
   /* drill-down */
   const [drill, setDrill] = useState<{ bid: number; ds: string; name: string } | null>(null);
   const [drillRows, setDrillRows] = useState<Rec[] | null>(null);
+  const [drillView, setDrillView] = useState<"receipt" | "barcode">("receipt");
+  const [drillBarcodes, setDrillBarcodes] = useState<BarcodeRec[] | null>(null);
 
   /* editors */
   const [q, setQ] = useState("");
@@ -463,12 +467,12 @@ export default function CommissionsPage() {
   /* ── drill-down: the receipts behind one cell ──────────────────────────── */
 
   useEffect(() => {
-    if (!drill) { setDrillRows(null); return; }
+    if (!drill) { setDrillRows(null); setDrillBarcodes(null); return; }
     let live = true;
     (async () => {
       if (!isSupabaseConfigured || !supabase) { setDrillRows([]); return; }
       const db = supabase;
-      setDrillRows(null);
+      setDrillRows(null); setDrillBarcodes(null); setDrillView("receipt");
       /* Ordered on id for the same reason as the grid read above. One shop and
          one day is rarely more than a page, so this one is unlikely to be bitten
          — but "unlikely" is not a property of a paged read, and the figure this
@@ -518,6 +522,37 @@ export default function CommissionsPage() {
         }
       }
       setDrillRows(out);
+
+      /* ── barcode-level aggregation ─────────────────────────────────────
+       * Same raw rows, different grouping: one row per item_code with its
+       * total quantity and commission for this shop-day. The receipt view is
+       * the audit trail; this is "which articles earned what". */
+      const bcMap: Record<string, BarcodeRec> = {};
+      rows.forEach((l) => {
+        const code = String(l.item_code ?? "");
+        if (!code) return;
+        const br = (bcMap[code] ??= { item_code: code, item_name: "", qty: 0, rate: 0, comm: 0 });
+        if (!br.item_name) {
+          const m = masterMap.get(code);
+          br.item_name = m?.item_name ? String(m.item_name) : "";
+        }
+        br.qty += num(l.quantity);
+      });
+      Object.values(bcMap).forEach((br) => {
+        if (isDHA) {
+          const cm = fcMap.get(br.item_code);
+          if (cm != null) { br.rate = cm; br.comm = Math.round(cm * br.qty); }
+        } else {
+          const m = masterMap.get(br.item_code);
+          if (m) {
+            br.rate = Math.round(num(m.retail_price) * (num(m.percentage) / 100) * 100) / 100;
+            br.comm = Math.round(num(m.retail_price) * (num(m.percentage) / 100) * br.qty);
+          }
+        }
+      });
+      setDrillBarcodes(
+        Object.values(bcMap).filter((br) => br.comm !== 0).sort((a, b) => b.comm - a.comm)
+      );
     })();
     return () => { live = false; };
   }, [drill, dhaId, fcMap, masterMap, cfg]);
@@ -687,6 +722,16 @@ export default function CommissionsPage() {
     { head: "Receipt", bold: true, cell: (r) => r.no },
     { head: "Total amount", right: true, cell: (r) => money(r.total) },
     { head: "Commissionable items", muted: true, cell: (r) => (r.codes.length ? r.codes.join(", ") : "—") },
+    { head: "Commission", right: true, bold: true, cell: (r) => (
+        <span className={r.comm < 0 ? "text-danger" : undefined}>{money(r.comm)}</span>
+      ) },
+  ];
+
+  const barcodeCols: Col<BarcodeRec>[] = [
+    { head: "Barcode", bold: true, cell: (r) => r.item_code },
+    { head: "Name", muted: true, cell: (r) => r.item_name || "—" },
+    { head: "Qty", right: true, cell: (r) => String(r.qty) },
+    { head: "Rate / pc", right: true, muted: true, cell: (r) => money(r.rate) },
     { head: "Commission", right: true, bold: true, cell: (r) => (
         <span className={r.comm < 0 ? "text-danger" : undefined}>{money(r.comm)}</span>
       ) },
@@ -1169,35 +1214,55 @@ export default function CommissionsPage() {
 
       {/* ══ DRILL-DOWN ════════════════════════════════════════════════════ */}
       <Modal open={!!drill} onClose={() => setDrill(null)} wide
-        title={drill ? `${drill.name} — ${drill.ds}` : ""}
-        subtitle="Receipt by receipt. This is the audit trail behind that figure.">
-        <DataTable cols={drillCols} rows={drillRows ?? []} loading={drillRows === null} minWidth={640}
-          empty="No commission earned on this day."
-          /* Two cells on a phone. The kit keeps this row when the table becomes
-             cards — it is the figure the day is being checked against — but four
-             cells of padding plus two rupee totals is wider than a 390px dialog,
-             and the box clips instead of scrolling, so the commission total
-             would be the part cut off. */
-          footer={phone ? (
-            <tr className="bg-panel/70 text-ink dark:bg-white/[0.04] dark:text-[#f4f1ea]">
-              <td className="px-3.5 py-3 text-[12.5px] font-bold">
-                {(drillRows ?? []).length} bill{(drillRows ?? []).length === 1 ? "" : "s"} · {money((drillRows ?? []).reduce((a, r) => a + r.total, 0))}
-              </td>
-              <td className="px-3.5 py-3 text-right text-[12.5px] font-extrabold tabular-nums">{money((drillRows ?? []).reduce((a, r) => a + r.comm, 0))}</td>
-            </tr>
-          ) : (
-            <tr className="bg-panel/70 text-ink dark:bg-white/[0.04] dark:text-[#f4f1ea]">
-              <td className="px-4 py-3 text-[12.5px] font-bold">{(drillRows ?? []).length} bill{(drillRows ?? []).length === 1 ? "" : "s"}</td>
-              <td className="px-4 py-3 text-right text-[12.5px] font-bold tabular-nums">{money((drillRows ?? []).reduce((a, r) => a + r.total, 0))}</td>
-              <td />
-              <td className="px-4 py-3 text-right text-[12.5px] font-extrabold tabular-nums">{money((drillRows ?? []).reduce((a, r) => a + r.comm, 0))}</td>
-            </tr>
-          )} />
-        <p className="mt-3 text-[12px] leading-relaxed text-muted dark:text-[#a89f93]">
-          Receipts that earned nothing are left out. <strong>Commission</strong> is this bill&apos;s per-piece total
-          {cfg.bonus_basis === "receipt" ? " plus its slab bonus" : ""}, rounded — the day figure in the grid is the sum of these
-          {cfg.bonus_basis === "day" ? ", plus one slab bonus on the day's sales total" : ""}.
-        </p>
+        title={drill ? `${drill.name} — ${dayFull(drill.ds)}` : ""}
+        subtitle="The figures behind that cell — by receipt or by barcode.">
+        {/* Receipt / Barcode toggle */}
+        <div className="mb-3 inline-flex rounded-full border border-line bg-surface p-1 dark:border-white/10 dark:bg-white/[0.06]">
+          {([["receipt", "By receipt"], ["barcode", "By barcode"]] as const).map(([v, label]) => (
+            <button key={v} onClick={() => setDrillView(v)}
+              className={`inline-flex min-h-[32px] items-center gap-1.5 rounded-full px-3 text-[12px] font-semibold transition ${
+                drillView === v ? "bg-ink text-white dark:bg-white dark:text-[#141414]" : "text-muted dark:text-[#a89f93]"}`}>
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {drillView === "receipt" ? (
+          <>
+            <DataTable cols={drillCols} rows={drillRows ?? []} loading={drillRows === null} minWidth={640}
+              empty="No commission earned on this day."
+              footer={phone ? (
+                <tr className="bg-panel/70 text-ink dark:bg-white/[0.04] dark:text-[#f4f1ea]">
+                  <td className="px-3.5 py-3 text-[12.5px] font-bold">
+                    {(drillRows ?? []).length} bill{(drillRows ?? []).length === 1 ? "" : "s"} · {money((drillRows ?? []).reduce((a, r) => a + r.total, 0))}
+                  </td>
+                  <td className="px-3.5 py-3 text-right text-[12.5px] font-extrabold tabular-nums">{money((drillRows ?? []).reduce((a, r) => a + r.comm, 0))}</td>
+                </tr>
+              ) : (
+                <tr className="bg-panel/70 text-ink dark:bg-white/[0.04] dark:text-[#f4f1ea]">
+                  <td className="px-4 py-3 text-[12.5px] font-bold">{(drillRows ?? []).length} bill{(drillRows ?? []).length === 1 ? "" : "s"}</td>
+                  <td className="px-4 py-3 text-right text-[12.5px] font-bold tabular-nums">{money((drillRows ?? []).reduce((a, r) => a + r.total, 0))}</td>
+                  <td />
+                  <td className="px-4 py-3 text-right text-[12.5px] font-extrabold tabular-nums">{money((drillRows ?? []).reduce((a, r) => a + r.comm, 0))}</td>
+                </tr>
+              )} />
+            <p className="mt-3 text-[12px] leading-relaxed text-muted dark:text-[#a89f93]">
+              Receipts that earned nothing are left out. <strong>Commission</strong> is this bill&apos;s per-piece total
+              {cfg.bonus_basis === "receipt" ? " plus its slab bonus" : ""}, rounded — the day figure in the grid is the sum of these
+              {cfg.bonus_basis === "day" ? ", plus one slab bonus on the day's sales total" : ""}.
+            </p>
+          </>
+        ) : (
+          <>
+            <DataTable cols={barcodeCols} rows={drillBarcodes ?? []} loading={drillBarcodes === null} minWidth={640}
+              empty="No barcode earned commission on this day." />
+            <p className="mt-3 text-[12px] leading-relaxed text-muted dark:text-[#a89f93]">
+              One row per article — total quantity sold and the commission it earned on this day.
+              <strong> Rate / pc</strong> is retail price × percentage from the master;
+              barcodes not on the rate sheet are left out.
+            </p>
+          </>
+        )}
         <div className="mt-4 flex justify-end"><button onClick={() => setDrill(null)} className={`${btnGhost} max-md:w-full`}>Close</button></div>
       </Modal>
 
