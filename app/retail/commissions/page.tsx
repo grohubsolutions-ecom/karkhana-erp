@@ -51,7 +51,7 @@
  *   go through fetchAll.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Coins, Percent, Gift, Plus, Search, Save, Trash2, AlertTriangle, Pencil, Share2, LayoutGrid, ReceiptText } from "lucide-react";
+import { Coins, Percent, Gift, Plus, Search, Save, Trash2, AlertTriangle, Pencil, Share2, LayoutGrid, ReceiptText, ImageDown } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import Modal, { Field, inputCls, btnPrimary, btnGhost } from "@/components/Modal";
 import {
@@ -196,6 +196,7 @@ export default function CommissionsPage() {
   const [drillRows, setDrillRows] = useState<Rec[] | null>(null);
   const [drillView, setDrillView] = useState<"receipt" | "barcode">("receipt");
   const [drillBarcodes, setDrillBarcodes] = useState<BarcodeRec[] | null>(null);
+  const [drillNote, setDrillNote] = useState("");
 
   /* editors */
   const [q, setQ] = useState("");
@@ -737,6 +738,148 @@ export default function CommissionsPage() {
       ) },
   ];
 
+  /* ── drill-down PNG ────────────────────────────────────────────────────
+     Same canvas approach as StatementSheet — no html2canvas, no dependency,
+     exact pixel figures. The image shows whichever view is active. */
+  function drillPng() {
+    if (!drill) return;
+    const isBarcode = drillView === "barcode";
+    const rows = isBarcode ? (drillBarcodes ?? []) : (drillRows ?? []);
+    if (!rows.length) return;
+
+    const W = 1100, PAD = 48, HEAD = 170, ROW = 56, TOTAL = 76, FOOT = 56;
+    const H = HEAD + rows.length * ROW + TOTAL + FOOT;
+    const scale = 2;
+    const c = document.createElement("canvas");
+    c.width = W * scale; c.height = H * scale;
+    const ctx = c.getContext("2d");
+    if (!ctx) return;
+    ctx.scale(scale, scale);
+    const F = (w: number, s: number) => `${w} ${s}px ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif`;
+
+    /* background */
+    ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, W, H);
+
+    /* header */
+    const g = ctx.createLinearGradient(0, 0, W, HEAD);
+    g.addColorStop(0, "#1d4ed8"); g.addColorStop(1, "#1e3a8a");
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, HEAD);
+    ctx.fillStyle = "rgba(255,255,255,0.82)"; ctx.font = F(700, 18);
+    ctx.fillText(isBarcode ? "BARCODE BREAKDOWN" : "RECEIPT BREAKDOWN", PAD, 56);
+    ctx.fillStyle = "#ffffff"; ctx.font = F(800, 36);
+    ctx.fillText(drill.name, PAD, 102);
+    ctx.font = F(600, 22);
+    ctx.fillText(dayFull(drill.ds), PAD, 140);
+
+    /* column header */
+    let y = HEAD;
+    ctx.fillStyle = "#f8fafc"; ctx.fillRect(0, y, W, 36);
+    ctx.fillStyle = "#64748b"; ctx.font = F(700, 13);
+    if (isBarcode) {
+      ctx.fillText("#", PAD, y + 24); ctx.fillText("BARCODE", PAD + 40, y + 24);
+      ctx.fillText("NAME", PAD + 220, y + 24);
+      ctx.textAlign = "right";
+      ctx.fillText("QTY", W - PAD - 280, y + 24);
+      ctx.fillText("RATE / PC", W - PAD - 140, y + 24);
+      ctx.fillText("COMMISSION", W - PAD, y + 24);
+      ctx.textAlign = "left";
+    } else {
+      ctx.fillText("#", PAD, y + 24); ctx.fillText("RECEIPT", PAD + 40, y + 24);
+      ctx.textAlign = "right";
+      ctx.fillText("SALE AMOUNT", W - PAD - 200, y + 24);
+      ctx.fillText("COMMISSION", W - PAD, y + 24);
+      ctx.textAlign = "left";
+    }
+    ctx.strokeStyle = "#e2e8f0"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(0, y + 35.5); ctx.lineTo(W, y + 35.5); ctx.stroke();
+    y += 36;
+
+    /* data rows */
+    let totalComm = 0;
+    rows.forEach((row, i) => {
+      if (i % 2) { ctx.fillStyle = "#f8fafc"; ctx.fillRect(0, y, W, ROW); }
+      ctx.fillStyle = "#94a3b8"; ctx.font = F(700, 16);
+      ctx.fillText(String(i + 1), PAD, y + ROW / 2 + 5);
+
+      if (isBarcode) {
+        const br = row as BarcodeRec;
+        totalComm += br.comm;
+        ctx.fillStyle = "#0f172a"; ctx.font = F(700, 18);
+        ctx.fillText(br.item_code, PAD + 40, y + ROW / 2 + 5);
+        ctx.fillStyle = "#64748b"; ctx.font = F(500, 16);
+        const name = br.item_name || "—";
+        ctx.fillText(name.length > 24 ? name.slice(0, 23) + "…" : name, PAD + 220, y + ROW / 2 + 5);
+        ctx.textAlign = "right";
+        ctx.fillStyle = "#0f172a"; ctx.font = F(600, 18);
+        ctx.fillText(String(br.qty), W - PAD - 280, y + ROW / 2 + 5);
+        ctx.fillStyle = "#64748b"; ctx.font = F(500, 18);
+        ctx.fillText(money(br.rate), W - PAD - 140, y + ROW / 2 + 5);
+        ctx.fillStyle = "#0f172a"; ctx.font = F(800, 18);
+        ctx.fillText(money(br.comm), W - PAD, y + ROW / 2 + 5);
+        ctx.textAlign = "left";
+      } else {
+        const rc = row as Rec;
+        totalComm += rc.comm;
+        ctx.fillStyle = "#0f172a"; ctx.font = F(700, 18);
+        ctx.fillText(rc.no, PAD + 40, y + ROW / 2 + 5);
+        ctx.textAlign = "right";
+        ctx.fillStyle = "#0f172a"; ctx.font = F(600, 18);
+        ctx.fillText(money(rc.total), W - PAD - 200, y + ROW / 2 + 5);
+        ctx.font = F(800, 18);
+        ctx.fillText(money(rc.comm), W - PAD, y + ROW / 2 + 5);
+        ctx.textAlign = "left";
+      }
+      ctx.strokeStyle = "#e2e8f0"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(0, y + ROW - 0.5); ctx.lineTo(W, y + ROW - 0.5); ctx.stroke();
+      y += ROW;
+    });
+
+    /* total bar */
+    ctx.fillStyle = "#0f172a"; ctx.fillRect(0, y, W, TOTAL);
+    ctx.fillStyle = "#ffffff"; ctx.font = F(800, 22);
+    ctx.fillText("TOTAL", PAD, y + TOTAL / 2 + 8);
+    ctx.textAlign = "right"; ctx.font = F(800, 28);
+    ctx.fillText(money(totalComm), W - PAD, y + TOTAL / 2 + 10);
+    ctx.textAlign = "left";
+    y += TOTAL;
+
+    /* footer */
+    ctx.fillStyle = "#64748b"; ctx.font = F(500, 15);
+    ctx.fillText(`Grohub Solutions · ${drill.name} · ${dayFull(drill.ds)}`, PAD, y + FOOT / 2 + 5);
+
+    /* download */
+    const a = document.createElement("a");
+    a.download = `commission-${isBarcode ? "barcode" : "receipt"}-${drill.ds}.png`;
+    a.href = c.toDataURL("image/png");
+    a.click();
+    setDrillNote("Picture saved.");
+    setTimeout(() => setDrillNote(""), 4000);
+  }
+
+  async function shareDrill() {
+    if (!drill) return;
+    const isBarcode = drillView === "barcode";
+    const lines: string[] = [];
+    lines.push(`*${drill.name} — ${dayFull(drill.ds)}*`);
+    lines.push(isBarcode ? "Barcode breakdown" : "Receipt breakdown");
+    lines.push("");
+    if (isBarcode) {
+      (drillBarcodes ?? []).forEach((br, i) =>
+        lines.push(`${i + 1}. ${br.item_code}${br.item_name ? ` (${br.item_name})` : ""} × ${br.qty} = ${money(br.comm)}`));
+      const total = (drillBarcodes ?? []).reduce((a, r) => a + r.comm, 0);
+      lines.push("", `*Total: ${money(total)}*`);
+    } else {
+      (drillRows ?? []).forEach((rc, i) =>
+        lines.push(`${i + 1}. ${rc.no}: sale ${money(rc.total)} → comm ${money(rc.comm)}`));
+      const total = (drillRows ?? []).reduce((a, r) => a + r.comm, 0);
+      lines.push("", `*Total: ${money(total)}*`);
+    }
+    const r = await shareOrCopy(lines.join("\n"), `Commission — ${drill.name}`);
+    if (r === "cancelled") return;
+    setDrillNote(r === "shared" ? "Sent." : r === "copied" ? "Copied — paste it into WhatsApp." : "Could not share.");
+    setTimeout(() => setDrillNote(""), 4000);
+  }
+
   const staleCols: Col<Stale>[] = [
     { head: "", cell: (r) => (
         <input type="checkbox" checked={staleSel.includes(String(r.item_code))}
@@ -1263,7 +1406,20 @@ export default function CommissionsPage() {
             </p>
           </>
         )}
-        <div className="mt-4 flex justify-end"><button onClick={() => setDrill(null)} className={`${btnGhost} max-md:w-full`}>Close</button></div>
+        <div className="mt-4 flex flex-wrap items-center justify-end gap-2">
+          {drillNote && <span className="mr-auto text-[12.5px] font-semibold text-success">{drillNote}</span>}
+          <button onClick={shareDrill}
+            disabled={drillView === "receipt" ? !drillRows?.length : !drillBarcodes?.length}
+            className="inline-flex min-h-[40px] items-center gap-1.5 rounded-full border border-line bg-surface px-3.5 text-[12.5px] font-semibold text-ink transition hover:bg-panel disabled:opacity-40 dark:border-white/10 dark:bg-white/[0.06] dark:text-white">
+            <Share2 size={14} /> Share
+          </button>
+          <button onClick={drillPng}
+            disabled={drillView === "receipt" ? !drillRows?.length : !drillBarcodes?.length}
+            className="inline-flex min-h-[40px] items-center gap-1.5 rounded-full border border-line bg-surface px-3.5 text-[12.5px] font-semibold text-ink transition hover:bg-panel disabled:opacity-40 dark:border-white/10 dark:bg-white/[0.06] dark:text-white">
+            <ImageDown size={14} /> Download image
+          </button>
+          <button onClick={() => setDrill(null)} className={`${btnGhost} max-md:w-full`}>Close</button>
+        </div>
       </Modal>
 
       {/* ══ ITEM RATE EDITOR ══════════════════════════════════════════════ */}
