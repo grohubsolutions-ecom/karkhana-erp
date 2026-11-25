@@ -70,10 +70,10 @@ update online_orders o set closed_at = last.closed_at, closed_src_at = last.upd
 -------------------------------------------------------------------------------
 create table if not exists online_call_settings (
   id int primary key default 1 check (id = 1),
-  bonus_amount numeric not null default 200,
+  bonus_amount numeric not null default 100,
   starts_on date not null default date '2026-11-25',
   archive_lookback_days int not null default 30,
-  return_lookback_days int not null default 3,
+  return_lookback_days int not null default 0,
   max_no_answer int not null default 3,
   updated_at timestamptz default now(),
   updated_by uuid
@@ -288,9 +288,11 @@ $$;
 --           'office'  — answers waiting for Create / Cancel / Wait
 --           'history' — finished in the last p_days
 -------------------------------------------------------------------------------
-create or replace function hub_call_board(p_view text default 'agent', p_days int default 7) returns jsonb
+drop function if exists hub_call_board(text, int);
+create or replace function hub_call_board(p_view text default 'agent', p_days int default 7, p_store text default null) returns jsonb
 language plpgsql security definer set search_path = public as $$
 declare v_rows jsonb; v_counts jsonb; v_refresh jsonb; v_manage boolean := hub_call_may_manage();
+        v_store text := nullif(nullif(upper(btrim(coalesce(p_store, ''))), 'ALL'), '');
         v_today timestamptz := date_trunc('day', now() at time zone 'Asia/Karachi') at time zone 'Asia/Karachi';
 begin
   if not hub_call_may_work() then
@@ -305,8 +307,9 @@ begin
     'office',   count(*) filter (where status = 'to_office'),
     'waiting',  count(*) filter (where status = 'waiting'),
     'done_today', count(*) filter (where status = 'done' and office_at >= v_today),
-    'called_today', (select count(*) from online_call_log g where g.who = 'agent' and g.at >= v_today))
-    into v_counts from online_call_cases;
+    'called_today', (select count(*) from online_call_log g join online_call_cases cc on cc.id = g.case_id
+                      where g.who = 'agent' and g.at >= v_today and (v_store is null or cc.store_code = v_store)))
+    into v_counts from online_call_cases where (v_store is null or store_code = v_store);
 
   select coalesce(jsonb_agg(r order by r_sort, r_at), '[]'::jsonb) into v_rows from (
     select jsonb_build_object(
@@ -353,7 +356,8 @@ begin
                           where oo.shopify_order_id = c.shopify_order_id
                              or (c.shopify_order_id is null and oo.order_number = c.order_number and oo.store_code = c.store_code)
                           order by oo.id desc limit 1) o on true
-     where case p_view
+     where (v_store is null or c.store_code = v_store)
+       and case p_view
              when 'agent'   then c.status = 'to_call'
              when 'office'  then c.status in ('to_office', 'waiting')
              when 'history' then c.status in ('done', 'dropped')
@@ -563,10 +567,10 @@ revoke all on function hub_call_refresh() from public, anon, authenticated;
 revoke all on function hub_call_user_has(uuid, text) from public, anon, authenticated;
 revoke all on function hub_call_parcel_state(text, text) from public, anon, authenticated;
 revoke all on function hub_call_items(bigint) from public, anon, authenticated;
-revoke all on function hub_call_board(text, int), hub_call_answer(bigint, text, text, timestamptz),
+revoke all on function hub_call_board(text, int, text), hub_call_answer(bigint, text, text, timestamptz),
   hub_call_decide(bigint, text, text, text), hub_call_bonus(date), hub_call_settings_set(numeric, date)
   from public, anon;
-grant execute on function hub_call_board(text, int), hub_call_answer(bigint, text, text, timestamptz),
+grant execute on function hub_call_board(text, int, text), hub_call_answer(bigint, text, text, timestamptz),
   hub_call_decide(bigint, text, text, text), hub_call_bonus(date), hub_call_settings_set(numeric, date),
   hub_call_may_work(), hub_call_may_manage() to authenticated;
 

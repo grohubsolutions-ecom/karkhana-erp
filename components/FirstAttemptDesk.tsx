@@ -367,10 +367,15 @@ const SELECT = "h-11 min-w-0 rounded-full border border-line bg-surface px-3 tex
    while typing) springs back under the finger, and the tap lands on the bar. */
 const keepFocus = (e: { preventDefault: () => void }) => e.preventDefault();
 
-export default function FirstAttemptDesk({ compact = false, onCount }: {
+export default function FirstAttemptDesk({ compact = false, onCount, courierFilter, storeFilter, onCourierCounts }: {
   compact?: boolean;
   /* The portal puts this number on its tab: what is on the desk right now. */
   onCount?: (n: number) => void;
+  /* H322 — the Calling Agent page picks the courier and the shop itself, with
+     its own tabs; when given, the desk's own courier dropdown is hidden. */
+  courierFilter?: "All" | "PostEx" | "OwnEx";
+  storeFilter?: "All" | "LM" | "TS" | "TRZ";
+  onCourierCounts?: (c: { PostEx: number; OwnEx: number }) => void;
 }) {
   const phone = useIsPhone();
   /* Two lists, kept apart: today's desk and the History. */
@@ -379,7 +384,9 @@ export default function FirstAttemptDesk({ compact = false, onCount }: {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
   const [tab, setTab] = useState<Tab>("1");
-  const [courier, setCourier] = useState<"All" | "PostEx" | "OwnEx">("All");
+  const [courierOwn, setCourier] = useState<"All" | "PostEx" | "OwnEx">("All");
+  const courier = courierFilter ?? courierOwn;
+  const shopOk = (r: { store_code: string | null }) => !storeFilter || storeFilter === "All" || r.store_code === storeFilter;
   const [span, setSpan] = useState<Span>("7");
   const [kind, setKind] = useState<Kind>("all");
   const [q, setQ] = useState("");
@@ -463,9 +470,17 @@ export default function FirstAttemptDesk({ compact = false, onCount }: {
 
   /* ---------------------------------------------------------- today's desk */
   const byCourier = useMemo(
-    () => (desk?.rows ?? []).filter((r) => courier === "All" || r.courier === courier),
-    [desk, courier]
+    () => (desk?.rows ?? []).filter((r) => (courier === "All" || r.courier === courier) && shopOk(r)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [desk, courier, storeFilter]
   );
+  /* H322: how many of each courier are on the desk, for the page's own tabs. */
+  useEffect(() => {
+    if (!onCourierCounts) return;
+    const rows = (desk?.rows ?? []).filter(shopOk);
+    onCourierCounts({ PostEx: rows.filter((r) => r.courier === "PostEx").length, OwnEx: rows.filter((r) => r.courier === "OwnEx").length });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [desk, storeFilter, onCourierCounts]);
   /* A fourth try belongs with the third, not nowhere. The try is ours as well
      as the courier's count (H297): re-attempted twice means a third try. */
   const tabOf = (r: Row): Tab => (triesOf(r) >= 3 ? "3" : triesOf(r) === 2 ? "2" : "1");
@@ -483,8 +498,9 @@ export default function FirstAttemptDesk({ compact = false, onCount }: {
 
   /* ------------------------------------------------------------ Follow-up */
   const followShown = useMemo(
-    () => (desk?.follow ?? []).filter((r) => courier === "All" || r.courier === courier),
-    [desk, courier]
+    () => (desk?.follow ?? []).filter((r) => (courier === "All" || r.courier === courier) && shopOk(r)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [desk, courier, storeFilter]
   );
 
   /* --------------------------------------------------------------- History */
@@ -493,11 +509,13 @@ export default function FirstAttemptDesk({ compact = false, onCount }: {
     const digits = needle.replace(/\D/g, "");
     return (hist?.rows ?? []).filter((r) => {
       if (courier !== "All" && r.courier !== courier) return false;
+      if (!shopOk(r)) return false;
       if (!needle) return true;
       return [r.order_number, r.tracking_id, r.customer_name, r.city].some((v) => (v ?? "").toLowerCase().includes(needle))
         || (digits.length >= 4 && dial(r.phone).includes(digits));
     });
-  }, [hist, courier, q]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hist, courier, q, storeFilter]);
   const kindCounts = useMemo(() => {
     const c: Record<string, number> = {};
     for (const r of histBase) c[r.left_as] = (c[r.left_as] ?? 0) + 1;
@@ -744,11 +762,13 @@ export default function FirstAttemptDesk({ compact = false, onCount }: {
 
       {/* ------------------------------------------------ narrow it down */}
       <div className={`mt-2 grid gap-2 md:flex md:flex-wrap md:items-center ${view === "history" ? "grid-cols-2" : "grid-cols-[minmax(0,1fr)_auto]"}`}>
+        {!courierFilter && (
         <select value={courier} onChange={(e) => setCourier(e.target.value as typeof courier)} aria-label="Courier" className={SELECT}>
           <option value="All">Both couriers</option>
           <option value="PostEx">PostEx</option>
           <option value="OwnEx">OwnEx</option>
         </select>
+        )}
         {view === "history" && (
           <select value={span} onChange={(e) => setSpan(e.target.value as Span)} aria-label="Which days" className={SELECT}>
             {SPANS.map((x) => <option key={x.key} value={x.key}>{x.label}</option>)}
