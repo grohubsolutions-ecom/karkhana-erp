@@ -54,10 +54,10 @@ type Case = {
   bonus: ParcelState[] | null;
 };
 type Counts = { archive: number; return: number; later: number; office: number; waiting: number; done_today: number; called_today: number };
-type Board = { ok: boolean; error?: string; may_manage: boolean; counts: Counts; rows: Case[]; settings?: { bonus_amount: number; starts_on: string } };
-type BonusLine = { agent: string; source: string; worked_order: string; order_number: string; tracking_id: string; courier: string | null; delivery_status: string | null; cpr_number: string | null; earned_on: string | null; state: "earned" | "pending" | "lost"; amount: number; worked_at: string };
+type Board = { ok: boolean; error?: string; may_manage: boolean; counts: Counts; rows: Case[]; settings?: { bonus_amount: number; bonus_archive: number; bonus_review: number; bonus_return: number; starts_on: string } };
+type BonusLine = { agent: string; source: string; worked_order: string; order_number: string; tracking_id: string; courier: string | null; delivery_status: string | null; cpr_number: string | null; earned_on: string | null; state: "earned" | "pending" | "lost"; amount: number; rate: number; worked_at: string };
 type BonusPerson = { agent: string; earned_parcels: number; earned: number; pending_parcels: number; pending: number; lost_parcels: number };
-type Bonus = { ok: boolean; error?: string; month: string; bonus_amount: number; starts_on: string; may_manage: boolean; people: BonusPerson[]; lines: BonusLine[] };
+type Bonus = { ok: boolean; error?: string; month: string; bonus_amount: number; rates: { archive: number; review: number; return: number }; starts_on: string; may_manage: boolean; people: BonusPerson[]; lines: BonusLine[] };
 type Tab = "archive" | "review" | "return" | "office" | "history" | "bonus";
 type Shop = "All" | "LM" | "TS";
 type Courier = "All" | "PostEx" | "OwnEx";
@@ -180,8 +180,8 @@ export default function CallingAgentPage() {
         <p className="mt-1 max-w-[80ch] text-[13px] text-muted dark:text-[#a89f93]">
           Ring the customer, press what they said. Archived orders are for confirmation; Returns are parcels
           cancelled after dispatch — ask if they want it again. Every answer goes to the office, who create or
-          cancel the order. Bonus: {rs(board?.settings?.bonus_amount ?? 200)} for every parcel you worked that is
-          delivered and paid in the CPR / invoice.
+          cancel the order. Bonus per parcel you worked that is delivered and paid in the CPR / invoice:
+          Archived {rs(board?.settings?.bonus_archive ?? 50)} · Under Review {rs(board?.settings?.bonus_review ?? 100)} · Returns {rs(board?.settings?.bonus_return ?? 150)}.
         </p>
       </div>
 
@@ -530,7 +530,7 @@ function BonusView() {
       <div className="flex flex-wrap items-center gap-3">
         <input type="month" value={month} onChange={(e) => setMonth(e.target.value)}
           className="h-10 rounded-full border border-line bg-surface px-4 text-[13px] dark:border-white/10 dark:bg-[#201c17] dark:text-white" />
-        {data && <span className="text-[12.5px] text-muted">{rs(data.bonus_amount)} per parcel delivered and in a CPR / invoice · counted from {data.starts_on}</span>}
+        {data && <span className="text-[12.5px] text-muted">Per parcel delivered and in a CPR / invoice — Archived {rs(data.rates?.archive)} · Under Review {rs(data.rates?.review)} · Returns {rs(data.rates?.return)} · counted from {data.starts_on}</span>}
       </div>
       {err && <div className="mt-3 rounded-xl2 bg-red-50 px-4 py-3 text-[13px] text-red-700">{err}</div>}
       {loading ? <div className="flex items-center gap-2 py-10 text-muted"><Loader2 className="animate-spin" size={18} /> Loading…</div> : data && (
@@ -569,7 +569,7 @@ function BonusView() {
                     <td className="px-3 py-2">{l.delivery_status}</td>
                     <td className="px-3 py-2">{l.cpr_number ?? "—"}</td>
                     <td className="px-3 py-2">{l.earned_on ?? "—"}</td>
-                    <td className="px-3 py-2 font-bold">{l.state === "earned" ? rs(l.amount) : "—"}</td>
+                    <td className="px-3 py-2 font-bold">{l.state === "earned" ? rs(l.amount) : l.state === "pending" ? <span className="font-normal text-muted">{rs(l.rate)} if paid</span> : "—"}</td>
                   </tr>
                 ))}
               </tbody>

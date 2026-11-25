@@ -75,6 +75,9 @@ create table if not exists online_call_settings (
   archive_lookback_days int not null default 30,
   return_lookback_days int not null default 0,
   max_no_answer int not null default 3,
+  bonus_archive numeric not null default 50,     -- per section (owner, 25 Nov 2026)
+  bonus_review  numeric not null default 100,
+  bonus_return  numeric not null default 150,
   updated_at timestamptz default now(),
   updated_by uuid
 );
@@ -521,7 +524,11 @@ begin
       from dur d cross join lateral hub_call_parcel_state(d.store_code, d.order_number) ps
      where ps.tracking_id = d.only_tracking
   )
-  select p.*, case when p.state = 'earned' then s.bonus_amount else 0 end as amount
+  select p.*,
+         case p.source when 'archive' then s.bonus_archive when 'return' then s.bonus_return else s.bonus_review end as rate,
+         case when p.state = 'earned' then
+           case p.source when 'archive' then s.bonus_archive when 'return' then s.bonus_return else s.bonus_review end
+         else 0 end as amount
     from parcels p
    where hub_call_user_has(p.agent, 'hub.calling.work')
      and (v_manage or p.agent = auth.uid());
@@ -530,7 +537,7 @@ begin
            'agent', (select u.full_name from app_users u where u.id = b.agent),
            'source', b.source, 'worked_order', b.worked_order, 'order_number', b.order_number,
            'tracking_id', b.tracking_id, 'courier', b.courier, 'delivery_status', b.delivery_status,
-           'cpr_number', b.cpr_number, 'earned_on', b.earned_on, 'state', b.state, 'amount', b.amount,
+           'cpr_number', b.cpr_number, 'earned_on', b.earned_on, 'state', b.state, 'amount', b.amount, 'rate', b.rate,
            'worked_at', b.worked_at) order by b.earned_on desc nulls first, b.worked_at desc), '[]'::jsonb)
     into v_lines
     from _b b
@@ -544,22 +551,25 @@ begin
       'earned_parcels', count(*) filter (where b.state = 'earned' and b.earned_on >= v_from and b.earned_on < v_to),
       'earned', coalesce(sum(b.amount) filter (where b.state = 'earned' and b.earned_on >= v_from and b.earned_on < v_to), 0),
       'pending_parcels', count(*) filter (where b.state = 'pending'),
-      'pending', count(*) filter (where b.state = 'pending') * s.bonus_amount,
+      'pending', coalesce(sum(b.rate) filter (where b.state = 'pending'), 0),
       'lost_parcels', count(*) filter (where b.state = 'lost' and b.worked_at >= v_from and b.worked_at < v_to)) as x
       from _b b group by b.agent) y;
 
-  return jsonb_build_object('ok', true, 'month', v_from, 'bonus_amount', s.bonus_amount,
+  return jsonb_build_object('ok', true, 'month', v_from, 'bonus_amount', s.bonus_review,
+                            'rates', jsonb_build_object('archive', s.bonus_archive, 'review', s.bonus_review, 'return', s.bonus_return),
                             'starts_on', s.starts_on, 'may_manage', v_manage,
                             'people', v_people, 'lines', v_lines);
 end $$;
 
-create or replace function hub_call_settings_set(p_amount numeric, p_starts date) returns jsonb
+create or replace function hub_call_settings_set(p_archive numeric, p_review numeric, p_return numeric, p_starts date default null) returns jsonb
 language plpgsql security definer set search_path = public as $$
 begin
   if not hub_call_may_manage() then return jsonb_build_object('ok', false, 'error', 'Only the office changes this.'); end if;
-  if p_amount is null or p_amount < 0 then return jsonb_build_object('ok', false, 'error', 'Bonus must be zero or more.'); end if;
-  update online_call_settings set bonus_amount = p_amount, starts_on = coalesce(p_starts, starts_on),
-         updated_at = now(), updated_by = auth.uid() where id = 1;
+  if least(p_archive, p_review, p_return) < 0 or p_archive is null or p_review is null or p_return is null then
+    return jsonb_build_object('ok', false, 'error', 'Each bonus must be zero or more.');
+  end if;
+  update online_call_settings set bonus_archive = p_archive, bonus_review = p_review, bonus_return = p_return,
+         starts_on = coalesce(p_starts, starts_on), updated_at = now(), updated_by = auth.uid() where id = 1;
   return jsonb_build_object('ok', true);
 end $$;
 
@@ -568,10 +578,10 @@ revoke all on function hub_call_user_has(uuid, text) from public, anon, authenti
 revoke all on function hub_call_parcel_state(text, text) from public, anon, authenticated;
 revoke all on function hub_call_items(bigint) from public, anon, authenticated;
 revoke all on function hub_call_board(text, int, text), hub_call_answer(bigint, text, text, timestamptz),
-  hub_call_decide(bigint, text, text, text), hub_call_bonus(date), hub_call_settings_set(numeric, date)
+  hub_call_decide(bigint, text, text, text), hub_call_bonus(date), hub_call_settings_set(numeric, numeric, numeric, date)
   from public, anon;
 grant execute on function hub_call_board(text, int, text), hub_call_answer(bigint, text, text, timestamptz),
-  hub_call_decide(bigint, text, text, text), hub_call_bonus(date), hub_call_settings_set(numeric, date),
+  hub_call_decide(bigint, text, text, text), hub_call_bonus(date), hub_call_settings_set(numeric, numeric, numeric, date),
   hub_call_may_work(), hub_call_may_manage() to authenticated;
 
 commit;
