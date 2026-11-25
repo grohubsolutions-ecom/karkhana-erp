@@ -105,6 +105,9 @@ export const ROUTE_PERMS: Record<string, string[] | null> = {
      Abdul Rehman's returns print sheet. The logistics permissions are
      listed too so the office can see the same worklist. */
   "/online/logistics/first-attempt": ["returns.rescue", "hub.logistics.view", "hub.logistics.manage"],
+  /* H322 — calling agent. hub.calling.work is the agent's key; .manage is the
+     office that turns his answers into orders. */
+  "/online/calling": ["hub.calling.work", "hub.calling.manage"],
   "/online/finance": ["hub.finance.view", "hub.finance.manage"],
   "/online/attendance": ["hub.attendance.view", "hub.attendance.manage"],
   "/online/employees": ["hub.attendance.view", "hub.attendance.manage"],
