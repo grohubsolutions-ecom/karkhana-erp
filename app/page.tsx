@@ -28,9 +28,9 @@ const DEPARTMENTS = [
      sees it beside the other departments. */
   { href: "/wage-desk", title: "Daily Wage Desk", subtitle: "Karkhana daily workers · check in/out & cash pay", icon: Wallet, tint: "success", anim: "wallet", chip: "dark:bg-success",
     needs: ["wages.desk"] },
-  { href: "/online", title: "Hub Department", subtitle: "Online orders · Little Minors, TopShop, Trenzee", icon: ShoppingBag, tint: "periwinkle", anim: "bag", chip: "dark:bg-periwinkle",
+  { href: "/online", title: "Hub Department", subtitle: "Online orders · Little Minors, TopShop, Trenzee, Daraz", icon: ShoppingBag, tint: "periwinkle", anim: "bag", chip: "dark:bg-periwinkle",
     needs: ["hub.dashboard.view", "hub.orders.view", "hub.logistics.view", "hub.finance.view", "hub.attendance.view",
-            "hub.calling.work", "hub.calling.manage"] },
+            "hub.calling.work", "hub.calling.manage", "hub.daraz.view", "hub.daraz.manage"] },
   /* These two permissions never existed. The table has retail.access and, since
      0119, the retail.<area>.<verb> set — "retail.view" and "retail.manage" are
      neither, so can() returned false for every normal user and this box only

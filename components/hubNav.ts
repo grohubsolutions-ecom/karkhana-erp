@@ -1,4 +1,4 @@
-import { LayoutDashboard, ClipboardList, Truck, Wallet, CalendarCheck, Users, Undo2, AlertTriangle, PackageSearch, Gauge, PhoneCall, Headphones, type LucideIcon } from "lucide-react";
+import { LayoutDashboard, ClipboardList, Truck, Wallet, CalendarCheck, Users, Undo2, AlertTriangle, PackageSearch, Gauge, PhoneCall, Headphones, Store, Upload, type LucideIcon } from "lucide-react";
 import { requiredFor } from "@/lib/access";
 
 /* ONE LIST OF HUB PLACES, READ BY BOTH THE DESKTOP SIDEBAR AND THE PHONE BARS.
@@ -39,6 +39,14 @@ export const HUB_NAV: HubNavItem[] = [
   { label: "Finance", short: "Finance", href: "/online/finance", Icon: Wallet, children: [
       { label: "Settlements", href: "/online/finance", Icon: Wallet },
       { label: "Disputes", href: "/online/finance/disputes", Icon: AlertTriangle },
+  ] },
+  /* K200 — Daraz. No API (it is paid), so it runs on uploaded Seller Center
+     exports: orders and account statements. Kept apart from the Shopify pages
+     because Daraz delivers and pays by its own rules. */
+  { label: "Daraz", short: "Daraz", href: "/online/daraz", Icon: Store, children: [
+      { label: "Daraz Orders", short: "Orders", href: "/online/daraz", Icon: Store },
+      { label: "Daraz Finance", short: "Finance", href: "/online/daraz/finance", Icon: Wallet },
+      { label: "Upload files", short: "Upload", href: "/online/daraz/import", Icon: Upload },
   ] },
   /* People, grouped. Adding staff and marking attendance is one job. Logins and
      permissions stay in Administration. */

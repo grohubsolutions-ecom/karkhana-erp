@@ -118,6 +118,10 @@ export const ROUTE_PERMS: Record<string, string[] | null> = {
      line is what keeps the page out of their menu and out of their address
      bar. */
   "/online/performance": ["hub.attendance.manage"],
+  /* K200 — Daraz, fed by uploaded exports. Uploading is .manage only. */
+  "/online/daraz": ["hub.daraz.view", "hub.daraz.manage"],
+  "/online/daraz/finance": ["hub.daraz.view", "hub.daraz.manage"],
+  "/online/daraz/import": ["hub.daraz.view", "hub.daraz.manage"],
   "/me": null,
 };
 
@@ -140,6 +144,7 @@ export function karkhanaLanding(can: (req: string[] | null) => boolean): string 
    Mirrors the `needs` lists on the home screen (app/page.tsx). */
 export const OTHER_DEPARTMENT_PERMS = [
   "hub.dashboard.view", "hub.orders.view", "hub.logistics.view", "hub.finance.view", "hub.attendance.view",
+  "hub.daraz.view", "hub.daraz.manage",
   "retail.access", "retail.dashboard.view", "retail.sales.view", "retail.cashbook.view",
   "retail.expenses.view", "retail.employees.view", "retail.payroll.view",
   "carrefour.view", "carrefour.upload", "carrefour.orders.view", "carrefour.orders.manage",

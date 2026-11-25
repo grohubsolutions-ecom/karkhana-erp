@@ -37,6 +37,7 @@ const LANDING = [
   "/online/logistics/returns",
   "/online/finance",
   "/online/finance/disputes",
+  "/online/daraz",
   "/online/attendance",
   "/online/employees",
   "/online/calling",

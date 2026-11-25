@@ -5,6 +5,7 @@ import { ShoppingBag, Clock, Undo2, Wallet, TrendingUp, Truck, RefreshCw, MapPin
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { HubRange, PageActions, useIsPhone } from "@/components/HubUI";
 import { rangeDates, rs } from "@/lib/dateRange";
+import DarazDashCard from "@/components/DarazDashCard";
 
 const STORES = [
   { code: "ALL", label: "All stores", color: "#141414" },
@@ -608,6 +609,8 @@ export default function HubDashboard() {
         </div>
         )}
       </div>
+
+      {store === "ALL" && <DarazDashCard from={rangeDates(preset, cf, ct)[0]} to={rangeDates(preset, cf, ct)[1]} />}
 
       <div className="mt-4 grid gap-4 lg:grid-cols-2">
         <div className="min-w-0 rounded-card border border-line bg-surface p-4 sm:p-5 dark:border-white/[0.06] dark:bg-[#201c17]">
