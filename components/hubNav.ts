@@ -56,7 +56,20 @@ export const HUB_NAV: HubNavItem[] = [
 /* THE MENU SHOWS ONLY WHAT THE PERSON CAN OPEN. A parent disappears when none
    of its children survive, and a parent whose first child is refused points at
    the first child that is not. */
+/* H322 — a calling agent works remotely and sees nothing of the Hub but her
+   own desk. Articles is open to every Hub login (its stage owners hold no Hub
+   permission), so without this she saw Articles Management too. */
+const OTHER_HUB = [
+  "hub.dashboard.view", "hub.orders.view", "hub.orders.manage", "hub.logistics.view", "hub.logistics.manage",
+  "hub.finance.view", "hub.finance.manage", "hub.attendance.view", "hub.attendance.manage",
+  "hub.articles.view", "hub.articles.manage", "hub.calling.manage", "hub.whatsapp.view", "returns.rescue", "returns.print",
+];
+export function isCallingOnly(can: (req: string[] | null) => boolean): boolean {
+  return can(["hub.calling.work"]) && !can(OTHER_HUB);
+}
+
 export function visibleNav(can: (req: string[] | null) => boolean): HubNavItem[] {
+  if (isCallingOnly(can)) return HUB_NAV.filter((n) => n.href === "/online/calling");
   return HUB_NAV.map((n) => {
     if (n.children) {
       const kids = n.children.filter((c) => can(requiredFor(c.href)));

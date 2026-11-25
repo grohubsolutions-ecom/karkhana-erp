@@ -183,10 +183,10 @@ export default function CallingAgentPage() {
       <div className="hidden md:block">
         <h1 className="text-[22px] font-extrabold tracking-tight text-ink dark:text-[#f4f1ea]">Calling Agent</h1>
         <p className="mt-1 max-w-[80ch] text-[13px] text-muted dark:text-[#a89f93]">
-          Ring the customer, press what they said. Archived orders are for confirmation; Returns are parcels
-          cancelled after dispatch — ask if they want it again. Every answer goes to the office, who create or
-          cancel the order. Bonus per parcel you worked that is delivered and paid in the CPR / invoice:
-          Archived {rs(board?.settings?.bonus_archive ?? 50)} · Under Review {rs(board?.settings?.bonus_review ?? 100)} · Returns {rs(board?.settings?.bonus_return ?? 150)}.
+          {manage
+            ? <>Agents ring the customer and press what they said; their answers come to the Office tab for Create order / Cancel order / Wait.</>
+            : <>Ring the customer and press what they said. <b>Archived</b>: confirm the order. <b>Under Review</b>: call the customer, then press Re-attempt or Return. <b>Returns</b>: ask if they want the parcel again.</>}
+          {" "}Bonus per parcel that is delivered and paid: Archived {rs(board?.settings?.bonus_archive ?? 50)} · Under Review {rs(board?.settings?.bonus_review ?? 100)} · Returns {rs(board?.settings?.bonus_return ?? 150)}.
         </p>
       </div>
 
@@ -400,7 +400,7 @@ function CaseCard({ c, manage, onDone, onError }: { c: Case; manage: boolean; on
               {c.note && <div>Order note: {c.note}</div>}
             </div>
           )}
-          {(c.tags ?? []).length > 0 && <div className="mt-2 flex flex-wrap gap-1">{c.tags!.map((t) => <Badge key={t}>{t}</Badge>)}</div>}
+          {manage && (c.tags ?? []).length > 0 && <div className="mt-2 flex flex-wrap gap-1">{c.tags!.map((t) => <Badge key={t}>{t}</Badge>)}</div>}
         </div>
       </div>
 
