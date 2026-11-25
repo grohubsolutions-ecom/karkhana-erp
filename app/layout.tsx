@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import "./theme.css";
+import "./glass.css";
 import localFont from "next/font/local";
 import AppFrame from "@/components/AppFrame";
 import { ConfirmProvider } from "@/components/ConfirmDialog";
@@ -20,6 +21,12 @@ const jakarta = localFont({
 export const metadata: Metadata = {
   title: "Karkhana ERP — Head Office",
   description: "Raw-material inventory, production & piece-rate management",
+  /* N3: installable. On Android, Chrome offers "Install app" / "Add to Home
+     screen"; it then opens full-screen like a native app, no address bar. */
+  applicationName: "Grohub ERP",
+  appleWebApp: { capable: true, title: "Grohub ERP", statusBarStyle: "default" },
+  icons: { icon: "/icon.svg", apple: "/apple-touch-icon.png" },
+  formatDetection: { telephone: false },
 };
 
 export const viewport: Viewport = {

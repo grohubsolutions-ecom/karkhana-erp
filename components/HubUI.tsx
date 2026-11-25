@@ -110,18 +110,27 @@ export function PhoneFilters({ children }: { children: ReactNode }) {
 export function Segmented<T extends string>({ value, onChange, options, className = "" }: {
   value: T; onChange: (v: T) => void; options: { key: T; label: string; short?: string; badge?: ReactNode }[]; className?: string;
 }) {
+  /* N3 — on a phone, more than three tabs no longer squeeze into equal boxes
+     (that cut "Archived" to "Ar…"): they become one row of full-width pills
+     that scrolls sideways. Three or fewer still share the width evenly. */
+  const scroll = options.length > 3;
   return (
     <div role="tablist"
-      className={`grid gap-1 rounded-full bg-panel p-1 md:inline-flex md:w-max dark:bg-white/[0.05] ${className}`}
-      style={{ gridTemplateColumns: `repeat(${options.length}, minmax(0, 1fr))` }}>
+      className={`seg-track rounded-full bg-panel p-1 md:inline-flex md:w-max md:gap-1 dark:bg-white/[0.05] ${scroll
+        ? "flex max-w-full gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        : "grid gap-1"} ${className}`}
+      style={scroll ? undefined : { gridTemplateColumns: `repeat(${options.length}, minmax(0, 1fr))` }}>
       {options.map((o) => {
         const on = o.key === value;
         return (
           <button key={o.key} type="button" role="tab" aria-selected={on} onClick={() => onChange(o.key)}
-            className={`flex h-10 min-w-0 items-center justify-center gap-1 truncate rounded-full px-1 text-[12.5px] font-semibold transition md:h-auto md:px-4 md:py-1.5 ${on
-              ? "bg-ink text-white dark:bg-white dark:text-[#141414]"
+            className={`seg-btn flex h-10 items-center justify-center gap-1 rounded-full text-[12.5px] font-semibold transition md:h-auto md:px-4 md:py-1.5 ${scroll
+              ? "shrink-0 whitespace-nowrap px-3.5" : "min-w-0 truncate px-1"} ${on
+              ? "seg-on bg-ink text-white dark:bg-white dark:text-[#141414]"
               : "text-muted hover:text-ink active:bg-black/5 dark:text-[#a89f93] dark:hover:text-white dark:active:bg-white/10"}`}>
-            {o.short ? <><span className="truncate md:hidden">{o.short}</span><span className="hidden truncate md:inline">{o.label}</span></> : <span className="truncate">{o.label}</span>}{o.badge}
+            {o.short
+              ? <><span className={scroll ? "md:hidden" : "truncate md:hidden"}>{o.short}</span><span className="hidden truncate md:inline">{o.label}</span></>
+              : <span className={scroll ? "" : "truncate"}>{o.label}</span>}{o.badge}
           </button>
         );
       })}
