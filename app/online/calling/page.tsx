@@ -54,11 +54,13 @@ type Case = {
   bonus: ParcelState[] | null;
 };
 type Counts = { archive: number; return: number; later: number; office: number; waiting: number; done_today: number; called_today: number };
-type Board = { ok: boolean; error?: string; may_manage: boolean; counts: Counts; rows: Case[]; settings?: { bonus_amount: number; starts_on: string } };
-type BonusLine = { agent: string; source: string; worked_order: string; order_number: string; tracking_id: string; courier: string | null; delivery_status: string | null; cpr_number: string | null; earned_on: string | null; state: "earned" | "pending" | "lost"; amount: number; worked_at: string };
+type Board = { ok: boolean; error?: string; may_manage: boolean; counts: Counts; rows: Case[]; settings?: { bonus_amount: number; bonus_archive: number; bonus_review: number; bonus_return: number; starts_on: string } };
+type BonusLine = { agent: string; source: string; worked_order: string; order_number: string; tracking_id: string; courier: string | null; delivery_status: string | null; cpr_number: string | null; earned_on: string | null; state: "earned" | "pending" | "lost"; amount: number; rate: number; worked_at: string };
 type BonusPerson = { agent: string; earned_parcels: number; earned: number; pending_parcels: number; pending: number; lost_parcels: number };
-type Bonus = { ok: boolean; error?: string; month: string; bonus_amount: number; starts_on: string; may_manage: boolean; people: BonusPerson[]; lines: BonusLine[] };
+type Bonus = { ok: boolean; error?: string; month: string; bonus_amount: number; rates: { archive: number; review: number; return: number }; starts_on: string; may_manage: boolean; people: BonusPerson[]; lines: BonusLine[] };
 type Tab = "archive" | "review" | "return" | "office" | "history" | "bonus";
+type Shop = "All" | "LM" | "TS";
+type Courier = "All" | "PostEx" | "OwnEx";
 
 const rs = (v: unknown) => (v == null || v === "" ? "—" : "Rs " + Math.round(Number(v)).toLocaleString("en-PK"));
 const when = (iso: string | null) => (iso ? new Date(iso).toLocaleString("en-PK", { timeZone: "Asia/Karachi", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "—");
@@ -112,18 +114,24 @@ export default function CallingAgentPage() {
   const [msg, setMsg] = useState("");
   const [reviewCount, setReviewCount] = useState<number | null>(null);
   const [q, setQ] = useState("");
+  /* Shop filter for every tab; the office splits its answers by section;
+     Delivery Under Review splits by courier. */
+  const [shop, setShop] = useState<Shop>("All");
+  const [officeKind, setOfficeKind] = useState<Kind>("archive");
+  const [courier, setCourier] = useState<Courier>("All");
+  const [courierCounts, setCourierCounts] = useState<{ PostEx: number; OwnEx: number } | null>(null);
 
   const view = tab === "office" ? "office" : tab === "history" ? "history" : "agent";
 
   const load = useCallback(async () => {
     if (!supabase || tab === "review" || tab === "bonus") { setLoading(false); return; }
     setLoading(true); setErr("");
-    const { data, error } = await supabase.rpc("hub_call_board", { p_view: view, p_days: 14 });
+    const { data, error } = await supabase.rpc("hub_call_board", { p_view: view, p_days: 14, p_store: shop === "All" ? null : shop });
     if (error) setErr(error.message);
     else if (!data?.ok) setErr(data?.error ?? "Could not load.");
     else setBoard(data as Board);
     setLoading(false);
-  }, [view, tab]);
+  }, [view, tab, shop]);
 
   useEffect(() => { load(); }, [load]);
   /* The desk looks again every 2 minutes, like the Delivery Under Review desk. */
@@ -140,13 +148,17 @@ export default function CallingAgentPage() {
     let r = board?.rows ?? [];
     if (tab === "archive") r = r.filter((x) => x.kind === "archive");
     if (tab === "return") r = r.filter((x) => x.kind === "return");
+    if (tab === "office") r = r.filter((x) => x.kind === officeKind);
     const s = q.trim().toLowerCase();
     if (s) r = r.filter((x) => [x.order_number, x.customer_name, x.phone, x.city, x.parcel?.tracking_id]
       .some((v) => String(v ?? "").toLowerCase().includes(s)));
     return r;
-  }, [board, tab, q]);
+  }, [board, tab, q, officeKind]);
+  const officeN = (k: Kind) => (board?.rows ?? []).filter((x) => x.kind === k && x.status === "to_office").length;
+  const officeW = (k: Kind) => (board?.rows ?? []).filter((x) => x.kind === k && x.status === "waiting").length;
   const now = Date.now();
-  const due = rows.filter((r) => r.status !== "to_call" || !r.call_back_at || new Date(r.call_back_at).getTime() <= now);
+  const due = rows.filter((r) => r.status !== "waiting" && (r.status !== "to_call" || !r.call_back_at || new Date(r.call_back_at).getTime() <= now));
+  const waiting = rows.filter((r) => r.status === "waiting");
   const later = rows.filter((r) => r.status === "to_call" && r.call_back_at && new Date(r.call_back_at).getTime() > now);
 
   const n = (v: number | undefined | null) => (v ? <span className="ml-1 rounded-full bg-red-500 px-1.5 text-[10px] font-bold text-white">{v}</span> : null);
@@ -168,8 +180,8 @@ export default function CallingAgentPage() {
         <p className="mt-1 max-w-[80ch] text-[13px] text-muted dark:text-[#a89f93]">
           Ring the customer, press what they said. Archived orders are for confirmation; Returns are parcels
           cancelled after dispatch — ask if they want it again. Every answer goes to the office, who create or
-          cancel the order. Bonus: {rs(board?.settings?.bonus_amount ?? 200)} for every parcel you worked that is
-          delivered and paid in the CPR / invoice.
+          cancel the order. Bonus per parcel you worked that is delivered and paid in the CPR / invoice:
+          Archived {rs(board?.settings?.bonus_archive ?? 50)} · Under Review {rs(board?.settings?.bonus_review ?? 100)} · Returns {rs(board?.settings?.bonus_return ?? 150)}.
         </p>
       </div>
 
@@ -202,12 +214,39 @@ export default function CallingAgentPage() {
         )}
       </div>
 
+      {/* Shop, and the second row that belongs to the open tab */}
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <span className="text-[12px] font-semibold text-muted dark:text-[#a89f93]">Shop</span>
+        <Segmented value={shop} onChange={setShop} options={[
+          { key: "All", label: "Both" }, { key: "LM", label: "Little Minors (LM)", short: "LM" }, { key: "TS", label: "TopShop (TS)", short: "TS" },
+        ]} />
+        {tab === "office" && (
+          <>
+            <span className="ml-2 text-[12px] font-semibold text-muted dark:text-[#a89f93]">Section</span>
+            <Segmented value={officeKind} onChange={setOfficeKind} options={[
+              { key: "archive" as Kind, label: "Archived", badge: n(officeN("archive")) },
+              { key: "return" as Kind, label: "Returns", badge: n(officeN("return")) },
+            ]} />
+          </>
+        )}
+        {tab === "review" && (
+          <>
+            <span className="ml-2 text-[12px] font-semibold text-muted dark:text-[#a89f93]">Courier</span>
+            <Segmented value={courier} onChange={setCourier} options={[
+              { key: "All" as Courier, label: "Both" },
+              { key: "PostEx" as Courier, label: "PostEx", badge: n(courierCounts?.PostEx) },
+              { key: "OwnEx" as Courier, label: "OwnEx", badge: n(courierCounts?.OwnEx) },
+            ]} />
+          </>
+        )}
+      </div>
+
       {err && <div className="mt-3 flex items-center gap-2 rounded-xl2 bg-red-50 px-4 py-3 text-[13px] text-red-700 dark:bg-red-500/10 dark:text-red-300"><AlertTriangle size={16} /> {err}</div>}
       {msg && <div className="mt-3 rounded-xl2 bg-emerald-50 px-4 py-3 text-[13px] text-emerald-800 dark:bg-emerald-500/10 dark:text-emerald-300">{msg}</div>}
 
       {/* Delivery Under Review is the existing desk — one list, two homes. */}
       <div className={tab === "review" ? "mt-4" : "hidden"}>
-        <FirstAttemptDesk onCount={setReviewCount} />
+        <FirstAttemptDesk onCount={setReviewCount} courierFilter={courier} storeFilter={shop} onCourierCounts={setCourierCounts} />
         <p className="mt-4 text-[12px] text-muted dark:text-[#a89f93]">
           Bonus counts a parcel only when <b>you</b> press Re-attempt here on the desk. Press it here first, then on the
           courier&rsquo;s portal — a re-attempt pressed only on PostEx/OwnEx cannot be credited to you.
@@ -219,7 +258,7 @@ export default function CallingAgentPage() {
       {tab !== "review" && tab !== "bonus" && (
         <div className="mt-4 space-y-3">
           {loading && !board && <div className="flex items-center gap-2 py-10 text-muted"><Loader2 className="animate-spin" size={18} /> Loading…</div>}
-          {!loading && due.length === 0 && later.length === 0 && (
+          {!loading && due.length === 0 && later.length === 0 && waiting.length === 0 && (
             <div className="rounded-xl2 border border-dashed border-line px-4 py-10 text-center text-[14px] text-muted dark:border-white/10">
               {tab === "office" ? "No answers waiting for the office." : tab === "history" ? "Nothing decided in the last 14 days." : "Nothing to ring right now."}
             </div>
@@ -227,6 +266,12 @@ export default function CallingAgentPage() {
           {due.map((c) => (
             <CaseCard key={c.id} c={c} manage={manage} onDone={(m) => { setMsg(m); load(); }} onError={setErr} />
           ))}
+          {waiting.length > 0 && (
+            <>
+              <h2 className="pt-4 text-[15px] font-extrabold text-ink dark:text-[#f4f1ea]">Waiting ({waiting.length})</h2>
+              {waiting.map((c) => <CaseCard key={c.id} c={c} manage={manage} onDone={(m) => { setMsg(m); load(); }} onError={setErr} />)}
+            </>
+          )}
           {later.length > 0 && (
             <>
               <h2 className="pt-4 text-[15px] font-extrabold text-ink dark:text-[#f4f1ea]">Call-backs later ({later.length})</h2>
@@ -485,7 +530,7 @@ function BonusView() {
       <div className="flex flex-wrap items-center gap-3">
         <input type="month" value={month} onChange={(e) => setMonth(e.target.value)}
           className="h-10 rounded-full border border-line bg-surface px-4 text-[13px] dark:border-white/10 dark:bg-[#201c17] dark:text-white" />
-        {data && <span className="text-[12.5px] text-muted">{rs(data.bonus_amount)} per parcel delivered and in a CPR / invoice · counted from {data.starts_on}</span>}
+        {data && <span className="text-[12.5px] text-muted">Per parcel delivered and in a CPR / invoice — Archived {rs(data.rates?.archive)} · Under Review {rs(data.rates?.review)} · Returns {rs(data.rates?.return)} · counted from {data.starts_on}</span>}
       </div>
       {err && <div className="mt-3 rounded-xl2 bg-red-50 px-4 py-3 text-[13px] text-red-700">{err}</div>}
       {loading ? <div className="flex items-center gap-2 py-10 text-muted"><Loader2 className="animate-spin" size={18} /> Loading…</div> : data && (
@@ -524,7 +569,7 @@ function BonusView() {
                     <td className="px-3 py-2">{l.delivery_status}</td>
                     <td className="px-3 py-2">{l.cpr_number ?? "—"}</td>
                     <td className="px-3 py-2">{l.earned_on ?? "—"}</td>
-                    <td className="px-3 py-2 font-bold">{l.state === "earned" ? rs(l.amount) : "—"}</td>
+                    <td className="px-3 py-2 font-bold">{l.state === "earned" ? rs(l.amount) : l.state === "pending" ? <span className="font-normal text-muted">{rs(l.rate)} if paid</span> : "—"}</td>
                   </tr>
                 ))}
               </tbody>

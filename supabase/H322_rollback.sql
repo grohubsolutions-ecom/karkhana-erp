@@ -2,10 +2,12 @@
 begin;
 drop trigger if exists online_orders_closed_from_event on online_shopify_events;
 drop function if exists online_orders_closed_from_event();
+drop function if exists hub_call_board(text, int, text);
 drop function if exists hub_call_board(text, int);
 drop function if exists hub_call_answer(bigint, text, text, timestamptz);
 drop function if exists hub_call_decide(bigint, text, text, text);
 drop function if exists hub_call_bonus(date);
+drop function if exists hub_call_settings_set(numeric, numeric, numeric, date);
 drop function if exists hub_call_settings_set(numeric, date);
 drop function if exists hub_call_refresh();
 drop function if exists hub_call_parcel_state(text, text);
