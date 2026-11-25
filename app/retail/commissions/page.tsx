@@ -51,7 +51,7 @@
  *   go through fetchAll.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Coins, Percent, Gift, Plus, Search, Save, Trash2, AlertTriangle, Pencil, Share2, LayoutGrid, ReceiptText, ImageDown } from "lucide-react";
+import { Coins, Percent, Gift, Plus, Search, Save, Trash2, AlertTriangle, Pencil, Share2, LayoutGrid, ReceiptText, ImageDown, Download, FileSpreadsheet } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import Modal, { Field, inputCls, btnPrimary, btnGhost } from "@/components/Modal";
 import {
@@ -463,6 +463,165 @@ export default function CommissionsPage() {
     if (r === "cancelled") return;
     setShareNote(r === "shared" ? "Sent." : r === "copied" ? "Copied — paste it into WhatsApp." : "Could not share.");
     setTimeout(() => setShareNote(""), 4000);
+  }
+
+  /* ── EXPORT: CSV or PDF ─────────────────────────────────────────────────
+   * CSV is a file download: cells are escaped, the BOM header makes Excel
+   * open it as UTF-8 without asking. PDF takes the same CSV data, lays it
+   * out in an A4-landscape canvas and triggers the browser download — no
+   * external library needed. The active tab decides the data:
+   *   grid  → statement (one line per shop) or day-by-day grid
+   *   rates → item rates table
+   *   fcdha → FC DHA barcode rates
+   *   settings → nothing exportable */
+
+  const [exportNote, setExportNote] = useState("");
+
+  /** Proper CSV escaping: quotes around fields that contain commas, quotes
+   *  or newlines; existing quotes doubled. */
+  const csvCell = (v: string | number) => {
+    const s = String(v ?? "");
+    return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const csvRow = (cells: (string | number)[]) => cells.map(csvCell).join(",");
+  const downloadFile = (content: string, name: string, mime: string) => {
+    const blob = new Blob([content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = name; a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  function exportCsv() {
+    const lines: string[] = [];
+    const stamp = from === qTo ? from : `${from}_to_${qTo}`;
+
+    if (tab === "grid" && view === "statement") {
+      /* Statement: Shop, Chain, Per-piece, Bonus, Total */
+      lines.push(csvRow(["Shop", "Chain", "Per-piece", "Bonus", "Total"]));
+      statement.forEach((blk) => {
+        blk.shops.forEach((s) => {
+          lines.push(csvRow([s.name, blk.chain, Math.round(s.pp), Math.round(s.bonus), s.total]));
+        });
+      });
+      lines.push(csvRow(["TOTAL", "", Math.round(totals.pp), Math.round(totals.bonus), Math.round(totals.total)]));
+      downloadFile("﻿" + lines.join("\n"), `commission-statement_${stamp}.csv`, "text/csv;charset=utf-8");
+
+    } else if (tab === "grid" && view === "days") {
+      /* Day-by-day grid: Date, Shop1, Shop2, …, Total — one table per chain */
+      blocks.forEach((blk) => {
+        lines.push(csvRow([blk.chain]));
+        lines.push(csvRow(["Date", ...blk.brs.map((b) => shortName(b.name, blk.chain)), "Total"]));
+        blk.rows.forEach((r) => {
+          lines.push(csvRow([dayLabel(r.ds), ...r.vals, r.total]));
+        });
+        lines.push(csvRow(["Total", ...blk.colTot, blk.grand]));
+        lines.push(""); // blank line between chains
+      });
+      downloadFile("﻿" + lines.join("\n"), `commission-grid_${stamp}.csv`, "text/csv;charset=utf-8");
+
+    } else if (tab === "rates") {
+      /* Item Rates: full master list (or filtered if searching) */
+      const needle = q.trim().toLowerCase();
+      const src = needle ? master.filter((m) => `${m.item_code} ${m.item_name ?? ""}`.toLowerCase().includes(needle)) : master;
+      lines.push(csvRow(["Item Code", "Name", "Retail Price", "Percentage", "Earns / Piece", "Commission Column"]));
+      src.forEach((r) => {
+        lines.push(csvRow([
+          r.item_code,
+          r.item_name ?? "",
+          num(r.retail_price),
+          num(r.percentage),
+          Math.round(num(r.retail_price) * (num(r.percentage) / 100)),
+          num(r.commission),
+        ]));
+      });
+      downloadFile("﻿" + lines.join("\n"), `commission-item-rates.csv`, "text/csv;charset=utf-8");
+
+    } else if (tab === "fcdha") {
+      /* FC DHA barcode rates */
+      const needle2 = q.trim().toLowerCase();
+      const src = needle2 ? fc.filter((f) => String(f.item_code).toLowerCase().includes(needle2)) : fc;
+      lines.push(csvRow(["Barcode", "Commission per piece"]));
+      src.forEach((r) => {
+        lines.push(csvRow([r.item_code, num(r.commission)]));
+      });
+      downloadFile("﻿" + lines.join("\n"), `fc-dha-rates.csv`, "text/csv;charset=utf-8");
+    }
+    setExportNote("CSV downloaded.");
+    setTimeout(() => setExportNote(""), 3000);
+  }
+
+  /** PDF export: builds a styled HTML table in a new window and triggers
+   *  the browser's native print-to-PDF. This gives a proper, paginated A4
+   *  layout with headers, margins and clean text — better than a pixel
+   *  canvas for tabular data, and no library needed. */
+  function exportPdf() {
+    let title = "";
+    let tableHtml = "";
+    const thStyle = `style="padding:6px 10px;text-align:left;font-weight:700;border-bottom:2px solid #333;font-size:12px;white-space:nowrap"`;
+    const tdStyle = `style="padding:5px 10px;border-bottom:1px solid #ddd;font-size:11px"`;
+    const tdR = `style="padding:5px 10px;border-bottom:1px solid #ddd;font-size:11px;text-align:right;font-variant-numeric:tabular-nums"`;
+    const thR = `style="padding:6px 10px;text-align:right;font-weight:700;border-bottom:2px solid #333;font-size:12px;white-space:nowrap"`;
+
+    if (tab === "grid" && view === "statement") {
+      title = `Commission Statement — ${rangeWords}`;
+      let rows = "";
+      statement.forEach((blk) => {
+        blk.shops.forEach((s) => {
+          rows += `<tr><td ${tdStyle}>${s.name}</td><td ${tdStyle}>${blk.chain}</td><td ${tdR}>${money(s.pp)}</td><td ${tdR}>${money(s.bonus)}</td><td ${tdR}><strong>${money(s.total)}</strong></td></tr>`;
+        });
+      });
+      rows += `<tr style="background:#f5f5f5;font-weight:700"><td ${tdStyle}>TOTAL</td><td ${tdStyle}></td><td ${tdR}>${money(totals.pp)}</td><td ${tdR}>${money(totals.bonus)}</td><td ${tdR}>${money(totals.total)}</td></tr>`;
+      tableHtml = `<table style="width:100%;border-collapse:collapse"><thead><tr><th ${thStyle}>Shop</th><th ${thStyle}>Chain</th><th ${thR}>Per-piece</th><th ${thR}>Bonus</th><th ${thR}>Total</th></tr></thead><tbody>${rows}</tbody></table>`;
+
+    } else if (tab === "grid" && view === "days") {
+      title = `Commission Grid — ${rangeWords}`;
+      blocks.forEach((blk) => {
+        const ths = `<th ${thStyle}>Date</th>` + blk.brs.map((b) => `<th ${thR}>${shortName(b.name, blk.chain)}</th>`).join("") + `<th ${thR}>Total</th>`;
+        let rows = "";
+        blk.rows.forEach((r) => {
+          rows += `<tr><td ${tdStyle}>${dayLabel(r.ds)}</td>` + r.vals.map((v) => `<td ${tdR}>${n0(v)}</td>`).join("") + `<td ${tdR}><strong>${n0(r.total)}</strong></td></tr>`;
+        });
+        rows += `<tr style="background:#f5f5f5;font-weight:700"><td ${tdStyle}>Total</td>` + blk.colTot.map((v) => `<td ${tdR}>${n0(v)}</td>`).join("") + `<td ${tdR}>${n0(blk.grand)}</td></tr>`;
+        tableHtml += `<h3 style="margin:16px 0 8px;font-size:14px">${blk.chain}</h3><table style="width:100%;border-collapse:collapse"><thead><tr>${ths}</tr></thead><tbody>${rows}</tbody></table>`;
+      });
+
+    } else if (tab === "rates") {
+      title = "Commission Item Rates";
+      const needle3 = q.trim().toLowerCase();
+      const src = needle3 ? master.filter((m) => `${m.item_code} ${m.item_name ?? ""}`.toLowerCase().includes(needle3)) : master;
+      let rows = "";
+      src.forEach((r) => {
+        rows += `<tr><td ${tdStyle}>${r.item_code}</td><td ${tdStyle}>${r.item_name ?? ""}</td><td ${tdR}>${money(r.retail_price)}</td><td ${tdR}>${num(r.percentage)}%</td><td ${tdR}>${money(num(r.retail_price) * (num(r.percentage) / 100))}</td><td ${tdR}>${money(r.commission)}</td></tr>`;
+      });
+      tableHtml = `<table style="width:100%;border-collapse:collapse"><thead><tr><th ${thStyle}>Item Code</th><th ${thStyle}>Name</th><th ${thR}>Retail Price</th><th ${thR}>%</th><th ${thR}>Earns/pc</th><th ${thR}>Comm.</th></tr></thead><tbody>${rows}</tbody></table>`;
+
+    } else if (tab === "fcdha") {
+      title = "FC DHA Barcode Rates";
+      const needle4 = q.trim().toLowerCase();
+      const src = needle4 ? fc.filter((f) => String(f.item_code).toLowerCase().includes(needle4)) : fc;
+      let rows = "";
+      src.forEach((r) => {
+        rows += `<tr><td ${tdStyle}>${r.item_code}</td><td ${tdR}>${money(r.commission)}</td></tr>`;
+      });
+      tableHtml = `<table style="width:100%;border-collapse:collapse"><thead><tr><th ${thStyle}>Barcode</th><th ${thR}>Commission per piece</th></tr></thead><tbody>${rows}</tbody></table>`;
+    }
+
+    if (!tableHtml) return;
+
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${title}</title>
+<style>@page{size:A4 landscape;margin:12mm}body{font-family:-apple-system,system-ui,sans-serif;color:#1a1a1a;margin:0;padding:16px}
+h2{font-size:16px;margin:0 0 4px}p.sub{font-size:11px;color:#666;margin:0 0 12px}
+@media print{button.no-print{display:none}}</style></head><body>
+<h2>${title}</h2>
+<p class="sub">Exported ${new Date().toLocaleString("en-GB", { day:"numeric",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit" })}</p>
+${tableHtml}
+<button class="no-print" onclick="window.print()" style="margin:16px 0;padding:8px 20px;border:1px solid #ccc;border-radius:6px;cursor:pointer;font-size:13px">Print / Save as PDF</button>
+</body></html>`;
+    const w = window.open("", "_blank");
+    if (w) { w.document.write(html); w.document.close(); }
+    setExportNote("PDF window opened — use Print → Save as PDF.");
+    setTimeout(() => setExportNote(""), 5000);
   }
 
   /* ── drill-down: the receipts behind one cell ──────────────────────────── */
@@ -911,6 +1070,16 @@ export default function CommissionsPage() {
             stays unimported. */}
         <StatementButton kind="commission" branchIds={shop.ids} branches={branches} />
         <ImportButton onClick={() => setImportOpen(true)} />
+        {tab !== "settings" && (
+          <div className="relative inline-flex">
+            <button onClick={exportCsv} title="Export as CSV" className={`${btnGhost} !px-3`}>
+              <FileSpreadsheet size={15} /> CSV
+            </button>
+            <button onClick={exportPdf} title="Export as PDF" className={`${btnGhost} !px-3`}>
+              <Download size={15} /> PDF
+            </button>
+          </div>
+        )}
         {tab === "rates" && (
           <button onClick={() => setRateForm({ isEdit: false, item_code: "", item_name: "", retail_price: "", commission: "", percentage: "5" })} className={btnPrimary}>
             <Plus size={15} /> Add item
@@ -942,6 +1111,7 @@ export default function CommissionsPage() {
 
       <Tabs tabs={TABS} value={tab} onChange={(t) => { setTab(t); setQ(""); }} />
 
+      {exportNote && <p className="mt-2 text-[12.5px] font-semibold text-success">{exportNote}</p>}
       {err && <p className="mt-4 text-[12.5px] font-semibold text-danger">{err}</p>}
 
       {/* ══ THE GRID ══════════════════════════════════════════════════════ */}
