@@ -145,7 +145,7 @@ on conflict (code) do nothing;
 
 insert into role_permissions (role_id, permission_id)
 select r.id, p.id from roles r cross join permissions p
- where r.code = 'calling_agent' and p.code in ('hub.calling.work', 'returns.rescue')
+ where r.code = 'calling_agent' and p.code in ('hub.calling.work')  -- returns.rescue not needed: hub.calling.work opens the desk
    and not exists (select 1 from role_permissions rp where rp.role_id = r.id and rp.permission_id = p.id);
 
 insert into role_permissions (role_id, permission_id)
@@ -363,7 +363,7 @@ begin
        and case p_view
              when 'agent'   then c.status = 'to_call'
              when 'office'  then c.status in ('to_office', 'waiting')
-             when 'history' then c.status in ('done', 'dropped')
+             when 'history' then v_manage and c.status in ('done', 'dropped')   -- office only (owner, 25 Nov)
                                  and c.updated_at >= now() - make_interval(days => greatest(coalesce(p_days, 7), 1))
              else false end
   ) x;

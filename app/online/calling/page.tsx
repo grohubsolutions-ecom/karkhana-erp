@@ -143,6 +143,9 @@ export default function CallingAgentPage() {
 
   const counts = board?.counts;
   const manage = !!board?.may_manage;
+  useEffect(() => {
+    if (board && !board.may_manage && (tab === "office" || tab === "history")) setTab("archive");
+  }, [board, tab]);
 
   const rows = useMemo(() => {
     let r = board?.rows ?? [];
@@ -164,17 +167,19 @@ export default function CallingAgentPage() {
   const n = (v: number | undefined | null) => (v ? <span className="ml-1 rounded-full bg-red-500 px-1.5 text-[10px] font-bold text-white">{v}</span> : null);
   const options: { key: Tab; label: string; short?: string; badge?: React.ReactNode }[] = [
     { key: "archive", label: "Archived", badge: n(counts?.archive) },
-    { key: "review", label: "Delivery Under Review", short: "Review", badge: n(reviewCount) },
+    { key: "review", label: "Delivery Under Review", short: "Under Review", badge: n(reviewCount) },
     { key: "return", label: "Returns", badge: n(counts?.return) },
-    ...(manage ? [{ key: "office" as Tab, label: "Office", badge: n(counts?.office) }] : []),
-    { key: "history", label: "History", short: "Done" },
-    { key: "bonus", label: "Bonus" },
+    /* Office and History are the office's own — the agent works remotely and
+       sees only her three lists and her bonus (owner, 25 Nov 2026). */
+    ...(manage ? [{ key: "office" as Tab, label: "Office", badge: n(counts?.office) },
+                  { key: "history" as Tab, label: "History" }] : []),
+    { key: "bonus", label: "My Bonus" },
   ];
 
   if (!isSupabaseConfigured) return <div className="p-8 text-muted">Supabase is not configured.</div>;
 
   return (
-    <div className="px-4 py-4 sm:px-6 md:px-10 md:py-8">
+    <div className="px-3 py-3 sm:px-6 md:px-10 md:py-8">
       <div className="hidden md:block">
         <h1 className="text-[22px] font-extrabold tracking-tight text-ink dark:text-[#f4f1ea]">Calling Agent</h1>
         <p className="mt-1 max-w-[80ch] text-[13px] text-muted dark:text-[#a89f93]">
@@ -185,45 +190,57 @@ export default function CallingAgentPage() {
         </p>
       </div>
 
+      <BonusBanner onOpen={() => setTab("bonus")} />
+
       {counts && (
-        <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-6">
-          {[["To ring — archived", counts.archive], ["To ring — returns", counts.return], ["Call-backs later", counts.later],
-            ["With office", counts.office + counts.waiting], ["Rung today", counts.called_today], ["Decided today", counts.done_today]]
+        <div className={`grid gap-1.5 md:mt-3 md:gap-2 ${manage ? "grid-cols-3 lg:grid-cols-6" : "grid-cols-4"}`}>
+          {([["Archived", counts.archive], ["Returns", counts.return], ["Call-backs", counts.later], ["Rung today", counts.called_today]] as [string, number][])
+            .concat(manage ? [["With office", counts.office + counts.waiting], ["Decided today", counts.done_today]] : [])
             .map(([l, v]) => (
-              <div key={String(l)} className="rounded-xl2 border border-line bg-surface px-3 py-2 dark:border-white/[0.06] dark:bg-[#201c17]">
-                <div className="text-[11px] text-muted dark:text-[#a89f93]">{l}</div>
-                <div className="text-[20px] font-extrabold text-ink dark:text-[#f4f1ea]">{v}</div>
+              <div key={String(l)} className="rounded-xl2 border border-line bg-surface px-2.5 py-1.5 md:px-3 md:py-2 dark:border-white/[0.06] dark:bg-[#201c17]">
+                <div className="truncate text-[10.5px] text-muted md:text-[11px] dark:text-[#a89f93]">{l}</div>
+                <div className="text-[17px] font-extrabold text-ink md:text-[20px] dark:text-[#f4f1ea]">{v}</div>
               </div>
             ))}
         </div>
       )}
 
-      <div className="mt-4 flex flex-wrap items-center gap-2">
-        <Segmented value={tab} onChange={(t) => { setTab(t); setMsg(""); }} options={options} className="w-full md:w-auto" />
+      {/* Phone: one row of pills that scrolls sideways, so six tabs never squeeze. */}
+      <div className="-mx-3 mt-3 flex gap-1.5 overflow-x-auto px-3 pb-1 [scrollbar-width:none] md:hidden [&::-webkit-scrollbar]:hidden">
+        {options.map((o) => (
+          <button key={o.key} type="button" onClick={() => { setTab(o.key); setMsg(""); }}
+            className={`flex h-10 shrink-0 items-center rounded-full px-4 text-[13px] font-bold transition ${tab === o.key
+              ? "bg-ink text-white dark:bg-white dark:text-[#141414]" : "bg-panel text-muted active:bg-black/5 dark:bg-white/[0.06] dark:text-[#a89f93]"}`}>
+            {o.short ?? o.label}{o.badge}
+          </button>
+        ))}
+      </div>
+      <div className="mt-2 flex flex-wrap items-center gap-2 md:mt-4">
+        <Segmented value={tab} onChange={(t) => { setTab(t); setMsg(""); }} options={options} className="hidden md:inline-flex" />
         {tab !== "review" && tab !== "bonus" && (
           <>
-            <div className="relative ml-auto w-full md:w-64">
+            <div className="relative min-w-0 flex-1 md:ml-auto md:w-64 md:flex-none">
               <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
               <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Order, name, phone, city"
                 className="h-10 w-full rounded-full border border-line bg-surface pl-9 pr-3 text-[13px] dark:border-white/10 dark:bg-[#201c17] dark:text-white" />
             </div>
-            <button onClick={load} disabled={loading} className="flex h-10 items-center gap-1.5 rounded-full border border-line bg-surface px-4 text-[13px] font-semibold text-ink hover:bg-panel dark:border-white/10 dark:bg-[#201c17] dark:text-white">
-              {loading ? <Loader2 size={15} className="animate-spin" /> : <RefreshCw size={15} />} Refresh
+            <button onClick={load} disabled={loading} aria-label="Refresh" className="flex h-10 w-10 shrink-0 items-center justify-center gap-1.5 rounded-full border border-line bg-surface text-[13px] font-semibold text-ink hover:bg-panel md:w-auto md:px-4 dark:border-white/10 dark:bg-[#201c17] dark:text-white">
+              {loading ? <Loader2 size={15} className="animate-spin" /> : <RefreshCw size={15} />} <span className="hidden md:inline">Refresh</span>
             </button>
           </>
         )}
       </div>
 
       {/* Shop, and the second row that belongs to the open tab */}
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <span className="text-[12px] font-semibold text-muted dark:text-[#a89f93]">Shop</span>
-        <Segmented value={shop} onChange={setShop} options={[
+      <div className="mt-2 grid gap-2 md:mt-3 md:flex md:flex-wrap md:items-center">
+        <span className="hidden text-[12px] font-semibold text-muted md:inline dark:text-[#a89f93]">Shop</span>
+        <Segmented value={shop} onChange={setShop} className="w-full md:w-auto" options={[
           { key: "All", label: "Both" }, { key: "LM", label: "Little Minors (LM)", short: "LM" }, { key: "TS", label: "TopShop (TS)", short: "TS" },
         ]} />
         {tab === "office" && (
           <>
-            <span className="ml-2 text-[12px] font-semibold text-muted dark:text-[#a89f93]">Section</span>
-            <Segmented value={officeKind} onChange={setOfficeKind} options={[
+            <span className="ml-2 hidden text-[12px] font-semibold text-muted md:inline dark:text-[#a89f93]">Section</span>
+            <Segmented value={officeKind} onChange={setOfficeKind} className="w-full md:w-auto" options={[
               { key: "archive" as Kind, label: "Archived", badge: n(officeN("archive")) },
               { key: "return" as Kind, label: "Returns", badge: n(officeN("return")) },
             ]} />
@@ -231,8 +248,8 @@ export default function CallingAgentPage() {
         )}
         {tab === "review" && (
           <>
-            <span className="ml-2 text-[12px] font-semibold text-muted dark:text-[#a89f93]">Courier</span>
-            <Segmented value={courier} onChange={setCourier} options={[
+            <span className="ml-2 hidden text-[12px] font-semibold text-muted md:inline dark:text-[#a89f93]">Courier</span>
+            <Segmented value={courier} onChange={setCourier} className="w-full md:w-auto" options={[
               { key: "All" as Courier, label: "Both" },
               { key: "PostEx" as Courier, label: "PostEx", badge: n(courierCounts?.PostEx) },
               { key: "OwnEx" as Courier, label: "OwnEx", badge: n(courierCounts?.OwnEx) },
@@ -256,7 +273,7 @@ export default function CallingAgentPage() {
       {tab === "bonus" && <BonusView />}
 
       {tab !== "review" && tab !== "bonus" && (
-        <div className="mt-4 space-y-3">
+        <div className="mt-3 space-y-2.5 md:mt-4 md:space-y-3">
           {loading && !board && <div className="flex items-center gap-2 py-10 text-muted"><Loader2 className="animate-spin" size={18} /> Loading…</div>}
           {!loading && due.length === 0 && later.length === 0 && waiting.length === 0 && (
             <div className="rounded-xl2 border border-dashed border-line px-4 py-10 text-center text-[14px] text-muted dark:border-white/10">
@@ -322,7 +339,7 @@ function CaseCard({ c, manage, onDone, onError }: { c: Case; manage: boolean; on
   const officeSide = manage && (c.status === "to_office" || c.status === "waiting");
 
   return (
-    <div className="rounded-xl2 border border-line bg-surface p-4 shadow-card dark:border-white/[0.06] dark:bg-[#201c17]">
+    <div className="rounded-xl2 border border-line bg-surface p-3 shadow-card md:p-4 dark:border-white/[0.06] dark:bg-[#201c17]">
       {/* Header */}
       <div className="flex flex-wrap items-center gap-2">
         {c.kind === "archive" ? <Archive size={16} className="text-muted" /> : <PackageX size={16} className="text-muted" />}
@@ -333,23 +350,23 @@ function CaseCard({ c, manage, onDone, onError }: { c: Case; manage: boolean; on
         {c.status === "waiting" && <Badge tone="warn">Waiting</Badge>}
         {c.status === "dropped" && <Badge>{c.dropped_reason}</Badge>}
         {c.call_back_at && c.status === "to_call" && <Badge tone="warn">Ring at {when(c.call_back_at)}</Badge>}
-        <span className="ml-auto text-[18px] font-extrabold text-ink dark:text-[#f4f1ea]">{rs(c.amount)}</span>
+        <span className="ml-auto text-[16px] font-extrabold text-ink md:text-[18px] dark:text-[#f4f1ea]">{rs(c.amount)}</span>
       </div>
 
-      <div className="mt-3 grid gap-4 md:grid-cols-[1.1fr_1fr]">
+      <div className="mt-2 grid gap-3 md:mt-3 md:grid-cols-[1.1fr_1fr] md:gap-4">
         {/* Customer */}
         <div className="text-[13.5px]">
           <div className="font-bold text-ink dark:text-[#f4f1ea]">{c.customer_name ?? "—"}</div>
           <div className="mt-0.5 text-muted dark:text-[#a89f93]">{c.address ?? ""}{c.city ? `, ${c.city}` : ""}</div>
-          <div className="mt-2 flex flex-wrap gap-2">
+          <div className="mt-2 grid grid-cols-[1fr_auto] gap-2 md:flex md:flex-wrap">
             {c.phone && (
-              <a href={`tel:${telOf(c.phone)}`} className="inline-flex h-10 items-center gap-1.5 rounded-full bg-ink px-4 text-[13px] font-bold text-white dark:bg-white dark:text-[#141414]">
+              <a href={`tel:${telOf(c.phone)}`} className="inline-flex h-12 items-center justify-center gap-1.5 rounded-full bg-ink px-4 text-[15px] font-bold text-white md:h-10 md:text-[13px] dark:bg-white dark:text-[#141414]">
                 <Phone size={15} /> {c.phone}
               </a>
             )}
             {wa && (
-              <a href={`https://wa.me/${wa}`} target="_blank" rel="noreferrer" className="inline-flex h-10 items-center gap-1.5 rounded-full border border-line px-4 text-[13px] font-semibold text-ink dark:border-white/10 dark:text-white">
-                <MessageCircle size={15} /> WhatsApp
+              <a href={`https://wa.me/${wa}`} target="_blank" rel="noreferrer" aria-label="WhatsApp" className="inline-flex h-12 items-center justify-center gap-1.5 rounded-full border border-line px-4 text-[13px] font-semibold text-ink md:h-10 dark:border-white/10 dark:text-white">
+                <MessageCircle size={17} /> <span className="hidden sm:inline">WhatsApp</span>
               </a>
             )}
           </div>
@@ -365,7 +382,7 @@ function CaseCard({ c, manage, onDone, onError }: { c: Case; manage: boolean; on
             <ul className="space-y-1">
               {c.items!.map((it, i) => (
                 <li key={i} className="flex justify-between gap-3">
-                  <span className="text-ink dark:text-[#f4f1ea]">{it.qty ?? 1} × {it.title}{it.variant ? ` — ${it.variant}` : ""}</span>
+                  <span className="min-w-0 text-ink [overflow-wrap:anywhere] dark:text-[#f4f1ea]">{it.qty ?? 1} × {it.title}{it.variant ? ` — ${it.variant}` : ""}</span>
                   <span className="shrink-0 text-muted">{rs(it.price)}</span>
                 </li>
               ))}
@@ -419,22 +436,22 @@ function CaseCard({ c, manage, onDone, onError }: { c: Case; manage: boolean; on
       {/* AGENT BUTTONS */}
       {agentSide && (
         <div className="mt-3">
-          <div className="flex flex-wrap gap-2">
+          <div className="grid grid-cols-2 gap-2 md:flex md:flex-wrap [&>button:first-child]:col-span-2 md:[&>button:first-child]:col-span-1">
             {ANSWERS[c.kind].map((a) => (
               <button key={a.key} disabled={!!busy} onClick={() => answer(a.key)}
-                className={`inline-flex h-11 items-center gap-1.5 rounded-full border px-4 text-[13px] font-bold transition disabled:opacity-50 ${toneCls(a.tone)} ${pick === a.key ? "ring-2 ring-offset-1 ring-amber-400" : ""}`}>
+                className={`inline-flex min-h-[48px] items-center justify-center gap-1.5 rounded-full border px-3 text-[13px] font-bold leading-tight transition disabled:opacity-50 md:h-11 md:min-h-0 md:px-4 ${toneCls(a.tone)} ${pick === a.key ? "ring-2 ring-offset-1 ring-amber-400" : ""}`}>
                 {busy === a.key ? <Loader2 size={15} className="animate-spin" /> : <a.Icon size={15} />} {a.label}
               </button>
             ))}
           </div>
-          <div className="mt-2 flex flex-wrap items-center gap-2">
-            <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="What did the customer say? (needed for Cancel / Doesn't want)"
-              className="h-10 min-w-[240px] flex-1 rounded-full border border-line bg-surface px-4 text-[13px] dark:border-white/10 dark:bg-[#17140f] dark:text-white" />
+          <div className="mt-2 grid gap-2 md:flex md:flex-wrap md:items-center">
+            <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="What did the customer say?"
+              className="h-12 w-full min-w-0 flex-1 rounded-full border border-line bg-surface px-4 text-[16px] md:h-10 md:min-w-[240px] md:text-[13px] dark:border-white/10 dark:bg-[#17140f] dark:text-white" />
             {(pick === "call_later" || laterAt) && (
-              <label className="flex items-center gap-2 text-[12.5px] text-muted">
+              <label className="grid gap-1 text-[12.5px] text-muted md:flex md:items-center md:gap-2">
                 Ring at
                 <input type="datetime-local" value={laterAt} onChange={(e) => setLaterAt(e.target.value)}
-                  className="h-10 rounded-full border border-line bg-surface px-3 text-[13px] dark:border-white/10 dark:bg-[#17140f] dark:text-white" />
+                  className="h-12 w-full rounded-full border border-line bg-surface px-3 text-[16px] md:h-10 md:w-auto md:text-[13px] dark:border-white/10 dark:bg-[#17140f] dark:text-white" />
               </label>
             )}
           </div>
@@ -445,23 +462,23 @@ function CaseCard({ c, manage, onDone, onError }: { c: Case; manage: boolean; on
       {/* OFFICE BUTTONS */}
       {officeSide && (
         <div className="mt-3 border-t border-line pt-3 dark:border-white/10">
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="grid gap-2 md:flex md:flex-wrap md:items-center">
             {c.kind === "return" && (
               <>
                 <input value={newOrder} onChange={(e) => setNewOrder(e.target.value)} placeholder="New order no. e.g. LM20012"
-                  className="h-10 w-52 rounded-full border border-line bg-surface px-4 text-[13px] dark:border-white/10 dark:bg-[#17140f] dark:text-white" />
+                  className="h-12 w-full rounded-full border border-line bg-surface px-4 text-[16px] md:h-10 md:w-52 md:text-[13px] dark:border-white/10 dark:bg-[#17140f] dark:text-white" />
                 {(c.suggest ?? []).map((s) => (
                   <button key={s.order_number} onClick={() => setNewOrder(s.order_number)}
-                    className="rounded-full bg-panel px-3 py-1 text-[12px] font-semibold text-ink hover:bg-black/5 dark:bg-white/[0.06] dark:text-white">
+                    className="min-h-[40px] rounded-full bg-panel px-3 py-1 text-left text-[12.5px] font-semibold text-ink hover:bg-black/5 md:min-h-0 dark:bg-white/[0.06] dark:text-white">
                     {s.order_number} · {s.order_date} · {rs(s.amount)}
                   </button>
                 ))}
               </>
             )}
             <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Office note (optional)"
-              className="h-10 min-w-[180px] flex-1 rounded-full border border-line bg-surface px-4 text-[13px] dark:border-white/10 dark:bg-[#17140f] dark:text-white" />
+              className="h-12 w-full min-w-0 flex-1 rounded-full border border-line bg-surface px-4 text-[16px] md:h-10 md:min-w-[180px] md:text-[13px] dark:border-white/10 dark:bg-[#17140f] dark:text-white" />
           </div>
-          <div className="mt-2 flex flex-wrap gap-2">
+          <div className="mt-2 grid grid-cols-2 gap-2 md:flex md:flex-wrap [&>button]:min-h-[48px] md:[&>button]:min-h-0 [&>button]:justify-center [&>button:first-child]:col-span-2 md:[&>button:first-child]:col-span-1">
             <button disabled={!!busy} onClick={() => decide("create_order")} className={`inline-flex h-11 items-center gap-1.5 rounded-full border px-4 text-[13px] font-bold ${toneCls("good")}`}>
               {busy === "create_order" ? <Loader2 size={15} className="animate-spin" /> : <PlusCircle size={15} />}
               {c.kind === "archive" ? "Create order (un-archive & ship)" : "Create order (linked)"}
@@ -529,7 +546,7 @@ function BonusView() {
     <div className="mt-4">
       <div className="flex flex-wrap items-center gap-3">
         <input type="month" value={month} onChange={(e) => setMonth(e.target.value)}
-          className="h-10 rounded-full border border-line bg-surface px-4 text-[13px] dark:border-white/10 dark:bg-[#201c17] dark:text-white" />
+          className="h-11 w-full rounded-full border border-line bg-surface px-4 text-[16px] md:h-10 md:w-auto md:text-[13px] dark:border-white/10 dark:bg-[#201c17] dark:text-white" />
         {data && <span className="text-[12.5px] text-muted">Per parcel delivered and in a CPR / invoice — Archived {rs(data.rates?.archive)} · Under Review {rs(data.rates?.review)} · Returns {rs(data.rates?.return)} · counted from {data.starts_on}</span>}
       </div>
       {err && <div className="mt-3 rounded-xl2 bg-red-50 px-4 py-3 text-[13px] text-red-700">{err}</div>}
@@ -548,11 +565,30 @@ function BonusView() {
             ))}
           </div>
           <div className="mt-5">
-            <Segmented value={show} onChange={setShow} options={[
+            <Segmented value={show} onChange={setShow} className="w-full md:w-auto" options={[
               { key: "earned", label: "Earned" }, { key: "pending", label: "Pending payment" }, { key: "lost", label: "Returned" },
             ]} />
           </div>
-          <div className="mt-3 overflow-x-auto rounded-xl2 border border-line dark:border-white/[0.06]">
+          {/* Phone: one card per parcel instead of a wide table. */}
+          <div className="mt-3 space-y-2 md:hidden">
+            {lines.length === 0 && <div className="rounded-xl2 border border-dashed border-line px-4 py-6 text-center text-[13px] text-muted dark:border-white/10">Nothing here.</div>}
+            {lines.map((l, i) => (
+              <div key={i} className="rounded-xl2 border border-line bg-surface px-3 py-2.5 text-[13px] dark:border-white/[0.06] dark:bg-[#201c17]">
+                <div className="flex items-center gap-2">
+                  <b className="text-ink dark:text-[#f4f1ea]">{l.order_number}</b>
+                  <Badge>{SRC[l.source] ?? l.source}</Badge>
+                  <span className="ml-auto font-extrabold text-ink dark:text-[#f4f1ea]">
+                    {l.state === "earned" ? rs(l.amount) : l.state === "pending" ? <span className="text-[12px] font-semibold text-muted">{rs(l.rate)} if paid</span> : "—"}
+                  </span>
+                </div>
+                <div className="mt-0.5 text-[12px] text-muted dark:text-[#a89f93]">
+                  {data.may_manage && <>{l.agent} · </>}{l.courier} {l.tracking_id} · {l.delivery_status}
+                  {l.cpr_number && <> · {l.cpr_number}</>}{l.earned_on && <> · paid {l.earned_on}</>}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="mt-3 hidden overflow-x-auto rounded-xl2 border border-line md:block dark:border-white/[0.06]">
             <table className="w-full min-w-[720px] text-[12.5px]">
               <thead className="bg-panel text-left text-muted dark:bg-white/[0.04]">
                 <tr>{(data.may_manage ? ["Agent"] : []).concat(["Worked", "From", "Order", "Parcel", "Status", "CPR / invoice", "Paid on", "Bonus"]).map((h) => <th key={h} className="px-3 py-2 font-semibold">{h}</th>)}</tr>
@@ -578,5 +614,40 @@ function BonusView() {
         </>
       )}
     </div>
+  );
+}
+
+/* ------------------------------------------------------------------------- */
+/* This month's bonus, always on top — the agent should never have to dig for
+   what she has earned. For the office it is everyone's total. */
+function BonusBanner({ onOpen }: { onOpen: () => void }) {
+  const [b, setB] = useState<Bonus | null>(null);
+  useEffect(() => {
+    let live = true;
+    const get = async () => {
+      const { data } = await supabase!.rpc("hub_call_bonus", { p_month: null });
+      if (live && data?.ok) setB(data as Bonus);
+    };
+    get();
+    const t = setInterval(get, 300_000);
+    return () => { live = false; clearInterval(t); };
+  }, []);
+  if (!b) return null;
+  const earned = b.people.reduce((a, p) => a + Number(p.earned || 0), 0);
+  const paid = b.people.reduce((a, p) => a + Number(p.earned_parcels || 0), 0);
+  const pend = b.people.reduce((a, p) => a + Number(p.pending || 0), 0);
+  const pendN = b.people.reduce((a, p) => a + Number(p.pending_parcels || 0), 0);
+  const month = new Date(b.month + "T00:00:00").toLocaleDateString("en-PK", { month: "long" });
+  return (
+    <button type="button" onClick={onOpen}
+      className="mb-2 flex w-full items-center gap-3 rounded-xl2 bg-emerald-600 px-4 py-3 text-left text-white shadow-card active:scale-[0.99] md:mb-3 md:mt-3">
+      <Wallet size={22} className="shrink-0" />
+      <div className="min-w-0 flex-1">
+        <div className="text-[12px] font-semibold opacity-90">{b.may_manage ? `Calling bonus — ${month} (all agents)` : `Your bonus — ${month}`}</div>
+        <div className="text-[22px] font-extrabold leading-tight">{rs(earned)}</div>
+        <div className="text-[12px] opacity-90">{paid} paid · {pendN} waiting for payment ({rs(pend)})</div>
+      </div>
+      <span className="shrink-0 text-[12px] font-bold underline">Details</span>
+    </button>
   );
 }

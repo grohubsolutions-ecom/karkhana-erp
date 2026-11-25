@@ -29,7 +29,8 @@ const DEPARTMENTS = [
   { href: "/wage-desk", title: "Daily Wage Desk", subtitle: "Karkhana daily workers · check in/out & cash pay", icon: Wallet, tint: "success", anim: "wallet", chip: "dark:bg-success",
     needs: ["wages.desk"] },
   { href: "/online", title: "Hub Department", subtitle: "Online orders · Little Minors, TopShop, Trenzee", icon: ShoppingBag, tint: "periwinkle", anim: "bag", chip: "dark:bg-periwinkle",
-    needs: ["hub.dashboard.view", "hub.orders.view", "hub.logistics.view", "hub.finance.view", "hub.attendance.view"] },
+    needs: ["hub.dashboard.view", "hub.orders.view", "hub.logistics.view", "hub.finance.view", "hub.attendance.view",
+            "hub.calling.work", "hub.calling.manage"] },
   /* These two permissions never existed. The table has retail.access and, since
      0119, the retail.<area>.<verb> set — "retail.view" and "retail.manage" are
      neither, so can() returned false for every normal user and this box only
@@ -89,13 +90,22 @@ export default function DepartmentChooser() {
     if (onlyWageDesk) router.replace("/wage-desk");
   }, [onlyWageDesk, router]);
 
+  /* ONE DOOR, NO LOBBY — for the calling agent (H322). Her login opens the
+     Calling Agent desk and nothing else in the Hub, so she goes straight in. */
+  const onlyCalling = ready && visible.length === 1 && visible[0].href === "/online"
+    && can(["hub.calling.work"])
+    && !can(["hub.dashboard.view", "hub.orders.view", "hub.logistics.view", "hub.finance.view", "hub.attendance.view"]);
+  useEffect(() => {
+    if (onlyCalling) router.replace("/online/calling");
+  }, [onlyCalling, router]);
+
   useEffect(() => {
     if (!isSupabaseConfigured || !supabase) return;
     supabase.auth.getSession().then(({ data }) => setEmail(data.session?.user?.email ?? ""));
   }, []);
 
   /* Nothing to choose — do not flash a one-box chooser on the way through. */
-  if (onlyKarkhana || onlyWageDesk) return <div className="min-h-screen bg-canvas dark:bg-[#17140f]" />;
+  if (onlyKarkhana || onlyWageDesk || onlyCalling) return <div className="min-h-screen bg-canvas dark:bg-[#17140f]" />;
 
   async function signOut() {
     if (supabase) await supabase.auth.signOut();

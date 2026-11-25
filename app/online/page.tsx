@@ -39,6 +39,7 @@ const LANDING = [
   "/online/finance/disputes",
   "/online/attendance",
   "/online/employees",
+  "/online/calling",
 ];
 
 export default function HubHome() {
