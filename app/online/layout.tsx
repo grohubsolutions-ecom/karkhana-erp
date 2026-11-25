@@ -1,6 +1,8 @@
 "use client";
 import { useEffect, useState } from "react";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
+import { usePermissions } from "@/lib/usePermissions";
+import { isCallingOnly } from "@/components/hubNav";
 import OnlineSidebar, { SidebarTab } from "@/components/OnlineSidebar";
 import { HubTopBar, HubTabBar } from "@/components/HubPhoneChrome";
 import HubSessionGuard from "@/components/HubSessionGuard";
@@ -37,6 +39,13 @@ export default function OnlineLayout({ children }: { children: React.ReactNode }
      the menu is always showing and this state is not used.) */
   const [menu, setMenu] = useState(false);
   const path = usePathname();
+  /* H322: the calling agent may open her desk and nothing else in the Hub. */
+  const router = useRouter();
+  const { ready, can } = usePermissions();
+  const callingOnly = ready && isCallingOnly(can);
+  useEffect(() => {
+    if (callingOnly && !path.startsWith("/online/calling")) router.replace("/online/calling");
+  }, [callingOnly, path, router]);
   useEffect(() => { setMenu(false); }, [path]);
   useEffect(() => {
     if (!menu) return;
