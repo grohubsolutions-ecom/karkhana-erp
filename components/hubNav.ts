@@ -1,4 +1,4 @@
-import { LayoutDashboard, ClipboardList, Truck, Wallet, CalendarCheck, Users, Undo2, AlertTriangle, PackageSearch, Gauge, PhoneCall, type LucideIcon } from "lucide-react";
+import { LayoutDashboard, ClipboardList, Truck, Wallet, CalendarCheck, Users, Undo2, AlertTriangle, PackageSearch, Gauge, PhoneCall, Headphones, type LucideIcon } from "lucide-react";
 import { requiredFor } from "@/lib/access";
 
 /* ONE LIST OF HUB PLACES, READ BY BOTH THE DESKTOP SIDEBAR AND THE PHONE BARS.
@@ -29,6 +29,11 @@ export const HUB_NAV: HubNavItem[] = [
          as the owner asked; the URL keeps its first name so links do not break. */
       { label: "Delivery Under Review", short: "Under review", href: "/online/logistics/first-attempt", Icon: PhoneCall },
   ] },
+  /* H322 — the calling agent's own place: archived orders to confirm, the
+     Delivery Under Review desk, and returns to win back, with the office's
+     Create / Cancel / Wait and the agent's bonus. Its own section because the
+     agent opens nothing else in the Hub. */
+  { label: "Calling Agent", short: "Calling", href: "/online/calling", Icon: Headphones },
   /* Disputes are a separate job with its own worklist, not a tab inside the
      settlements screen. */
   { label: "Finance", short: "Finance", href: "/online/finance", Icon: Wallet, children: [
