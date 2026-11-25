@@ -363,7 +363,7 @@ begin
        and case p_view
              when 'agent'   then c.status = 'to_call'
              when 'office'  then c.status in ('to_office', 'waiting')
-             when 'history' then c.status in ('done', 'dropped')
+             when 'history' then v_manage and c.status in ('done', 'dropped')   -- office only (owner, 25 Nov)
                                  and c.updated_at >= now() - make_interval(days => greatest(coalesce(p_days, 7), 1))
              else false end
   ) x;

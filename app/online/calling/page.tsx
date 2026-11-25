@@ -143,6 +143,9 @@ export default function CallingAgentPage() {
 
   const counts = board?.counts;
   const manage = !!board?.may_manage;
+  useEffect(() => {
+    if (board && !board.may_manage && (tab === "office" || tab === "history")) setTab("archive");
+  }, [board, tab]);
 
   const rows = useMemo(() => {
     let r = board?.rows ?? [];
@@ -164,11 +167,13 @@ export default function CallingAgentPage() {
   const n = (v: number | undefined | null) => (v ? <span className="ml-1 rounded-full bg-red-500 px-1.5 text-[10px] font-bold text-white">{v}</span> : null);
   const options: { key: Tab; label: string; short?: string; badge?: React.ReactNode }[] = [
     { key: "archive", label: "Archived", badge: n(counts?.archive) },
-    { key: "review", label: "Delivery Under Review", short: "Review", badge: n(reviewCount) },
+    { key: "review", label: "Delivery Under Review", short: "Under Review", badge: n(reviewCount) },
     { key: "return", label: "Returns", badge: n(counts?.return) },
-    ...(manage ? [{ key: "office" as Tab, label: "Office", badge: n(counts?.office) }] : []),
-    { key: "history", label: "History", short: "Done" },
-    { key: "bonus", label: "Bonus" },
+    /* Office and History are the office's own — the agent works remotely and
+       sees only her three lists and her bonus (owner, 25 Nov 2026). */
+    ...(manage ? [{ key: "office" as Tab, label: "Office", badge: n(counts?.office) },
+                  { key: "history" as Tab, label: "History" }] : []),
+    { key: "bonus", label: "My Bonus" },
   ];
 
   if (!isSupabaseConfigured) return <div className="p-8 text-muted">Supabase is not configured.</div>;
@@ -185,10 +190,12 @@ export default function CallingAgentPage() {
         </p>
       </div>
 
+      <BonusBanner onOpen={() => setTab("bonus")} />
+
       {counts && (
-        <div className="grid grid-cols-3 gap-1.5 md:mt-3 md:gap-2 lg:grid-cols-6">
-          {[["Archived to ring", counts.archive], ["Returns to ring", counts.return], ["Call-backs", counts.later],
-            ["With office", counts.office + counts.waiting], ["Rung today", counts.called_today], ["Decided today", counts.done_today]]
+        <div className={`grid gap-1.5 md:mt-3 md:gap-2 ${manage ? "grid-cols-3 lg:grid-cols-6" : "grid-cols-4"}`}>
+          {([["Archived", counts.archive], ["Returns", counts.return], ["Call-backs", counts.later], ["Rung today", counts.called_today]] as [string, number][])
+            .concat(manage ? [["With office", counts.office + counts.waiting], ["Decided today", counts.done_today]] : [])
             .map(([l, v]) => (
               <div key={String(l)} className="rounded-xl2 border border-line bg-surface px-2.5 py-1.5 md:px-3 md:py-2 dark:border-white/[0.06] dark:bg-[#201c17]">
                 <div className="truncate text-[10.5px] text-muted md:text-[11px] dark:text-[#a89f93]">{l}</div>
@@ -607,5 +614,40 @@ function BonusView() {
         </>
       )}
     </div>
+  );
+}
+
+/* ------------------------------------------------------------------------- */
+/* This month's bonus, always on top — the agent should never have to dig for
+   what she has earned. For the office it is everyone's total. */
+function BonusBanner({ onOpen }: { onOpen: () => void }) {
+  const [b, setB] = useState<Bonus | null>(null);
+  useEffect(() => {
+    let live = true;
+    const get = async () => {
+      const { data } = await supabase!.rpc("hub_call_bonus", { p_month: null });
+      if (live && data?.ok) setB(data as Bonus);
+    };
+    get();
+    const t = setInterval(get, 300_000);
+    return () => { live = false; clearInterval(t); };
+  }, []);
+  if (!b) return null;
+  const earned = b.people.reduce((a, p) => a + Number(p.earned || 0), 0);
+  const paid = b.people.reduce((a, p) => a + Number(p.earned_parcels || 0), 0);
+  const pend = b.people.reduce((a, p) => a + Number(p.pending || 0), 0);
+  const pendN = b.people.reduce((a, p) => a + Number(p.pending_parcels || 0), 0);
+  const month = new Date(b.month + "T00:00:00").toLocaleDateString("en-PK", { month: "long" });
+  return (
+    <button type="button" onClick={onOpen}
+      className="mb-2 flex w-full items-center gap-3 rounded-xl2 bg-emerald-600 px-4 py-3 text-left text-white shadow-card active:scale-[0.99] md:mb-3 md:mt-3">
+      <Wallet size={22} className="shrink-0" />
+      <div className="min-w-0 flex-1">
+        <div className="text-[12px] font-semibold opacity-90">{b.may_manage ? `Calling bonus — ${month} (all agents)` : `Your bonus — ${month}`}</div>
+        <div className="text-[22px] font-extrabold leading-tight">{rs(earned)}</div>
+        <div className="text-[12px] opacity-90">{paid} paid · {pendN} waiting for payment ({rs(pend)})</div>
+      </div>
+      <span className="shrink-0 text-[12px] font-bold underline">Details</span>
+    </button>
   );
 }
