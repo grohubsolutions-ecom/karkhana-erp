@@ -18,7 +18,7 @@ const key = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
 
 /* field → header spellings seen in Daraz / Lazada exports */
 const ORDER_COLS: Record<string, string[]> = {
-  order_item_id: ["Order Item Id", "Order Item No", "Order Item No.", "OrderItemId", "Order Item ID"],
+  order_item_id: ["Order Item Id", "Order Item No", "Order Item No.", "OrderItemId", "Order Item ID", "Order Line ID", "Order Line Id", "Order Line No"],
   order_number: ["Order Number", "Order No", "Order No.", "Order ID", "Order Id", "OrderNumber"],
   created_at_dz: ["Created at", "Created At", "Order Date", "Create Time", "Order Created"],
   updated_at_dz: ["Updated at", "Updated At", "Update Time", "Last Updated"],
@@ -52,9 +52,9 @@ const STATEMENT_COLS: Record<string, string[]> = {
   vat: ["VAT in Amount", "VAT", "VAT Amount"],
   wht: ["WHT Amount", "WHT", "Withholding Tax"],
   statement: ["Statement", "Statement Period", "Statement Number", "Statement Name"],
-  paid_status: ["Paid Status", "Payment Status", "Paid", "Release Status"],
+  paid_status: ["Paid Status", "Payment Status", "Paid", "Release Status", "Released Status", "Settlement Status"],
   order_number: ["Order No.", "Order No", "Order Number", "Order ID"],
-  order_item_id: ["Order Item No.", "Order Item No", "Order Item Id", "Order Item ID"],
+  order_item_id: ["Order Item No.", "Order Item No", "Order Item Id", "Order Item ID", "Order Line ID", "Order Line Id", "Order Line No"],
   item_status: ["Order Item Status", "Item Status"],
   reference: ["Reference", "Comment", "PaymentRefId", "Payment Ref Id"],
 };
