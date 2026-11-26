@@ -77,7 +77,7 @@ export default function RosterEmployeeEdit({
       department: f.department.trim() || null,
       phone: f.phone.trim() || null,
       sal: f.sal === "" ? 0 : Number(f.sal),
-      wd: f.wd === "" ? 26 : Number(f.wd),
+      wd: f.wd === "" ? 30 : Number(f.wd),
       ...(f.dtime ? { dtime: f.dtime } : {}),
     }).eq("id", emp.id).select("id");
 
