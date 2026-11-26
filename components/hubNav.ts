@@ -71,6 +71,7 @@ const OTHER_HUB = [
   "hub.dashboard.view", "hub.orders.view", "hub.orders.manage", "hub.logistics.view", "hub.logistics.manage",
   "hub.finance.view", "hub.finance.manage", "hub.attendance.view", "hub.attendance.manage",
   "hub.articles.view", "hub.articles.manage", "hub.calling.manage", "hub.whatsapp.view", "returns.rescue", "returns.print",
+  "hub.daraz.view", "hub.daraz.manage",
 ];
 export function isCallingOnly(can: (req: string[] | null) => boolean): boolean {
   return can(["hub.calling.work"]) && !can(OTHER_HUB);
