@@ -35,7 +35,7 @@ export function AddEmployee({ onDone }: { onDone: () => void }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [res, setRes] = useState<Result>(null);
-  const [f, setF] = useState({ name: "", designation: "", department: "", phone: "", sal: "", wd: "26", dtime: "10:00" });
+  const [f, setF] = useState({ name: "", designation: "", department: "", phone: "", sal: "", wd: "30", dtime: "10:00" });
 
   async function save() {
     if (!supabase) return;
@@ -48,13 +48,13 @@ export function AddEmployee({ onDone }: { onDone: () => void }) {
       department: f.department.trim() || null,
       phone: f.phone.trim() || null,
       sal: f.sal ? Number(f.sal) : 0,
-      wd: f.wd ? Number(f.wd) : 26,
+      wd: f.wd ? Number(f.wd) : 30,
       dtime: f.dtime || "10:00",
     });
     setBusy(false);
     if (error) { setRes({ ok: false, msg: error.message }); return; }
     setRes({ ok: true, msg: `${f.name.trim()} added.` });
-    setF({ name: "", designation: "", department: "", phone: "", sal: "", wd: "26", dtime: "10:00" });
+    setF({ name: "", designation: "", department: "", phone: "", sal: "", wd: "30", dtime: "10:00" });
     onDone();
   }
 

@@ -14,7 +14,7 @@ type Form = {
 };
 const blank = (): Form => ({
   id: null, name: "", phone: "", department_id: "", pay_type: "Monthly", pay_amount: "", join_date: karachiDate(),
-  device_user_id: "", shift_id: "", own_start: "", own_end: "", working_days_per_month: "26", late_cut_enabled: true, overtime_enabled: true, overtime_multiplier: "1",
+  device_user_id: "", shift_id: "", own_start: "", own_end: "", working_days_per_month: "30", late_cut_enabled: true, overtime_enabled: true, overtime_multiplier: "1",
 });
 const canonicalPay = (v: string | null) => {
   const s = (v ?? "").toLowerCase();
@@ -65,7 +65,7 @@ export default function StaffTab() {
       id: s.id, name: s.name, phone: s.phone ?? "", department_id: s.department_id ?? "", pay_type: canonicalPay(s.pay_type),
       pay_amount: s.pay_amount == null ? "" : String(s.pay_amount), join_date: s.join_date ?? "",
       device_user_id: c?.device_user_id ?? "", shift_id: c?.shift_id ?? "", own_start: "", own_end: "",
-      working_days_per_month: String(c?.working_days_per_month ?? 26), late_cut_enabled: c?.late_cut_enabled ?? true,
+      working_days_per_month: String(c?.working_days_per_month ?? 30), late_cut_enabled: c?.late_cut_enabled ?? true,
       overtime_enabled: c?.overtime_enabled ?? true, overtime_multiplier: String(c?.overtime_multiplier ?? 1),
     });
   }
@@ -96,7 +96,7 @@ export default function StaffTab() {
     }
     const up = await supabase.from("att_employee_settings").upsert({
       employee_id: (res.data as { id: string }).id, device_user_id: form.device_user_id.trim() || null, shift_id: shiftId,
-      working_days_per_month: Number(form.working_days_per_month) || 26, late_cut_enabled: form.late_cut_enabled,
+      working_days_per_month: Number(form.working_days_per_month) || 30, late_cut_enabled: form.late_cut_enabled,
       overtime_enabled: form.overtime_enabled, overtime_multiplier: Number(form.overtime_multiplier) || 0, updated_at: new Date().toISOString(),
     }, { onConflict: "employee_id" });
     setBusy(false);
