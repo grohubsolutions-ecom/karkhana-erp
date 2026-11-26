@@ -24,6 +24,7 @@ export default function DarazFinancePage() {
   const [stmts, setStmts] = useState<Stmt[]>([]);
   const [awaiting, setAwaiting] = useState<Row[]>([]);
   const [loading, setLoading] = useState(true);
+  const [coverFrom, setCoverFrom] = useState<string | null>(null);
   const [err, setErr] = useState("");
   const reqId = useRef(0);
 
@@ -32,13 +33,23 @@ export default function DarazFinancePage() {
     const my = ++reqId.current;
     setLoading(true); setErr("");
     const [from, to] = rangeDates(preset, cf, ct);
+    /* Only orders from the period the uploaded statements cover can be "awaiting
+       payout": an order delivered a year ago was paid in a statement that was
+       never uploaded, not left unpaid. Window = earliest statement line − 14 days. */
+    const first = await supabase.from("daraz_statement_lines").select("txn_date")
+      .not("txn_date", "is", null).order("txn_date", { ascending: true }).limit(1);
+    const firstTxn = (first.data as { txn_date: string }[] | null)?.[0]?.txn_date;
+    const since = firstTxn ? new Date(new Date(firstTxn).getTime() - 14 * 86400000).toISOString().slice(0, 10) : null;
+    setCoverFrom(since);
+    let aq = supabase.from("daraz_orders_v")
+      .select("order_number,order_date,customer_name,paid_value,settlement,net_payout,unpaid_net,statement")
+      .eq("status_group", "Delivered").neq("settlement", "Paid")
+      .order("order_date", { ascending: true }).limit(1000);
+    if (since) aq = aq.gte("order_date", since);
     const [f, s, a] = await Promise.all([
       supabase.rpc("daraz_fee_breakdown", { p_from: from, p_to: to }),
       supabase.rpc("daraz_statements", { p_from: from, p_to: to }),
-      supabase.from("daraz_orders_v")
-        .select("order_number,order_date,customer_name,paid_value,settlement,net_payout,unpaid_net,statement")
-        .eq("status_group", "Delivered").neq("settlement", "Paid")
-        .order("order_date", { ascending: true }).limit(1000),
+      since ? aq : Promise.resolve({ data: [], error: null }),
     ]);
     if (my !== reqId.current) return;
     const e = f.error ?? s.error ?? a.error; if (e) setErr(e.message);
@@ -57,7 +68,7 @@ export default function DarazFinancePage() {
     { label: "Net", value: rs(tot("amount")) },
     { label: "Paid out", value: rs(tot("paid")) },
     { label: "Unpaid in statements", value: rs(tot("unpaid")) },
-    { label: "Delivered, payout pending", value: rs(awaitVal), sub: `${awaiting.length} orders · all dates` },
+    { label: "Delivered, payout pending", value: rs(awaitVal), sub: `${awaiting.length} orders${coverFrom ? ` · since ${coverFrom}` : ""}` },
   ];
 
   function doExport() {
