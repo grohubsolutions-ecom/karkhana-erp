@@ -48,7 +48,7 @@ const STATEMENT_COLS: Record<string, string[]> = {
   txn_number: ["Transaction Number", "Transaction No", "Transaction No.", "Transaction ID"],
   details: ["Details", "Description"],
   seller_sku: ["Seller SKU", "SellerSku"],
-  amount: ["Amount", "Amount (PKR)", "Amount(PKR)", "Amount (Rs)", "Amount Incl VAT"],
+  amount: ["Amount", "Amount (PKR)", "Amount(PKR)", "Amount (Rs)", "Amount Incl VAT", "Amount(Include Tax)", "Amount (Include Tax)"],
   vat: ["VAT in Amount", "VAT", "VAT Amount"],
   wht: ["WHT Amount", "WHT", "Withholding Tax"],
   statement: ["Statement", "Statement Period", "Statement Number", "Statement Name"],
@@ -184,7 +184,10 @@ export async function parseDaraz(grid: string[][]): Promise<ParsedFile | null> {
       const amountTxt = get(r, "amount");
       if (!amountTxt && !get(r, "fee_name")) continue;
       const parts = ["txn_date", "txn_type", "fee_name", "txn_number", "order_number", "order_item_id", "seller_sku", "amount", "details", "reference"]
-        .map((f) => (f === "txn_date" ? pkDate(get(r, f)) ?? get(r, f) : f === "amount" ? String(money(amountTxt)) : get(r, f)));
+        /* Seller SKU stays out of the key: the first statement files had no
+           SKU column, and the same line must hash the same whichever export
+           it arrives in, or re-uploading an overlapping period would add it twice. */
+        .map((f) => (f === "txn_date" ? pkDate(get(r, f)) ?? get(r, f) : f === "amount" ? String(money(amountTxt)) : f === "seller_sku" ? "" : get(r, f)));
       const base = parts.join("|");
       const n = (seen.get(base) ?? 0) + 1; seen.set(base, n);
       rows.push({
