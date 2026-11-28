@@ -108,6 +108,8 @@ export const ROUTE_PERMS: Record<string, string[] | null> = {
   /* H322 — calling agent. hub.calling.work is the agent's key; .manage is the
      office that turns his answers into orders. */
   "/online/calling": ["hub.calling.work", "hub.calling.manage"],
+  /* H330 — WhatsApp inbox. .view reads chats; .reply also writes to customers. */
+  "/online/whatsapp": ["hub.whatsapp.view", "hub.whatsapp.reply"],
   "/online/finance": ["hub.finance.view", "hub.finance.manage"],
   "/online/attendance": ["hub.attendance.view", "hub.attendance.manage"],
   "/online/employees": ["hub.attendance.view", "hub.attendance.manage"],
