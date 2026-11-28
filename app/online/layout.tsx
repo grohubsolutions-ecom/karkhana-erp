@@ -44,7 +44,7 @@ export default function OnlineLayout({ children }: { children: React.ReactNode }
   const { ready, can } = usePermissions();
   const callingOnly = ready && isCallingOnly(can);
   useEffect(() => {
-    if (callingOnly && !path.startsWith("/online/calling")) router.replace("/online/calling");
+    if (callingOnly && !path.startsWith("/online/calling") && !path.startsWith("/online/whatsapp")) router.replace("/online/calling");
   }, [callingOnly, path, router]);
   useEffect(() => { setMenu(false); }, [path]);
   useEffect(() => {
