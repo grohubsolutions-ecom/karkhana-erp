@@ -122,6 +122,10 @@ Deno.serve(async (req) => {
 
     const { data: chat } = await admin.from("online_wa_chats").select("*").eq("phone", phone).maybeSingle();
     const store = (body.store as string) || chat?.store_code || "LM";
+    /* A brand-new chat has no row yet; the inbox passes the order it was
+       started from, so the template's buttons can still tag Shopify. */
+    const orderId: string | null = chat?.order_id ?? (body.order_id ? String(body.order_id) : null);
+    const orderName: string | null = chat?.order_name ?? (body.order_name ? String(body.order_name) : null);
     const phoneId = phoneIdFor(store);
     if (!phoneId) return json({ ok: false, error: `no WhatsApp number set for ${store}` }, 500);
     const windowOpen = !!chat?.last_in_at && Date.now() - new Date(chat.last_in_at).getTime() < WINDOW_MS;
@@ -132,7 +136,7 @@ Deno.serve(async (req) => {
     const record = async (row: Record<string, unknown>) => {
       const { data, error } = await admin.from("online_wa_messages").insert({
         phone, store_code: store, dir: "out", status: "sent", sent_by: who.user.id, sent_by_name: myName,
-        order_id: chat?.order_id ?? null, order_name: chat?.order_name ?? null, ...row,
+        order_id: orderId, order_name: orderName, ...row,
       }).select("*").single();
       if (error) throw new Error(error.message);
       return data;
@@ -178,10 +182,10 @@ Deno.serve(async (req) => {
       /* Confirm / Cancel on the order template must carry the order, or a tap
          from the inbox-sent copy could not be tied back to Shopify. */
       const buttons: string[] = Array.isArray(body.buttons) ? body.buttons.map(String) : [];
-      if (name === "order_confirmation" && chat?.order_id) {
+      if (name === "order_confirmation" && orderId) {
         ["confirm", "cancel"].forEach((verb, i) => components.push({
           type: "button", sub_type: "quick_reply", index: String(i),
-          parameters: [{ type: "payload", payload: `${verb}:${store}:${chat.order_id}` }],
+          parameters: [{ type: "payload", payload: `${verb}:${store}:${orderId}` }],
         }));
       }
       const template: Record<string, unknown> = { name, language: { code: lang } };

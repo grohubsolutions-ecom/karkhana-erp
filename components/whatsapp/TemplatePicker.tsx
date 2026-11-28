@@ -58,6 +58,7 @@ export default function TemplatePicker({ chat, amount, onClose, onSent }: {
     setBusy(true); setErr(null);
     const r = await waSend({
       action: "template", phone: chat.phone, template: pick.name, language: pick.language,
+      store: chat.store_code ?? undefined, order_id: chat.order_id ?? undefined, order_name: chat.order_name ?? undefined,
       params: vals, preview: [pick.header, preview].filter(Boolean).join("\n"),
       buttons: pick.buttons.filter((b) => b.type === "QUICK_REPLY").map((b) => b.text),
     });
