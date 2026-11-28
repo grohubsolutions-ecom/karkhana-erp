@@ -1,0 +1,134 @@
+/* H330 — WhatsApp inbox. Colours follow WhatsApp Web (light and dark) so staff
+   who use WhatsApp all day feel at home. Every motion is short (≤180 ms) and
+   uses transform/opacity only, so it stays smooth on a cheap Android phone. */
+
+.wa-root {
+  --wa-panel: #ffffff;
+  --wa-panel-2: #f0f2f5;
+  --wa-line: #e9edef;
+  --wa-ink: #111b21;
+  --wa-sub: #667781;
+  --wa-hover: #f5f6f6;
+  --wa-active: #f0f2f5;
+  --wa-green: #00a884;
+  --wa-green-dark: #008069;
+  --wa-chat-bg: #efeae2;
+  --wa-in: #ffffff;
+  --wa-out: #d9fdd3;
+  --wa-pill: #ffffff;
+  --wa-doodle: rgba(0, 0, 0, 0.045);
+  --wa-input: #ffffff;
+}
+.dark .wa-root {
+  --wa-panel: #111b21;
+  --wa-panel-2: #202c33;
+  --wa-line: #222d34;
+  --wa-ink: #e9edef;
+  --wa-sub: #8696a0;
+  --wa-hover: #202c33;
+  --wa-active: #2a3942;
+  --wa-green: #00a884;
+  --wa-green-dark: #00a884;
+  --wa-chat-bg: #0b141a;
+  --wa-in: #202c33;
+  --wa-out: #005c4b;
+  --wa-pill: #182229;
+  --wa-doodle: rgba(255, 255, 255, 0.03);
+  --wa-input: #2a3942;
+}
+
+.wa-root { color: var(--wa-ink); }
+.wa-panel { background: var(--wa-panel); }
+.wa-panel-2 { background: var(--wa-panel-2); }
+.wa-line { border-color: var(--wa-line); }
+.wa-sub { color: var(--wa-sub); }
+.wa-green { color: var(--wa-green); }
+.wa-bg-green { background: var(--wa-green); }
+
+/* The chat wallpaper: a soft doodle made of dots and rings, no image file. */
+.wa-wall {
+  background-color: var(--wa-chat-bg);
+  background-image:
+    radial-gradient(circle at 20px 20px, var(--wa-doodle) 2.2px, transparent 2.6px),
+    radial-gradient(circle at 60px 50px, transparent 5px, var(--wa-doodle) 5.5px, var(--wa-doodle) 6.6px, transparent 7px),
+    radial-gradient(circle at 95px 15px, var(--wa-doodle) 1.6px, transparent 2px);
+  background-size: 120px 80px;
+}
+
+/* chat list rows */
+.wa-row { transition: background-color 0.12s ease; }
+.wa-row:hover { background: var(--wa-hover); }
+.wa-row[data-on="true"] { background: var(--wa-active); }
+
+/* bubbles */
+.wa-bubble {
+  position: relative;
+  max-width: min(78%, 560px);
+  border-radius: 7.5px;
+  box-shadow: 0 1px 0.5px rgba(11, 20, 26, 0.13);
+  font-size: 14.2px;
+  line-height: 19px;
+}
+.wa-in .wa-bubble { background: var(--wa-in); }
+.wa-out .wa-bubble { background: var(--wa-out); }
+.wa-tail.wa-in .wa-bubble { border-top-left-radius: 0; }
+.wa-tail.wa-out .wa-bubble { border-top-right-radius: 0; }
+.wa-tail.wa-in .wa-bubble::before,
+.wa-tail.wa-out .wa-bubble::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  width: 8px;
+  height: 13px;
+}
+.wa-tail.wa-in .wa-bubble::before {
+  left: -8px;
+  background: var(--wa-in);
+  clip-path: polygon(100% 0, 0 0, 100% 100%);
+}
+.wa-tail.wa-out .wa-bubble::before {
+  right: -8px;
+  background: var(--wa-out);
+  clip-path: polygon(0 0, 100% 0, 0 100%);
+}
+.wa-meta { color: var(--wa-sub); font-size: 11px; line-height: 15px; }
+.dark .wa-out .wa-meta { color: rgba(233, 237, 239, 0.6); }
+
+.wa-tplbtn {
+  background: var(--wa-in);
+  color: #027eb5;
+  box-shadow: 0 1px 0.5px rgba(11, 20, 26, 0.13);
+}
+.wa-out .wa-tplbtn { background: var(--wa-out); }
+.dark .wa-tplbtn { color: #53bdeb; }
+
+.wa-pill {
+  background: var(--wa-pill);
+  color: var(--wa-sub);
+  box-shadow: 0 1px 0.5px rgba(11, 20, 26, 0.13);
+}
+
+.wa-input { background: var(--wa-input); }
+
+/* motion */
+@keyframes wa-pop { from { opacity: 0; transform: translateY(6px) scale(0.98); } }
+@keyframes wa-fade { from { opacity: 0; } }
+@keyframes wa-slide-in { from { transform: translateX(28px); opacity: 0.6; } }
+@keyframes wa-up { from { transform: translateY(12px); opacity: 0; } }
+.wa-pop { animation: wa-pop 0.16s cubic-bezier(0.2, 0.9, 0.3, 1.2) backwards; }
+.wa-fade { animation: wa-fade 0.14s ease-out backwards; }
+.wa-slide { animation: wa-slide-in 0.18s cubic-bezier(0.22, 1, 0.36, 1) backwards; }
+.wa-up { animation: wa-up 0.16s cubic-bezier(0.22, 1, 0.36, 1) backwards; }
+.wa-press { transition: transform 0.08s ease, background-color 0.12s ease; }
+.wa-press:active { transform: scale(0.94); }
+
+@keyframes wa-flash { 0%, 100% { background: transparent; } 30% { background: rgba(0, 168, 132, 0.18); } }
+.wa-flash { animation: wa-flash 1.2s ease; border-radius: 8px; }
+
+.wa-scroll { overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: rgba(134, 150, 160, 0.4) transparent; }
+.wa-scroll::-webkit-scrollbar { width: 6px; }
+.wa-scroll::-webkit-scrollbar-thumb { background: rgba(134, 150, 160, 0.4); border-radius: 3px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .wa-pop, .wa-fade, .wa-slide, .wa-up, .wa-flash { animation: none; }
+}

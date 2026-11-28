@@ -1,4 +1,4 @@
-import { LayoutDashboard, ClipboardList, Truck, Wallet, CalendarCheck, Users, Undo2, AlertTriangle, PackageSearch, Gauge, PhoneCall, Headphones, Store, Upload, type LucideIcon } from "lucide-react";
+import { LayoutDashboard, ClipboardList, Truck, Wallet, CalendarCheck, Users, Undo2, AlertTriangle, PackageSearch, Gauge, PhoneCall, Headphones, Store, Upload, MessageCircle, type LucideIcon } from "lucide-react";
 import { requiredFor } from "@/lib/access";
 
 /* ONE LIST OF HUB PLACES, READ BY BOTH THE DESKTOP SIDEBAR AND THE PHONE BARS.
@@ -34,6 +34,9 @@ export const HUB_NAV: HubNavItem[] = [
      Create / Cancel / Wait and the agent's bonus. Its own section because the
      agent opens nothing else in the Hub. */
   { label: "Calling Agent", short: "Calling", href: "/online/calling", Icon: Headphones },
+  /* H330 — the WhatsApp inbox: every customer chat on the order numbers, the
+     bot's confirmations and the customers' answers, and replies from staff. */
+  { label: "WhatsApp", short: "WhatsApp", href: "/online/whatsapp", Icon: MessageCircle },
   /* Disputes are a separate job with its own worklist, not a tab inside the
      settlements screen. */
   { label: "Finance", short: "Finance", href: "/online/finance", Icon: Wallet, children: [
@@ -70,7 +73,7 @@ export const HUB_NAV: HubNavItem[] = [
 const OTHER_HUB = [
   "hub.dashboard.view", "hub.orders.view", "hub.orders.manage", "hub.logistics.view", "hub.logistics.manage",
   "hub.finance.view", "hub.finance.manage", "hub.attendance.view", "hub.attendance.manage",
-  "hub.articles.view", "hub.articles.manage", "hub.calling.manage", "hub.whatsapp.view", "returns.rescue", "returns.print",
+  "hub.articles.view", "hub.articles.manage", "hub.calling.manage", "hub.whatsapp.view", "hub.whatsapp.reply", "returns.rescue", "returns.print",
   "hub.daraz.view", "hub.daraz.manage",
 ];
 export function isCallingOnly(can: (req: string[] | null) => boolean): boolean {

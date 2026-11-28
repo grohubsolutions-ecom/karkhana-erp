@@ -30,7 +30,7 @@ const DEPARTMENTS = [
     needs: ["wages.desk"] },
   { href: "/online", title: "Hub Department", subtitle: "Online orders · Little Minors, TopShop, Trenzee, Daraz", icon: ShoppingBag, tint: "periwinkle", anim: "bag", chip: "dark:bg-periwinkle",
     needs: ["hub.dashboard.view", "hub.orders.view", "hub.logistics.view", "hub.finance.view", "hub.attendance.view",
-            "hub.calling.work", "hub.calling.manage", "hub.daraz.view", "hub.daraz.manage"] },
+            "hub.calling.work", "hub.calling.manage", "hub.daraz.view", "hub.daraz.manage", "hub.whatsapp.view"] },
   /* These two permissions never existed. The table has retail.access and, since
      0119, the retail.<area>.<verb> set — "retail.view" and "retail.manage" are
      neither, so can() returned false for every normal user and this box only
