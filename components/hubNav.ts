@@ -73,7 +73,7 @@ export const HUB_NAV: HubNavItem[] = [
 const OTHER_HUB = [
   "hub.dashboard.view", "hub.orders.view", "hub.orders.manage", "hub.logistics.view", "hub.logistics.manage",
   "hub.finance.view", "hub.finance.manage", "hub.attendance.view", "hub.attendance.manage",
-  "hub.articles.view", "hub.articles.manage", "hub.calling.manage", "hub.whatsapp.view", "hub.whatsapp.reply", "returns.rescue", "returns.print",
+  "hub.articles.view", "hub.articles.manage", "hub.calling.manage", "returns.rescue", "returns.print",
   "hub.daraz.view", "hub.daraz.manage",
 ];
 export function isCallingOnly(can: (req: string[] | null) => boolean): boolean {
@@ -81,7 +81,10 @@ export function isCallingOnly(can: (req: string[] | null) => boolean): boolean {
 }
 
 export function visibleNav(can: (req: string[] | null) => boolean): HubNavItem[] {
-  if (isCallingOnly(can)) return HUB_NAV.filter((n) => n.href === "/online/calling");
+  /* H330 — an agent may also hold the WhatsApp inbox; that is the only other
+     place an agent-only login sees. */
+  if (isCallingOnly(can)) return HUB_NAV.filter((n) =>
+    n.href === "/online/calling" || (n.href === "/online/whatsapp" && can(["hub.whatsapp.view", "hub.whatsapp.reply"])));
   return HUB_NAV.map((n) => {
     if (n.children) {
       const kids = n.children.filter((c) => can(requiredFor(c.href)));
