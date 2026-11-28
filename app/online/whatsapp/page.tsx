@@ -25,9 +25,10 @@
 --------------------------------------------------------------------------- */
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   Search, ArrowLeft, MoreVertical, Paperclip, Send, Smile, X, FileText, Pin, Archive, ArchiveRestore,
-  MailWarning, ChevronDown, Info, Loader2, MessageCircle, Clock, Zap, Image as ImageIcon, RefreshCw, Lock,
+  MailWarning, ChevronDown, Info, Loader2, MessageCircle, Clock, Zap, Image as ImageIcon, RefreshCw, Lock, SquarePen, UserPlus, Package,
 } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { usePermissions } from "@/lib/usePermissions";
@@ -60,6 +61,32 @@ const EMOJI = ["😊", "😂", "❤️", "👍", "🙏", "👌", "🎉", "😍",
 
 const PAGE = 120;
 
+/* Phone width — the open chat is drawn straight onto <body> there, so no
+   page wrapper (animation, clipping, the page's own scroll) can stop it
+   from scrolling. */
+function useIsPhone() {
+  const [phone, setPhone] = useState(false);
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 767.98px)");
+    const on = () => setPhone(mq.matches);
+    on();
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  }, []);
+  return phone;
+}
+
+/** 03001234567 / +92 300 1234567 → 923001234567, else null */
+function toWa(input: string) {
+  let d = input.replace(/\D/g, "");
+  if (d.startsWith("0092")) d = d.slice(2);
+  if (d.startsWith("0")) d = "92" + d.slice(1);
+  if (d.startsWith("3") && d.length === 10) d = "92" + d;
+  return /^92\d{10}$/.test(d) ? d : null;
+}
+
+type OrderHit = { phone: string; name: string | null; store_code: string; order_number: string; order_id: string | null; amount: number | null };
+
 export default function WhatsAppInbox() {
   const { ready, can } = usePermissions();
   const canReply = ready && can(["hub.whatsapp.reply"]);
@@ -75,6 +102,11 @@ export default function WhatsAppInbox() {
   const [tpl, setTpl] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [, tick] = useState(0);
+  const [remote, setRemote] = useState<Chat[]>([]);
+  const [hits, setHits] = useState<OrderHit[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [newChat, setNewChat] = useState(false);
+  const isPhone = useIsPhone();
 
   const chat = useMemo(() => chats?.find((c) => c.phone === sel) ?? null, [chats, sel]);
   const selRef = useRef<string | null>(null);
@@ -196,11 +228,62 @@ export default function WhatsAppInbox() {
     return () => window.removeEventListener("keydown", k);
   }, [tpl, info, sel]);
 
+  /* ── search the whole history, not only the chats loaded on screen, and
+        find customers by order number or phone to start a new chat ───── */
+  useEffect(() => {
+    const term = q.trim();
+    if (!supabase || term.length < 3) { setRemote([]); setHits([]); setSearching(false); return; }
+    setSearching(true);
+    const t = setTimeout(async () => {
+      const digits = term.replace(/\D/g, "");
+      const tail = digits.length >= 4 ? digits.replace(/^0+/, "").replace(/^92/, "") : "";
+      const safe = term.replace(/[%,()]/g, " ");
+      const ors = [`name.ilike.%${safe}%`, `order_name.ilike.%${safe}%`];
+      if (tail) ors.push(`phone.ilike.%${tail}%`);
+      const [c, o] = await Promise.all([
+        supabase!.from("online_wa_chats").select("*").or(ors.join(",")).order("last_at", { ascending: false, nullsFirst: false }).limit(40),
+        supabase!.from("online_orders").select("store_code, order_number, shopify_order_id, customer_name, phone, phone_e164, amount, created_at")
+          .in("store_code", ["LM", "TS", "TRZ"])
+          .or([`order_number.ilike.%${safe.replace(/^#/, "")}%`, `customer_name.ilike.%${safe}%`, ...(tail ? [`phone.ilike.%${tail}%`, `phone_e164.ilike.%${tail}%`] : [])].join(","))
+          .order("created_at", { ascending: false }).limit(15),
+      ]);
+      setRemote((c.data ?? []) as Chat[]);
+      const seen = new Set<string>();
+      setHits(((o.data ?? []) as Array<Record<string, unknown>>).map((r) => ({
+        phone: toWa(String(r.phone_e164 ?? r.phone ?? "")) ?? "",
+        name: (r.customer_name as string) ?? null, store_code: String(r.store_code),
+        order_number: String(r.order_number), order_id: r.shopify_order_id ? String(r.shopify_order_id) : null,
+        amount: (r.amount as number) ?? null,
+      })).filter((h) => h.phone && !seen.has(h.store_code + h.order_number) && (seen.add(h.store_code + h.order_number), true)));
+      setSearching(false);
+    }, 300);
+    return () => clearTimeout(t);
+  }, [q]);
+
+  /** Open a chat that may not exist yet. It becomes a real chat the moment
+   *  the first template goes out (the database trigger creates the row). */
+  const startChat = useCallback((d: { phone: string; name?: string | null; store: string; order_id?: string | null; order_name?: string | null }) => {
+    const existing = chats?.find((c) => c.phone === d.phone);
+    setQ(""); setNewChat(false);
+    if (existing) { openChat(d.phone); return; }
+    const draft: Chat = {
+      phone: d.phone, name: d.name ?? null, store_code: d.store, last_text: null, last_dir: null, last_status: null,
+      last_at: null, last_in_at: null, unread: 0, pinned: false, archived: false,
+      order_id: d.order_id ?? null, order_name: d.order_name ?? null,
+    };
+    setChats((l) => [draft, ...(l ?? [])]);
+    setMsgs((all) => ({ ...all, [d.phone]: all[d.phone] ?? [] }));
+    setUnreadAtOpen(0);
+    setSel(d.phone);
+  }, [chats, openChat]);
+
   /* ── list filtering ─────────────────────────────────────────────────── */
   const shown = useMemo(() => {
     const s = q.trim().toLowerCase();
     const digits = s.replace(/\D/g, "");
-    return (chats ?? []).filter((c) => {
+    const pool = [...(chats ?? [])];
+    for (const r of remote) if (!pool.some((c) => c.phone === r.phone)) pool.push(r);
+    return pool.filter((c) => {
       if (filter === "archived" ? !c.archived : c.archived) return false;
       if (filter === "unread" && c.unread === 0) return false;
       if ((filter === "LM" || filter === "TS") && c.store_code !== filter) return false;
@@ -209,7 +292,7 @@ export default function WhatsAppInbox() {
         || (digits.length >= 3 && (c.phone.includes(digits) || ("0" + c.phone.slice(2)).includes(digits)))
         || (c.last_text ?? "").toLowerCase().includes(s);
     });
-  }, [chats, filter, q]);
+  }, [chats, filter, q, remote]);
 
   const counts = useMemo(() => ({
     unread: chats?.filter((c) => c.unread > 0 && !c.archived).length ?? 0,
@@ -241,9 +324,16 @@ export default function WhatsAppInbox() {
               <MessageCircle size={20} className="wa-green" /> WhatsApp
               <span className="rounded-full bg-black/5 px-2 text-[11px] font-medium wa-sub dark:bg-white/10">LM · TS</span>
             </div>
-            <button type="button" onClick={() => { setChats(null); setMsgs({}); loadChats(); }} className="wa-press rounded-full p-2 hover:bg-black/5 dark:hover:bg-white/10" aria-label="Refresh">
-              <RefreshCw size={17} className="wa-sub" />
-            </button>
+            <div className="flex items-center gap-1">
+              {canReply && (
+                <button type="button" onClick={() => setNewChat(true)} className="wa-press rounded-full p-2 hover:bg-black/5 dark:hover:bg-white/10" aria-label="New chat" title="New chat">
+                  <SquarePen size={18} className="wa-sub" />
+                </button>
+              )}
+              <button type="button" onClick={() => { setChats(null); setMsgs({}); loadChats(); }} className="wa-press rounded-full p-2 hover:bg-black/5 dark:hover:bg-white/10" aria-label="Refresh">
+                <RefreshCw size={17} className="wa-sub" />
+              </button>
+            </div>
           </div>
 
           <div className="shrink-0 px-3 pb-2 pt-2">
@@ -282,14 +372,20 @@ export default function WhatsAppInbox() {
               </div>
             )}
             {shown.map((c) => (
-              <ChatRow key={c.phone} c={c} on={c.phone === sel} onOpen={() => openChat(c.phone)} onFlag={flag} />
+              <ChatRow key={c.phone} c={c} on={c.phone === sel}
+                onOpen={() => ((chats ?? []).some((x) => x.phone === c.phone) ? openChat(c.phone) : startChat({ phone: c.phone, name: c.name, store: c.store_code ?? "LM", order_id: c.order_id, order_name: c.order_name }))}
+                onFlag={flag} />
             ))}
+            {q.trim().length >= 3 && canReply && (
+              <StartList q={q} hits={hits} searching={searching}
+                known={new Set(shown.map((c) => c.phone))} onStart={startChat} />
+            )}
           </div>
         </section>
 
         {/* ── conversation ──────────────────────────────────────────── */}
         {chat ? (
-          <div className="fixed inset-0 z-[70] flex md:static md:z-auto md:min-w-0 md:flex-1">
+          <ChatShell phone={isPhone}>
             <Conversation
               key={chat.phone}
               chat={chat}
@@ -311,7 +407,7 @@ export default function WhatsAppInbox() {
                 <CustomerPanel chat={chat} onClose={() => setInfo(false)} />
               </div>
             )}
-          </div>
+          </ChatShell>
         ) : (
           <div className="wa-panel-2 hidden flex-1 flex-col items-center justify-center gap-4 border-b-[6px] border-[#25d366] text-center md:flex">
             <div className="flex h-24 w-24 items-center justify-center rounded-full bg-[#25d366]/12">
@@ -331,11 +427,107 @@ export default function WhatsAppInbox() {
           onSent={() => { setTpl(false); flash("Template sent"); }} />
       )}
 
+      {canReply && !chat && (
+        <button type="button" onClick={() => setNewChat(true)} aria-label="New chat"
+          className="wa-press wa-pop wa-bg-green fixed bottom-[calc(88px+env(safe-area-inset-bottom))] right-4 z-[60] flex h-14 w-14 items-center justify-center rounded-2xl text-white shadow-lg md:hidden">
+          <SquarePen size={22} />
+        </button>
+      )}
+
+      {newChat && <NewChatDialog onClose={() => setNewChat(false)} onStart={startChat} />}
+
       {toast && (
         <div className="wa-up fixed bottom-[calc(90px+env(safe-area-inset-bottom))] left-1/2 z-[95] -translate-x-1/2 rounded-lg bg-[#111b21] px-4 py-2.5 text-[13.5px] text-white shadow-lg md:bottom-8 dark:bg-[#e9edef] dark:text-[#111b21]">
           {toast}
         </div>
       )}
+    </div>
+  );
+}
+
+/* ── where the open chat lives ───────────────────────────────────────────
+   Computer: beside the list. Phone: a full-screen layer drawn on <body>,
+   with an exact screen height, so the message list is the only thing that
+   scrolls and nothing in the page can trap the finger. */
+function ChatShell({ phone, children }: { phone: boolean; children: React.ReactNode }) {
+  if (!phone) return <div className="relative flex min-w-0 flex-1">{children}</div>;
+  return createPortal(
+    <div className="wa-root fixed inset-0 z-[70] flex bg-[var(--wa-panel)]" style={{ height: "100dvh" }}>{children}</div>,
+    document.body,
+  );
+}
+
+/* ── start a chat with a customer who has none yet ───────────────────── */
+function StartList({ q, hits, searching, known, onStart }: {
+  q: string; hits: OrderHit[]; searching: boolean; known: Set<string>;
+  onStart: (d: { phone: string; name?: string | null; store: string; order_id?: string | null; order_name?: string | null }) => void;
+}) {
+  const typed = toWa(q);
+  const fresh = hits.filter((h) => !known.has(h.phone));
+  const showTyped = typed && !known.has(typed) && !fresh.some((h) => h.phone === typed);
+  if (!searching && !fresh.length && !showTyped) return null;
+  return (
+    <div className="wa-fade border-t-[8px] border-[var(--wa-panel-2)] pb-3">
+      <div className="flex items-center gap-2 px-4 pb-1 pt-3 text-[13px] font-medium wa-green">
+        <UserPlus size={15} /> Start a new chat {searching && <Loader2 size={13} className="animate-spin wa-sub" />}
+      </div>
+      {fresh.map((h) => (
+        <button key={h.store_code + h.order_number} type="button" onClick={() => onStart({ phone: h.phone, name: h.name, store: h.store_code, order_id: h.order_id, order_name: h.order_number })}
+          className="wa-row flex w-full items-center gap-3 px-4 py-2.5 text-left">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#00a884]/12"><Package size={18} className="wa-green" /></div>
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-[15px]">{h.name || prettyPhone(h.phone)}</div>
+            <div className="truncate text-[12.5px] wa-sub">{h.order_number} · {prettyPhone(h.phone)}{h.amount != null ? ` · Rs ${Math.round(h.amount).toLocaleString("en-PK")}` : ""}</div>
+          </div>
+          <span className={`shrink-0 rounded px-1.5 text-[10px] font-semibold ${STORE[h.store_code]?.tone ?? ""}`}>{STORE[h.store_code]?.short ?? h.store_code}</span>
+        </button>
+      ))}
+      {showTyped && (
+        <div className="flex items-center gap-3 px-4 py-2.5">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#00a884]/12"><UserPlus size={18} className="wa-green" /></div>
+          <div className="min-w-0 flex-1 text-[15px]">{prettyPhone(typed!)}</div>
+          {(["LM", "TS"] as const).map((st) => (
+            <button key={st} type="button" onClick={() => onStart({ phone: typed!, store: st })}
+              className={`wa-press rounded-full px-3 py-1 text-[12px] font-semibold ${STORE[st].tone}`}>{STORE[st].short}</button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function NewChatDialog({ onClose, onStart }: {
+  onClose: () => void;
+  onStart: (d: { phone: string; store: string }) => void;
+}) {
+  const [num, setNum] = useState("");
+  const [store, setStore] = useState<"LM" | "TS">("LM");
+  const wa = toWa(num);
+  return (
+    <div className="wa-fade wa-root fixed inset-0 z-[85] flex items-end justify-center bg-black/40 md:items-center" onClick={onClose}>
+      <div className="wa-up wa-panel w-full max-w-sm rounded-t-2xl p-5 shadow-2xl md:rounded-2xl" onClick={(e) => e.stopPropagation()}>
+        <div className="mb-4 flex items-center gap-2 text-[17px] font-medium"><SquarePen size={18} className="wa-green" /> New chat</div>
+        <label className="mb-1 block text-[12.5px] wa-sub">Customer WhatsApp number</label>
+        <input autoFocus inputMode="tel" value={num} onChange={(e) => setNum(e.target.value)} placeholder="0300 1234567"
+          onKeyDown={(e) => { if (e.key === "Enter" && wa) onStart({ phone: wa, store }); }}
+          className="w-full rounded-lg border wa-line bg-transparent px-3 py-2.5 text-[16px] outline-none focus:border-[#00a884]" />
+        {num && !wa && <div className="mt-1 text-[12px] text-[#ea0038]">Enter a Pakistani mobile number, e.g. 0300 1234567</div>}
+        <label className="mb-1 mt-4 block text-[12.5px] wa-sub">Send from</label>
+        <div className="grid grid-cols-2 gap-2">
+          {(["LM", "TS"] as const).map((st) => (
+            <button key={st} type="button" onClick={() => setStore(st)}
+              className={`wa-press rounded-xl border-2 px-3 py-2.5 text-[14px] font-medium ${store === st ? "border-[#00a884]" : "wa-line"}`}>
+              {STORE[st].name}<div className="text-[11px] font-normal wa-sub">{st === "LM" ? "0301-8481401" : "0307-9542935"}</div>
+            </button>
+          ))}
+        </div>
+        <p className="mt-3 text-[12px] wa-sub">A new chat starts with a template. Free text opens once the customer replies.</p>
+        <div className="mt-4 flex gap-2">
+          <button type="button" onClick={onClose} className="wa-press flex-1 rounded-full border wa-line py-2.5 text-[14px]">Cancel</button>
+          <button type="button" disabled={!wa} onClick={() => wa && onStart({ phone: wa, store })}
+            className="wa-press wa-bg-green flex-1 rounded-full py-2.5 text-[14px] font-medium text-white disabled:opacity-50">Start chat</button>
+        </div>
+      </div>
     </div>
   );
 }
