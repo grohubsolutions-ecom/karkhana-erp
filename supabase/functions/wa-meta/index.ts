@@ -266,14 +266,20 @@ Deno.serve(async (req) => {
           else if (/^(nahi|nai|no|n|cancel|nahin)\b/.test(t)) decision = "cancel";
         }
 
+        /* Typed text, or an old payload without a store: tie it to the last
+           order message we sent this number — the confirmation OR the
+           dispatch note. A "theek hai" after a dispatch note is a thank-you,
+           not a confirmation, so it is kept as a plain reply. */
         if (!orderId || !store) {
           let q = db.from("online_wa_events")
-            .select("shopify_order_id, store_code, order_name").eq("phone", from).eq("kind", "confirm_sent")
+            .select("shopify_order_id, store_code, order_name, kind").eq("phone", from)
+            .in("kind", ["confirm_sent", "dispatch_sent"]).eq("status", "sent")
             .not("shopify_order_id", "is", null);
           if (orderId) q = q.eq("shopify_order_id", orderId);
           const prior = await q.order("created_at", { ascending: false }).limit(1).maybeSingle();
           orderId = orderId ?? prior.data?.shopify_order_id ?? null;
           store = store ?? prior.data?.store_code ?? null;
+          if (m.type === "text" && prior.data?.kind === "dispatch_sent") decision = null;
         }
         store = store ?? numberStore;
 
