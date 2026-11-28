@@ -8,10 +8,11 @@
 //      wa-media bucket (Meta's own media links expire after a few minutes).
 //   2. Ticks update the status of the message they belong to.
 //   3. Order answers go back to Shopify:
-//        tap Confirm      → tag WA-CONFIRMED
-//        tap Cancel       → tag WA-CANCELLED
+//        tap Confirm      → tag "✅ WA Confirmed"
+//        tap Cancel       → tag "❌ WA Cancelled"
 //        "haan" / "nahi"  → same, typed
-//        anything else    → tag WA-REPLY + text appended to the order note
+//        anything else    → tag "💬 WA Reply" + text appended to the order note
+//      Shopify cannot colour a tag, so the emoji is the colour.
 //
 // ONE NUMBER FOR ALL STORES
 //   LM and TS can send from the same number, so the number cannot say which
@@ -37,6 +38,7 @@ const STORES = ["LM", "TS", "TRZ"];
 const API = env("SHOPIFY_API_VERSION") || "2026-01";
 const GRAPH = "https://graph.facebook.com/v21.0";
 const META_TOKEN = () => env("META_TOKEN") || env("META_WA_TOKEN");
+const TAG = { confirm: "✅ WA Confirmed", cancel: "❌ WA Cancelled", reply: "💬 WA Reply" };
 
 const db = createClient(env("SUPABASE_URL"), env("SUPABASE_SERVICE_ROLE_KEY"), {
   auth: { persistSession: false },
@@ -323,10 +325,10 @@ Deno.serve(async (req) => {
         }
 
         try {
-          if (decision === "confirm")      await tagOrder(store, orderId, "WA-CONFIRMED");
-          else if (decision === "cancel")  await tagOrder(store, orderId, "WA-CANCELLED");
+          if (decision === "confirm")      await tagOrder(store, orderId, TAG.confirm);
+          else if (decision === "cancel")  await tagOrder(store, orderId, TAG.cancel);
           else {
-            await tagOrder(store, orderId, "WA-REPLY");
+            await tagOrder(store, orderId, TAG.reply);
             await appendNote(store, orderId, d.body || `[${d.kind}]`);
           }
           await db.from("online_wa_events").insert(log);

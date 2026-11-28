@@ -97,9 +97,9 @@ export default function CustomerPanel({ chat, onClose, onOrders }: {
                     {o.courier && <span className="flex items-center gap-1 wa-sub"><Truck size={12} />{o.courier}{o.tracking_id ? ` · ${o.tracking_id}` : ""}</span>}
                     <span className="ml-auto wa-sub">{new Date(o.created_at).toLocaleDateString("en-GB", { day: "2-digit", month: "short" })}</span>
                   </div>
-                  {o.tags?.some((t) => t.startsWith("WA-")) && (
+                  {o.tags?.some((t) => /\bWA\b/.test(t)) && (
                     <div className="mt-1.5 flex flex-wrap gap-1">
-                      {o.tags.filter((t) => t.startsWith("WA-")).map((t) => (
+                      {o.tags.filter((t) => /\bWA\b/.test(t)).map((t) => (
                         <span key={t} className="rounded bg-[#00a884]/12 px-1.5 text-[10.5px] font-medium text-[#008069] dark:text-[#06cf9c]">{t}</span>
                       ))}
                     </div>
