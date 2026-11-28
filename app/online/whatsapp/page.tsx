@@ -359,7 +359,7 @@ export default function WhatsAppInbox() {
             </div>
           </div>
 
-          <div className="wa-scroll min-h-0 flex-1 overflow-y-auto">
+          <div className="wa-list min-h-0 flex-1">
             {!chats && Array.from({ length: 7 }).map((_, i) => (
               <div key={i} className="flex items-center gap-3 px-3 py-3">
                 <div className="h-[49px] w-[49px] animate-pulse rounded-full bg-black/5 dark:bg-white/5" />

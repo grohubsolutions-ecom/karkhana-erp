@@ -132,3 +132,11 @@
 @media (prefers-reduced-motion: reduce) {
   .wa-pop, .wa-fade, .wa-slide, .wa-up, .wa-flash { animation: none; }
 }
+
+/* The chat list. On a computer it scrolls inside its own column. On a phone
+   it is NOT a scroll box: the page itself scrolls, like every other Hub page.
+   (An empty scroll box with overscroll-behavior: contain swallowed the swipe,
+   so the list could not move at all.) */
+@media (min-width: 768px) {
+  .wa-list { overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: rgba(134, 150, 160, 0.4) transparent; }
+}
