@@ -156,6 +156,12 @@ export function normTime(s: unknown): string {
 /** Rows as raw arrays. The sales parser needs positions, not a keyed object. */
 export function parseCsvRows(text: string): string[][] {
   const clean = text.replace(/^﻿/, "");
+  /* The separator is read from the header line. Most exports use commas, but
+     Daraz's Income Details CSV (since Nov 2026) uses semicolons, and a CSV
+     saved by Excel in some regions uses them too. */
+  const first = clean.slice(0, clean.search(/\r?\n|$/));
+  const count = (c: string) => first.split(c).length - 1;
+  const sep = count(";") > count(",") && count(";") > count("\t") ? ";" : count("\t") > count(",") ? "\t" : ",";
   const rows: string[][] = [];
   let row: string[] = [], cur = "", q = false;
   for (let i = 0; i < clean.length; i++) {
@@ -165,7 +171,7 @@ export function parseCsvRows(text: string): string[][] {
       else cur += ch;
     } else {
       if (ch === '"') q = true;
-      else if (ch === ",") { row.push(cur); cur = ""; }
+      else if (ch === sep) { row.push(cur); cur = ""; }
       else if (ch === "\n") { row.push(cur); rows.push(row); row = []; cur = ""; }
       else if (ch === "\r") { /* skip */ }
       else cur += ch;
