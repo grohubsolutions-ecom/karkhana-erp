@@ -1,6 +1,6 @@
 // Supabase Edge Function: wa-shopify
 //
-// Shopify → WhatsApp. One sender number (0303-933-3507) for every store; the
+// Shopify → WhatsApp. Each store sends from its own number (META_PHONE_ID_*); the
 // store name travels inside the message so the customer knows which brand,
 // and inside the button payload (confirm:TS:123) so wa-meta tags the right store.
 //
@@ -17,6 +17,8 @@
 //   META_TOKEN (fallback META_WA_TOKEN)  permanent system-user token
 //   META_PHONE_ID_{LM|TS|TRZ}            sender per store (fallback META_PHONE_ID_LM)
 //   WA_DRY_RUN=1                         log what would be sent, send nothing
+//   WA_LIVE_STORES=LM,TS                 stores that send for real even while
+//                                        WA_DRY_RUN=1 — go live one brand at a time
 
 import { createClient } from "npm:@supabase/supabase-js@2";
 
@@ -35,6 +37,8 @@ const TPL_CONFIRM = "order_confirmation";
 const TPL_SHIPPED = "order_shipped";
 const GRAPH = "https://graph.facebook.com/v21.0";
 const DRY = env("WA_DRY_RUN") === "1";
+const LIVE = env("WA_LIVE_STORES").toUpperCase().split(/[\s,]+/).filter(Boolean);
+const isDry = (store: string) => DRY && !LIVE.includes(store);
 
 const db = createClient(env("SUPABASE_URL"), env("SUPABASE_SERVICE_ROLE_KEY"), {
   auth: { persistSession: false },
@@ -123,7 +127,7 @@ async function sendTemplate(opts: {
     template: { name: opts.name, language: { code: "en" }, components },
   };
 
-  if (DRY) return { dry: true, id: `dry_${Date.now()}`, body };
+  if (isDry(opts.store)) return { dry: true, id: `dry_${Date.now()}`, body };
 
   const phoneId = env(`META_PHONE_ID_${opts.store}`) || env("META_PHONE_ID_LM");
   const token = env("META_TOKEN") || env("META_WA_TOKEN");
